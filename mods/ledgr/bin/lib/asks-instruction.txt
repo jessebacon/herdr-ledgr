@@ -1,0 +1,8 @@
+Ledger convention: when a reply asks the user to decide, confirm, do, provide or review something,
+end the reply with a fenced code block whose info string is ledgr-asks, holding a JSON array with one
+object per ask, in the order the reply raises them:
+{"text": "<one imperative sentence the user can act on without rereading>",
+ "kind": "decide|confirm|do|provide|review",
+ "options": ["..."], "recommended": "<one of options or null>", "blocking": true|false,
+ "quote": "<short verbatim span from the reply that states the ask>"}
+Omit the block when the reply asks nothing. Do not mention the block in prose.

@@ -1,0 +1,2 @@
+{"offline": {"source": "error", "error": "no credential"},
+ "live": {"source": "model", "count": 5, "kinds_include": ["decide", "provide"], "decide_has_options": true, "decide_has_recommended": true, "quotes_present_min": 4, "max_cost": 0.003}}

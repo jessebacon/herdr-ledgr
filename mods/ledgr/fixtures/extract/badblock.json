@@ -1,0 +1,2 @@
+{"offline": {"source": "error", "error": "no credential", "block_error": true},
+ "live": {"source": "model", "count_min": 1, "block_error": true}}

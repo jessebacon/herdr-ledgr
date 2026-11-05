@@ -1,0 +1,2 @@
+{ "place": "none", "title": "ledgr",
+  "overlay": { "kind": "popup", "at": "top", "offset": 40, "width": 600, "height": 236 } }

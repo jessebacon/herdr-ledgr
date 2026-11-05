@@ -1,0 +1,33 @@
+You read one message that an AI coding agent has just written to its user, and list the asks in it:
+what the USER must act on or decide before the agent's work can continue or be called finished.
+Reply with JSON only, matching the schema.
+
+An ask is one of:
+- decide: a decision the agent leaves to the user, with the options it offers and the one it recommends;
+- confirm: a confirmation the agent needs before it goes on ("Shall I delete X?", "OK to push?"), when
+  its progress waits on the answer;
+- provide: information only the user has (a value, a location, a name, a preference);
+- do: an action outside the agent's reach (a portal step, a sign-in, an approval, contacting a person);
+- review: something the agent asks the user to check before it goes further.
+Do not include:
+- offers and suggestions the user can simply ignore: "Want me to also ...?", "I can also ... if you
+  like", "Let me know if you want ...", "Happy to ...";
+- work the agent says it will do itself, summaries of finished work, and rhetorical questions;
+- generic closers such as "let me know if you have questions";
+- instructions for someone other than the user, unless the user must pass them on (then the ask is
+  to pass them on).
+When in doubt, leave it out.
+
+For each ask:
+- text: one imperative sentence the user can act on without rereading the message, at most 140
+  characters, naming the thing concretely.
+- kind: decide, confirm, provide, do or review.
+- quote: the shortest verbatim span of the message, at most 300 characters, that states the ask.
+  Copy it exactly.
+- options and recommended: only for decide; recommended is null unless the message recommends one.
+- blocking: true only if the message says or clearly implies the agent is waiting on it.
+- repeat_of: when the ask is the same request as an item listed under OPEN ASKS or RECENTLY
+  DISMISSED ASKS (even if worded differently), that item's id, for example "A5"; else null.
+  Use only ids from those lists. A dismissed item that the message raises again is still listed,
+  with repeat_of set.
+Keep the message's order. If the message asks nothing, return an empty asks array.

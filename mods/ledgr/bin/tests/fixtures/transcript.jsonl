@@ -1,0 +1,11 @@
+"cut-off tail of an earlier line", "uuid": "x"}
+{"type": "user", "uuid": "u1", "isSidechain": false, "sessionId": "s", "message": {"role": "user", "content": "Start the review."}}
+{"type": "assistant", "uuid": "a1", "parentUuid": "u1", "isSidechain": false, "sessionId": "s", "message": {"id": "msg_A", "content": [{"type": "text", "text": "Earlier answer."}], "stop_reason": "end_turn"}}
+{"type": "user", "uuid": "u2", "isSidechain": false, "sessionId": "s", "message": {"role": "user", "content": "Now deploy it."}}
+{"type": "assistant", "uuid": "b1", "parentUuid": "u2", "isSidechain": false, "sessionId": "s", "message": {"id": "msg_B", "content": [{"type": "thinking", "thinking": ""}], "stop_reason": null}}
+{"type": "assistant", "uuid": "b2", "parentUuid": "b1", "isSidechain": false, "sessionId": "s", "message": {"id": "msg_B", "content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "ls"}}], "stop_reason": "tool_use"}}
+{"type": "user", "uuid": "u3", "isSidechain": false, "sessionId": "s", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]}}
+{"type": "assistant", "uuid": "c1", "parentUuid": "u3", "isSidechain": false, "sessionId": "s", "message": {"id": "msg_C", "content": [{"type": "thinking", "thinking": ""}], "stop_reason": null}}
+{"type": "assistant", "uuid": "c2", "parentUuid": "c1", "isSidechain": false, "sessionId": "s", "message": {"id": "msg_C", "content": [{"type": "text", "text": "The build is green.\n\nPlease confirm   the deploy to staging before 5 pm."}], "stop_reason": "end_turn"}}
+{"type": "assistant", "uuid": "side1", "isSidechain": true, "sessionId": "s", "message": {"id": "msg_S", "content": [{"type": "text", "text": "Subagent text that must be ignored."}]}}
+{"type": "system", "uuid": "sys1", "subtype": "turn_duration", "durationMs": 1234}

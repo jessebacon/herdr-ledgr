@@ -1,0 +1,3 @@
+{"generated": "80,000 characters of finished-work prose, then one ask at the end (built by the runner, not stored)",
+ "offline": {"source": "error", "error": "no credential", "truncated": true},
+ "live": {"source": "model", "count_min": 1, "truncated": true, "max_cost": 0.003}}

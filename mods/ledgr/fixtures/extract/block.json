@@ -1,0 +1,2 @@
+{"offline": {"source": "block", "count": 2, "no_model_call": true, "decide_has_recommended": true},
+ "live": {"source": "block", "count": 2, "no_model_call": true}}
