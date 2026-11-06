@@ -28,9 +28,12 @@ import { Writer, writerClaim, engineDrift } from "./writer.js";
 import { goToAnchor, stageText, busy, btwText } from "./nav.js";
 import { demoData, FIXTURE_TURNS, DEMO_SESSION } from "./fixtures.js";
 import { manifest, manifestLines, liveStatus, maxDepthOf, preamble, branchName } from "./branch.js";
-import { confluenceMessage, answersSheet, conclusionRequest, extractConclusion, forkTurnOf, wrapperWords, leadIn } from "./confluence.js";
+import { confluenceMessage, answersSheet, conclusionRequest, extractConclusion, forkTurnOf, wrapperWords, leadIn, answersLeadIn } from "./confluence.js";
 
 const ICON = (n) => `mods/workspace-chrome/${n}.svg`;
+// The panel's one indent: every line under a row's meta line (its text, options, notes, details,
+// a branch's status and body) hangs here, the status glyph's width plus its gap.
+const IND = 18;
 const DAY = 86400e3;
 const squash = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
 const plain = (s) => squash(String(s ?? "").replace(/[`*_#>]+/g, ""));
@@ -296,6 +299,25 @@ export class Panel {
       if (g.length) this.copyAnswers(s, Math.max(...g.map((it) => it.anchor?.turn ?? 0)), cx); else this.flash = "No typed answers in this session.";
     }
     else if (c === "sessions") this.menu = !this.menu;
+    // `session:<terminal or session id prefix>`: show that session, as a click in the session menu does.
+    else if (c.startsWith("session:")) {
+      const k = c.slice("session:".length), st = this.viewStore();
+      const s = st.sessionsList().find((x) => x.terminal === k || x.sessionId.startsWith(k));
+      if (s) { this.menu = false; this.override = { sid: s.sessionId, terminal: focused()?.terminal ?? null }; } else this.flash = `No session ${k}.`;
+    }
+    // For scripted looks at the lower lane: fold or unfold a lane, close every open row and box.
+    else if (c === "fold-mine") this.collapsed.mine = !this.collapsed.mine;
+    // `pick:<handle>:<n>` clicks option n (from 0) of that ask; `copy-answer:<handle>` its Copy answer.
+    else if (c.startsWith("pick:") || c.startsWith("copy-answer:")) {
+      const st = this.viewStore(), sid = this.current(st), s = sid ? st.d.sessions[sid] : null;
+      const [, h, n] = c.split(":");
+      const it = s ? st.byHandle(sid, h) : null;
+      if (!it || !isAgentAsk(it)) this.flash = `No ask ${h} in this session.`;
+      else if (c.startsWith("pick:")) { const o = (it.options ?? [])[Number(n)]; if (o === undefined) this.flash = `${h} has no option ${n}.`; else this.setDraft(it, o, cx); }
+      else this.copyAnswer(it, s, cx);
+    }
+    else if (c === "fold-asks") { const st = this.viewStore(), sid = this.current(st), s = sid ? st.d.sessions[sid] : null; if (s) this.asksManual = { sid, stopAt: s.lastStopAt ?? 0, open: !this.asksOpen(s) }; }
+    else if (c === "collapse-all") { this.expanded.clear(); this.brOpen.clear(); this.preOpen.clear(); this.confirm = null; this.conclude = null; }
     else if (c === "expand-branches") { const st = this.viewStore(); for (const b of Object.values(st.d.branches)) this.brOpen.add(b.id); }
   }
 
@@ -366,7 +388,9 @@ export class Panel {
   typeDraft(id, text, cx) {
     const it = this.viewStore().item(id);
     if (!it) return;
+    const had = Boolean(squash(it.draft));
     it.draft = text;
+    if (had !== Boolean(squash(text))) cx.notify();   // the Copy answer(s) buttons follow it
     if (this.demo) return;
     const d = { text, sent: false, seq: (this.drafts.get(id)?.seq ?? 0) + 1 };
     this.drafts.set(id, d);
@@ -421,14 +445,32 @@ export class Panel {
     cx.notify();
   }
 
+  // An ask's answer is its draft: typed, or the label of the option clicked (setDraft fills it).
+  answerOf(it) { return squash(it?.draft); }
+
   copyAnswers(s, turn, cx) {
     const st = this.viewStore();
     const group = st.itemsOf(s.sessionId).filter((it) => isAgentAsk(it) && it.anchor?.turn === turn && !isClosed(it)).sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
-    const msg = answersSheet(s.sessionId, turn, group);
-    if (!msg) { this.flash = `No answers typed for turn ${turn}.`; cx.notify(); return; }
+    this.stageAnswers(s, turn, group, cx);
+  }
+
+  // One ask's answer as a sheet of its own: the same marker line, so the same landing.
+  copyAnswer(it, s, cx) { this.stageAnswers(s, it.anchor?.turn, [it], cx); }
+
+  // The answer sheet on the clipboard, the pane focused, and the lead-in hint (as for a confluence).
+  stageAnswers(s, turn, group, cx) {
+    const items = group.filter((it) => this.answerOf(it));
+    const msg = answersSheet(s.sessionId, turn, items);
+    if (!msg) { this.flash = group.length === 1 ? `${group[0].handle} has no answer yet: type one or pick an option.` : `No answers typed or picked for turn ${turn}.`; cx.notify(); return; }
     if (this.demo) cx.write_to_clipboard(msg);
     else stageText(msg, s.terminal, cx);
-    this.flash = this.demo ? "(demo) Answers copied to the clipboard." : `Answers for turn ${turn} copied: ⌘V in ${s.terminal}. They show answered once that prompt is sent.`;
+    const hs = items.map((it) => it.handle);
+    const what = hs.length === 1 ? `Answer for ${hs[0]}` : `${hs.length} answers (${hs.join(", ")})`;
+    const word = this.trunkWord(s);
+    const how = `type “${answersLeadIn(hs)}”, then ⌘V, Enter`;
+    this.flash = this.demo
+      ? `(demo) ${what} copied to the clipboard; in a session you would ${how}.`
+      : `${what} copied and ${s.terminal ?? "the pane"} focused${word === "working" ? " (working: wait for idle)" : word === "gone" ? " (not live)" : ""}: ${how}. ${hs.length === 1 ? `${hs[0]} shows` : "They show"} answered once that prompt is sent.`;
     cx.notify();
   }
 
@@ -683,11 +725,11 @@ export class Panel {
       .text_color(t.foreground).text_size(12.5)
       .child(this.header(t, st, s))
       .when(this.menu, (el) => el.child(this.sessionMenu(t, st, sid)))
-      .child(v_flex().id("ledgr-list").flex_1().min_h(0).overflow_y_scrollbar().px(8).py(6).gap(2)
+      .child(v_flex().id("ledgr-list").flex_1().min_h(0).overflow_y_scrollbar().px(8).py(8).gap(4)
         .children(s ? this.body(t, st, s) : [this.emptyState(t)]))
       .when(Boolean(s), (el) => el.child(this.footer(t, st, s)))
       .when(Boolean(note), (el) => el.child(
-        div().flex_none().px(12).py(5).border_t(1).border_color(t.border).text_size(11).text_color(t.muted).child(note)));
+        div().flex_none().px(12).py(6).border_t(1).border_color(t.border).text_size(11).text_color(t.muted).child(note)));
   }
 
   pill(t, text, color) {
@@ -808,11 +850,11 @@ export class Panel {
     if (!this.collapsed.mine) {
       const sorted = [...mine].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
       for (const it of sorted) out.push(this.row(t, st, s, it));
-      if (!sorted.length) out.push(div().px(8).py(2).text_size(11.5).text_color(t.dim).child("No parked questions. ⌘J parks one, even mid-stream."));
+      if (!sorted.length) out.push(div().px(6).py(3).text_size(11.5).text_color(t.dim).child("No parked questions. ⌘J parks one, even mid-stream."));
       const brs = st.branchesOf(s.sessionId).filter((b) => this.branchVisible(b));
       if (brs.length) {
         const live = brs.filter((b) => !["refused", "failed", "closed", "ended", "nostart"].includes(this.branchLive(b))).length;
-        out.push(h_flex().id("lane-branches").flex_none().h(20).px(6).mt(4).gap(6).items_center()
+        out.push(h_flex().id("lane-branches").flex_none().h(22).px(6).mt(6).gap(6).items_center()
           .child(svg(ICON("git-branch")).size(11).flex_none().text_color(t.dim))
           .child(div().flex_1().text_size(10.5).font_semibold().text_color(t.dim).child("BRANCHES"))
           .child(div().flex_none().text_size(11).text_color(live ? t.accent : t.dim).child(`${live} live`)));
@@ -820,7 +862,7 @@ export class Panel {
       }
     }
 
-    out.push(div().h(1).mx(4).my(4).bg(t.border));
+    out.push(div().h(1).mx(4).my(6).bg(t.border));
     const pend = st.pendingTurn(s.sessionId);
     const asksOpen = this.asksOpen(s);
     out.push(this.laneHead(t, "asks", "ASKED OF YOU", asks.filter((it) => it.status === "open").length, asksOpen,
@@ -838,7 +880,7 @@ export class Panel {
         const nOpen = g.filter((it) => it.status === "open").length;
         const ti = st.turnInfo(s.sessionId, turn);
         if (!g.length) { if (ti?.asks?.source === "error") out.push(this.errorLine(t, s, turn, ti)); continue; }
-        out.push(h_flex().id(`grp-${turn}`).flex_none().h(22).px(6).gap(6).items_center().rounded(5).cursor_pointer().hover((x) => x.bg(t.hover))
+        out.push(h_flex().id(`grp-${turn}`).flex_none().h(24).px(6).gap(6).items_center().rounded(5).cursor_pointer().hover((x) => x.bg(t.hover))
           .on_click((_e, cx) => {
             if (open) { this.unfolded.delete(k); this.folded.add(k); } else { this.folded.delete(k); this.unfolded.add(k); }
             cx.notify();
@@ -851,13 +893,15 @@ export class Panel {
           out.push(this.row(t, st, s, it));
           for (const c of items.filter((c) => c.parentId === it.id && isHuman(c) && !isClosed(c))) out.push(this.row(t, st, s, c, true));
         }
-        if (g.some((it) => (it.draft ?? "").trim() && !isClosed(it))) {
-          out.push(h_flex().flex_none().pl(24).py(3).gap(6)
-            .child(this.btn(t, `copy-${turn}`, "Copy answers", (_e, cx) => this.copyAnswers(s, turn, cx), { primary: true }))
-            .child(div().text_size(10.5).text_color(t.dim).child("clipboard + focus the pane; nothing is typed")));
+        if (g.some((it) => !isClosed(it))) {
+          const n = g.filter((it) => !isClosed(it) && this.answerOf(it)).length;
+          out.push(h_flex().flex_none().pl(6 + IND).pr(6).py(3).gap(8).items_center()
+            .child(this.btn(t, `copy-${turn}`, `Copy ${n} answer${n === 1 ? "" : "s"}${s.terminal ? ` for ${s.terminal}` : ""}`, (_e, cx) => this.copyAnswers(s, turn, cx),
+              { primary: n > 0, disabled: n === 0, tip: n ? `The answer sheet for turn ${turn}: clipboard + focus ${s.terminal ?? "the pane"}` : "Type an answer or pick an option on an ask first" }))
+            .child(div().flex_1().min_w(0).text_size(10.5).text_color(t.dim).child(n ? "clipboard + focus the pane; nothing is typed" : "type an answer or pick an option first")));
         }
       }
-      if (!turns.length) out.push(div().px(8).py(2).text_size(11.5).text_color(t.dim).child("Nothing asked of you in this session."));
+      if (!turns.length) out.push(div().px(6).py(3).text_size(11.5).text_color(t.dim).child("Nothing asked of you in this session."));
     }
 
     for (const [key, title, pick] of [
@@ -867,7 +911,7 @@ export class Panel {
     ]) {
       if (!this.folds[key]) continue;
       const list = items.filter(pick).sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
-      out.push(div().h(1).mx(4).my(4).bg(t.border));
+      out.push(div().h(1).mx(4).my(6).bg(t.border));
       out.push(div().px(4).py(2).text_size(10.5).font_semibold().text_color(t.dim).child(`${title} (${list.length})`));
       for (const it of list) out.push(this.row(t, st, s, it));
     }
@@ -878,7 +922,7 @@ export class Panel {
     const r = ti.retry;
     const busyRetry = Boolean(r && (r.state === "requested" || r.state === "running") && Date.now() - (r.at ?? 0) < 60000);
     const why = r?.state === "failed" && r.note ? ` (retry: ${r.note})` : "";
-    return h_flex().flex_none().px(6).py(2).gap(6).items_center()
+    return h_flex().flex_none().px(6).py(3).gap(8).items_center()
       .child(div().id(`err-${turn}`).flex_1().min_w(0).text_size(11).text_color(t.dim).when(Boolean(ti.asks.errorDetail), (el) => el.tooltip(String(ti.asks.errorDetail)))
         .child(`asks not extracted for turn ${turn}${ti.asks.error ? `: ${ti.asks.error}` : ""}${why}`))
       .when(!this.demo, (el) => el.child(this.btn(t, `retry-${turn}`, busyRetry ? "Retrying…" : "Retry", (_e, cx) => this.retry(s, turn, cx), { disabled: busyRetry })));
@@ -952,37 +996,42 @@ export class Panel {
     if (it.note) sub.push(it.note);
     if (it.status === "deferred") sub.push(it.deferUntil === "next_session" ? "deferred to next session" : typeof it.deferUntil === "number" ? `deferred until ${new Date(it.deferUntil).toLocaleString()}` : "deferred");
 
-    const head = h_flex().id(`rowh-${it.id}`).gap(6).items_start().cursor_pointer()
+    // The glyph, handle, kind and badges are a line of their own, so the text keeps the row's whole
+    // width and wraps in full. No height cap anywhere in a row: a capped, overflow-hidden text box
+    // cut its second line and let the options below draw against it.
+    const head = v_flex().id(`rowh-${it.id}`).gap(2).cursor_pointer()
       .on_click((_e, cx) => this.toggle(it, cx))
-      .child(this.glyph(t, it))
-      .child(div().w(24).flex_none().font_semibold().text_size(11.5).text_color(t.muted).child(it.handle ?? "?"))
-      .child(div().w(52).flex_none().truncate().text_size(10.5).text_color(t.dim).child(it.kind))
-      .child(div().flex_1().min_w(0).max_h(34).overflow_hidden().text_size(12.5)
-        .text_color(closed ? t.dim : dimmed ? t.muted : t.foreground).when(it.status === "dismissed", (el) => el.line_through()).child(text))
-      .children(badges.map(([b, c]) => div().flex_none().px(5).rounded(4).bg(c + "22").text_size(10).text_color(c).child(b)))
-      .when(Boolean(brOf), (el) => el.child(h_flex().id(`brb-${it.id}`).flex_none().gap(3).px(5).rounded(4).items_center().bg(t.accent + "22")
-        .tooltip(`Branched: ${brOf.name} (${BR_WORD[this.branchLive(brOf)] ?? brOf.status})`)
-        .child(svg(ICON("git-branch")).size(10).flex_none().text_color(t.accent)).child(div().text_size(10).text_color(t.accent).child(brOf.name))));
+      .child(h_flex().flex_wrap().gap(6).items_center()
+        .child(this.glyph(t, it))
+        .child(div().flex_none().font_semibold().text_size(11.5).text_color(t.muted).child(it.handle ?? "?"))
+        .child(div().flex_none().text_size(10.5).text_color(t.dim).child(it.kind ?? ""))
+        .children(badges.map(([b, c]) => div().flex_none().px(5).rounded(4).bg(c + "22").text_size(10).text_color(c).child(b)))
+        .when(Boolean(brOf), (el) => el.child(h_flex().id(`brb-${it.id}`).flex_none().gap(3).px(5).rounded(4).items_center().bg(t.accent + "22")
+          .tooltip(`Branched: ${brOf.name} (${BR_WORD[this.branchLive(brOf)] ?? brOf.status})`)
+          .child(svg(ICON("git-branch")).size(10).flex_none().text_color(t.accent)).child(div().text_size(10).text_color(t.accent).child(brOf.name)))))
+      .when(Boolean(text), (el) => el.child(div().pl(IND).text_size(12.5)
+        .text_color(closed ? t.dim : dimmed ? t.muted : t.foreground).when(it.status === "dismissed", (x) => x.line_through()).child(text)));
 
-    return v_flex().id(`row-${it.id}`).flex_none().rounded(7).px(4).py(4).gap(3).when(child, (el) => el.ml(22).border_l(1.5).border_color(t.input))
+    return v_flex().id(`row-${it.id}`).flex_none().rounded(7).px(6).py(6).gap(5).when(child, (el) => el.ml(IND).border_l(1.5).border_color(t.input))
       .when(exp, (el) => el.bg(t.raised)).hover((x) => x.bg(exp ? t.raised : t.hover))
       .child(head)
+      // Options: a wrapped set of buttons under the text; a long one shrinks to the row and wraps.
       .when(agent && it.kind === "decide" && (it.options ?? []).length > 0, (el) => el.child(
-        h_flex().flex_wrap().gap(4).pl(94).children(it.options.map((o, i) => {
+        h_flex().flex_wrap().gap(6).pl(IND).children(it.options.map((o, i) => {
           const chosen = (it.draft ?? "").trim() === o;
-          return div().id(`opt-${it.id}-${i}`).px(6).py(0.5).rounded(5).border_1().border_color(chosen ? t.accent : t.border)
-            .text_size(11).text_color(chosen ? t.accent : t.muted).when(!closed, (d) => d.cursor_pointer().hover((x) => x.bg(t.hover))
+          return div().id(`opt-${it.id}-${i}`).min_w(0).px(8).py(2).rounded(6).border_1().border_color(chosen ? t.accent : t.border)
+            .text_size(11.5).text_color(chosen ? t.accent : t.muted).when(!closed, (d) => d.cursor_pointer().hover((x) => x.bg(t.hover))
               .on_click((_e, cx) => { cx.stop_propagation(); this.setDraft(it, o, cx); }))
             .child(o === it.recommended ? `${o} (rec.)` : o);
         }))))
-      .children(sub.map((line) => div().pl(94).text_size(11).text_color(t.dim).max_h(30).overflow_hidden().child(line)))
+      .children(sub.map((line) => div().pl(IND).text_size(11).text_color(t.dim).child(line)))
       .when(exp, (el) => el.child(this.details(t, st, s, it)));
   }
 
   passageView(t, it, text, whole) {
     const { before, hit, after } = passageParts(text, it.anchor?.quote, whole);
     const md = (k, body) => TextView.markdown(`ps-${k}-${it.id}`, body);
-    return v_flex().max_h(whole ? 4000 : 260).overflow_hidden().rounded(6).border_1().border_color(t.border).bg(t.background).px(8).py(6).gap(4).text_size(12)
+    return v_flex().id(`ps-box-${it.id}`).max_h(whole ? 4000 : 260).overflow_y_scrollbar().rounded(6).border_1().border_color(t.border).bg(t.background).px(8).py(6).gap(4).text_size(12)
       .when(Boolean(before), (el) => el.child(div().text_color(t.muted).child(md("b", before))))
       .when(Boolean(hit), (el) => el.child(div().pl(7).py(2).border_l(2).border_color(t.accent).bg(t.accent + "14").rounded(3).child(md("h", hit))))
       .when(Boolean(after), (el) => el.child(div().text_color(t.muted).child(md("a", after))));
@@ -1034,12 +1083,17 @@ export class Panel {
         { disabled: !ok, tip: ok ? "Fork this session into a new Claude session to settle this question" : "Branching needs a Claude Code session with the ledgr hooks" });
     }
     b("go", "Go to anchor", (_e, cx) => this.goTo(it, s, cx), { disabled: tBusy, tip: tBusy ? "The agent is working: keys would land in its prompt" : "Focus the pane and open its search" });
-    return v_flex().pl(18).pt(3).gap(6)
+    return v_flex().pl(IND).pt(4).gap(8)
       .when(Boolean(it.anchor?.quote) && it.kind !== "bookmark", (el) => el.child(div().text_size(11.5).italic().text_color(t.muted).child(`“${squash(it.anchor.quote)}”`)))
       .child(passage)
-      .when(agent && !closed && Boolean(input), (el) => el.child(h_flex().h(28).px(8).items_center().rounded(7).border_1().border_color(t.input).bg(t.background)
-        .child(Input.new(input).flex_1().h_full().text_size(12).text_color(t.foreground))))
-      .child(h_flex().flex_wrap().gap(4).children(a))
+      .when(agent && !closed && Boolean(input), (el) => el.child(v_flex().gap(4)
+        .child(h_flex().gap(6).items_center()
+          .child(h_flex().flex_1().min_w(0).h(28).px(8).items_center().rounded(7).border_1().border_color(t.input).bg(t.background)
+            .child(Input.new(input).flex_1().h_full().text_size(12).text_color(t.foreground)))
+          .child(this.btn(t, `copy1-${it.id}`, "Copy answer", (_e, cx) => this.copyAnswer(it, s, cx),
+            { primary: Boolean(this.answerOf(it)), disabled: !this.answerOf(it), tip: this.answerOf(it) ? `${it.handle}'s answer alone: clipboard + focus ${s.terminal ?? "the pane"}` : "Type an answer or pick an option first" })))
+        .child(div().text_size(10.5).text_color(t.dim).child("Drafts reach the agent via Copy answer(s); Resolve only records it here."))))
+      .child(h_flex().flex_wrap().gap(6).children(a))
       .when(this.confirm?.itemId === it.id && isHuman(it) && !closed, (el) => el.child(this.confirmBox(t, st, s, it)))
       .child(div().text_size(10).text_color(t.dim).child(
         `${it.handle} · ${it.origin ?? ""} · turn ${it.anchor?.turn ?? "?"}${it.anchor?.hash ? ` · #${it.anchor.hash}` : ""}`));
@@ -1048,7 +1102,7 @@ export class Panel {
   // ── branch rendering (Phase 2) ───────────────────────────────────────
   manifestView(t, m, frozen = false) {
     if (!m) return div().text_size(11).text_color(t.dim).child("No manifest recorded (started outside the panel).");
-    return v_flex().gap(2).children(manifestLines(m, { frozen }).map(([k, v]) => h_flex().gap(6).items_start()
+    return v_flex().gap(3).children(manifestLines(m, { frozen }).map(([k, v]) => h_flex().gap(6).items_start()
       .child(div().w(66).flex_none().text_size(10.5).text_color(t.dim).child(k))
       .child(div().flex_1().min_w(0).text_size(11.5).text_color(k === "Refused" ? t.blocked : t.foreground).child(v))));
   }
@@ -1065,22 +1119,22 @@ export class Panel {
       .when(Boolean(o.disabled), (el) => el.opacity(0.5))
       .when(!o.disabled, (el) => el.cursor_pointer().hover((x) => x.opacity(0.85)).on_click((_e, cx) => { cx.stop_propagation(); fn(); cx.notify(); }))
       .child(label);
-    return v_flex().id(`brc-${it.id}`).gap(6).p(8).rounded(7).border_1().border_color(m.refused ? t.blocked : t.accent).bg(t.background)
+    return v_flex().id(`brc-${it.id}`).gap(8).p(8).rounded(7).border_1().border_color(m.refused ? t.blocked : t.accent).bg(t.background)
       .child(h_flex().gap(6).items_center()
         .child(svg(ICON("git-branch")).size(12).flex_none().text_color(m.refused ? t.blocked : t.accent))
         .child(div().flex_1().min_w(0).font_semibold().text_size(12).child(`Branch ${it.handle}: what the branch will know`)))
       .child(this.manifestView(t, m))
-      .child(h_flex().flex_wrap().gap(4).items_center()
+      .child(h_flex().flex_wrap().gap(6).items_center()
         .child(seg(`brc-split-${it.id}`, m.parentDepth ? "beside its parent" : "beside the trunk", !c.isolate && c.placement === "split", () => { c.placement = "split"; c.isolate = false; },
           { tip: "A sub-agent of the parent's terminal, given a pane right of it" }))
         .child(seg(`brc-agent-${it.id}`, "sub-agent only", !c.isolate && c.placement === "agent", () => { c.placement = "agent"; c.isolate = false; },
           { tip: "No pane: peek it from the agents list (peek's keep gives it one)" }))
         .child(seg(`brc-wt-${it.id}`, "isolate in a worktree", Boolean(c.isolate), () => { c.isolate = !c.isolate; },
           { disabled: git !== true, tip: git === true ? "Herdr's worktree: a new checkout from HEAD in a new space; the agents tree will not nest it under the trunk" : git === false ? "The trunk's folder is not a git checkout" : "Checking for git…" })))
-      .child(h_flex().gap(4).items_center()
+      .child(h_flex().flex_wrap().gap(6).items_center()
         .child(this.btn(t, `brc-go-${it.id}`, "Launch branch", (_e, cx) => this.launch(it, s, cx), { primary: true, disabled: Boolean(m.refused) }))
-        .child(this.btn(t, `brc-x-${it.id}`, "Cancel", (_e, cx) => { this.confirm = null; cx.notify(); }))
-        .child(div().flex_1().min_w(0).text_size(10.5).text_color(t.dim).child("starts one process, claude --resume … --fork-session; nothing is typed into the trunk")));
+        .child(this.btn(t, `brc-x-${it.id}`, "Cancel", (_e, cx) => { this.confirm = null; cx.notify(); })))
+      .child(div().text_size(10.5).text_color(t.dim).child("starts one process, claude --resume … --fork-session; nothing is typed into the trunk"));
   }
 
   // The latest finished turn of each expanded branch's session, read once per stop (render
@@ -1127,38 +1181,40 @@ export class Panel {
       when(br.startedAt ?? br.launchedAt ?? br.createdAt) ? `started ${when(br.startedAt ?? br.launchedAt ?? br.createdAt)}` : null,
       br.external ? "launched outside the panel" : null,
     ].filter(Boolean).join(" · ");
-    const head = h_flex().id(`brh-${br.id}`).gap(6).items_center().cursor_pointer()
+    const head = v_flex().id(`brh-${br.id}`).gap(2).cursor_pointer()
       .on_click((_e, cx) => { if (open) this.brOpen.delete(br.id); else this.brOpen.add(br.id); cx.notify(); })
-      .child(spin ? svg(ICON("spinner")).size(11).flex_none().text_color(t.working).spin(900) : svg(ICON("git-branch")).size(11).flex_none().text_color(color))
-      .child(div().flex_none().font_semibold().text_size(11.5).text_color(t.foreground).child(br.name ?? br.id.slice(0, 11)))
-      .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.muted)
-        .child(`${it?.handle ?? "?"} · depth ${br.depth ?? "?"} · ${BR_WORD[live] ?? live ?? "?"}${br.status === "rejoined" && live !== "rejoined" ? ` · rejoined t${br.rejoinedTurn ?? "?"}` : br.status === "concluded" && live !== "concluded" ? " · concluded" : ""}`))
-      .when(kids.length > 0, (el) => el.child(div().flex_none().px(5).rounded(4).bg(t.accent + "22").text_size(10).text_color(t.accent)
-        .child(`${kids.length} open`)))
-      .child(svg(ICON(open ? "chevron-down" : "chevron-right")).size(10).flex_none().text_color(t.dim));
+      .child(h_flex().gap(6).items_center()
+        .child(div().w(12).flex_none().flex().items_center()
+          .child(spin ? svg(ICON("spinner")).size(11).text_color(t.working).spin(900) : svg(ICON("git-branch")).size(11).text_color(color)))
+        .child(div().flex_1().min_w(0).font_semibold().text_size(11.5).text_color(t.foreground).child(br.name ?? br.id.slice(0, 11)))
+        .when(kids.length > 0, (el) => el.child(div().flex_none().px(5).rounded(4).bg(t.accent + "22").text_size(10).text_color(t.accent)
+          .child(`${kids.length} open`)))
+        .child(svg(ICON(open ? "chevron-down" : "chevron-right")).size(10).flex_none().text_color(t.dim)))
+      .child(div().pl(IND).text_size(11).text_color(t.muted)
+        .child(`${it?.handle ?? "?"} · depth ${br.depth ?? "?"} · ${BR_WORD[live] ?? live ?? "?"}${br.status === "rejoined" && live !== "rejoined" ? ` · rejoined t${br.rejoinedTurn ?? "?"}` : br.status === "concluded" && live !== "concluded" ? " · concluded" : ""}`));
     const focusOk = Boolean(br.terminal) && !["closed", "ended", "failed", "refused", "nostart"].includes(live);
     const canC = this.canConclude(st, br);
-    return v_flex().id(`br-${br.id}`).flex_none().rounded(7).px(4).py(4).gap(4).ml(4).border_l(1.5).border_color(t.input)
+    return v_flex().id(`br-${br.id}`).flex_none().rounded(7).px(6).py(6).gap(5).ml(4).border_l(1.5).border_color(t.input)
       .when(open, (el) => el.bg(t.raised)).hover((x) => x.bg(open ? t.raised : t.hover))
       .child(head)
-      .when(Boolean(br.error), (el) => el.child(div().pl(17).text_size(11).text_color(br.status === "refused" ? t.dim : t.blocked).child(`${br.status === "refused" ? "Refused" : "Not started"}: ${br.error}`)))
-      .when(open, (el) => el.child(v_flex().pl(17).gap(5)
+      .when(Boolean(br.error), (el) => el.child(div().pl(IND).text_size(11).text_color(br.status === "refused" ? t.dim : t.blocked).child(`${br.status === "refused" ? "Refused" : "Not started"}: ${br.error}`)))
+      .when(open, (el) => el.child(v_flex().pl(IND).gap(8)
         .child(this.manifestView(t, br.manifest, true))
         .when(Boolean(facts), (x) => x.child(div().text_size(10.5).text_color(t.dim).child(facts)))
         .when(kids.length > 0, (x) => x.child(div().text_size(10.5).font_semibold().text_color(t.dim).child("ASKED IN THIS BRANCH")))
         .children(kids.map((k) => this.row(t, st, child, k, true)))
         .when(staged, (x) => x.child(this.confluenceView(t, st, s, br)))
-        .when(!staged && Boolean(concl), (x) => x.child(v_flex().gap(2)
+        .when(!staged && Boolean(concl), (x) => x.child(v_flex().gap(3)
           .child(div().text_size(10.5).font_semibold().text_color(t.dim).child(`CONCLUSION (its turn ${msg.turn}; Conclude… carries it back)`))
           .child(div().rounded(5).border_1().border_color(t.border).bg(t.background).px(7).py(4).text_size(11.5).children(this.lines(concl)))))
-        .when(!staged && !concl && Boolean(msg?.text), (x) => x.child(v_flex().gap(2)
+        .when(!staged && !concl && Boolean(msg?.text), (x) => x.child(v_flex().gap(3)
           .child(div().text_size(10.5).font_semibold().text_color(t.dim).child(`LAST MESSAGE (turn ${msg?.turn})`))
-          .child(div().max_h(120).overflow_hidden().rounded(5).border_1().border_color(t.border).bg(t.background).px(7).py(4).text_size(11.5)
+          .child(div().id(`brm-box-${br.id}`).max_h(160).overflow_y_scrollbar().rounded(5).border_1().border_color(t.border).bg(t.background).px(7).py(4).text_size(11.5)
             .child(TextView.markdown(`brm-${br.id}`, String(msg?.text ?? "").slice(0, 1200))))))
         .when(this.conclude?.branchId === br.id, (x) => x.child(this.concludeBox(t, st, s, br)))
         .when(this.preOpen.has(br.id) && Boolean(br.preamble), (x) => x.child(div().rounded(5).border_1().border_color(t.border).bg(t.background).px(7).py(4)
           .text_size(11).text_color(t.muted).child(TextView.markdown(`brp-${br.id}`, br.preamble))))
-        .child(h_flex().flex_wrap().gap(4)
+        .child(h_flex().flex_wrap().gap(6)
           .child(this.btn(t, `brf-${br.id}`, "Focus", (_e, cx) => this.focusBranch(br, cx),
             { disabled: !focusOk, tip: focusOk ? "Focus the branch's pane (a peek when it has none)" : "The branch has no live terminal" }))
           .when(canC && this.conclude?.branchId !== br.id, (x) => x.child(this.btn(t, `brk-${br.id}`, br.status === "concluded" ? "Edit conclusion…" : "Conclude…",
@@ -1189,7 +1245,7 @@ export class Panel {
     const it = st.item(br.requestId);
     const rejoined = br.status === "rejoined";
     const when = (ms) => (ms ? new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "");
-    return v_flex().gap(2)
+    return v_flex().gap(3)
       .child(div().text_size(10.5).font_semibold().text_color(rejoined ? t.done : t.accent).child(rejoined
         ? `REJOINED · landed in ${s.terminal ?? "the trunk"} at turn ${br.rejoinedTurn ?? "?"} (${when(br.rejoinedAt)})`
         : `CONFLUENCE STAGED ${when(br.concludedAt)} · waiting for the paste`))
@@ -1214,7 +1270,7 @@ export class Panel {
       : "The branch has not answered yet: write the conclusion yourself, or ask the branch for one.";
     const moved = s.turn > F ? `The trunk is at turn ${s.turn}; the branch saw it up to turn ${F}. Check the conclusion against turns ${F + 1}–${s.turn}: the message tells the trunk what the branch saw.` : null;
     const ask = k.source !== "block" && k.source !== "loading" && Boolean(br.terminal) && !["closed", "ended", "nostart"].includes(this.branchLive(br));
-    return v_flex().id(`brk-box-${br.id}`).gap(6).p(8).rounded(7).border_1().border_color(t.accent).bg(t.background)
+    return v_flex().id(`brk-box-${br.id}`).gap(8).p(8).rounded(7).border_1().border_color(t.accent).bg(t.background)
       .child(h_flex().gap(6).items_center()
         .child(svg(ICON("git-branch")).size(12).flex_none().text_color(t.accent))
         .child(div().flex_1().min_w(0).font_semibold().text_size(12).child(`Conclude ${br.name}: what goes back to ${s.terminal ?? "the trunk"}`)))
@@ -1223,9 +1279,9 @@ export class Panel {
         .child(Textarea.new(k.input).w_full().text_size(12).text_color(t.foreground)))
       .when(Boolean(moved), (el) => el.child(div().text_size(10.5).text_color(t.blocked).child(moved)))
       .child(div().text_size(10.5).font_semibold().text_color(t.dim).child(`THE MESSAGE · ${wrapperWords(msg, text || "…")} words around your text; no transcript`))
-      .child(v_flex().max_h(170).overflow_hidden().rounded(5).border_1().border_color(t.border).bg(t.surface).px(7).py(4).text_size(11).text_color(t.muted).children(this.lines(msg)))
+      .child(v_flex().id(`brk-msg-${br.id}`).max_h(170).overflow_y_scrollbar().rounded(5).border_1().border_color(t.border).bg(t.surface).px(7).py(4).text_size(11).text_color(t.muted).children(this.lines(msg)))
       .child(div().text_size(10.5).text_color(this.trunkWord(s) === "working" ? t.working : t.dim).child(this.trunkLine(s, it)))
-      .child(h_flex().flex_wrap().gap(4).items_center()
+      .child(h_flex().flex_wrap().gap(6).items_center()
         .child(this.btn(t, `brk-send-${br.id}`, "Send to trunk", (_e, cx) => this.sendToTrunk(st, br, cx),
           { primary: true, disabled: !text || !it, tip: "Clipboard + focus the trunk's pane; nothing is typed. The question resolves when you send it there." }))
         .when(ask, (el) => el.child(this.btn(t, `brk-ask-${br.id}`, "Ask for a conclusion", (_e, cx) => this.askForConclusion(st, br, cx))))

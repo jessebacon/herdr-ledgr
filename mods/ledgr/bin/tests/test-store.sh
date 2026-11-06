@@ -24,6 +24,8 @@ assert c["conclusion_head"].startswith("Yes: 8443 is served"), c
 a = L.detect(open(f"{d}/msg-answers.txt").read())
 assert a and a["kind"] == "answers" and a["for_session"] == "aaaaaaaa-3333-0000-0000-000000000001" and a["handles"] == ["A1", "A2"], a
 assert a["answers"] == {"A1": "a, as you recommended.", "A2": "after the reboot"}, a
+o = L.detect(open(f"{d}/msg-answer-one.txt").read())   # lead-in line, then one ask's sheet (Copy answer)
+assert o and o["kind"] == "answers" and o["handles"] == ["A2"] and o["answers"] == {"A2": "after the reboot"}, o
 PY
 fi
 # The store's summary line last (run-all.sh shows the last line), with the parser check on it.

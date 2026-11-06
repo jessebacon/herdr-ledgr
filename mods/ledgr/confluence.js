@@ -68,6 +68,8 @@ export function confluenceMessage({ branch, item, text }) {
 // The one-line lead-in the panel suggests the person type before pasting, so the pasted message
 // arrives under words the person wrote (the hook finds the marker as the paste's first line).
 export const leadIn = (item) => `Adopt this branch result for ${item?.handle ?? "the question"}:`;
+// The same for an answer sheet: "My answer to A9:" / "My answers to A5, A9:".
+export const answersLeadIn = (handles) => `My answer${(handles ?? []).length === 1 ? "" : "s"} to ${(handles ?? []).join(", ") || "your asks"}:`;
 
 // Words in the message outside the conclusion (the "under 200 words" rule).
 export function wrapperWords(message, text) {

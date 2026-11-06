@@ -136,6 +136,14 @@ ever typed into an agent: answers and `/btw` questions go to the clipboard and t
 - Saving any file under `mods/ledgr/` (including `bin/`) reloads every ledgr copy.
 - TextView markdown bold is not visibly heavier at panel sizes; the quote's paragraph is highlighted
   with a bar and tint instead.
+- Panel text wraps by itself (long tokens break mid-word). Never cap a text box with `max_h` plus
+  `overflow_hidden`: the default line height is about 1.6, so the old 34 px cap cut a 12.5 px ask
+  inside its second line and the options below drew against it. A row is a meta line (glyph,
+  handle, kind, badges) with its text, options, notes and details hung at `IND` (18 px) below it;
+  preview boxes that must stay short scroll (`overflow_y_scrollbar`) instead of hiding the rest.
+  For shots of the lower lane: `ledgr.fold-mine`, `ledgr.fold-asks`, `ledgr.collapse-all`; for the
+  answer path `ledgr.pick:<handle>:<n>`, `ledgr.copy-answer:<handle>`, `ledgr.session:<terminal>`;
+  `app.zoom_out` shows more of the list with the same wrapping (zoom back in afterwards).
 - A branch shares the trunk's checkout unless isolated: the preamble forbids edits, nothing enforces
   it. The fork is taken at the end of the session, so it also sees every turn after the anchor; the
   manifest says how many. See `BUILD-NOTES-phase2.md`.
@@ -151,7 +159,8 @@ ever typed into an agent: answers and `/btw` questions go to the clipboard and t
 - `herdr-app check` passes for `mods/ledgr`, `mods/my-pane`, `mods/my-tabs`, also with
   `FORCE_DEMO = true` in `config.js`.
 - `herdr-app do ledgr.demo` (panel shown) draws both lanes with every status, an expanded row with
-  the highlighted passage, a draft answer and "Copy answers".
+  the highlighted passage, a draft answer and "Copy answers"; the long cases (A10-A12, Q8) wrap in
+  full with nothing clipped at 280 and 360 px.
 - `shared("ledgr.writer").by` is `my-tabs` a few seconds after Herdr starts, with the panel never shown.
 - `herdr-app do mod.open --name ledgr` opens the box over a working agent; `herdr-app do ledgr.submit`
   (or Enter) writes `ledgr-data/spool/<ms>-capture-mod-<rand>.json`, which the writer applies and

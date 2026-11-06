@@ -353,6 +353,11 @@ const sheet = CF.answersSheet(TR, 2, [a1, a2, a3]);
 A.equal(sheet, `ledgr answers ${TR}\nAnswers to your asks from turn 2:\nA1: a, as you recommended.\nA2: after the reboot`);
 A.equal(CF.answersSheet(TR, 2, [{ ...a3, draft: "" }]), "", "no typed answers: no sheet");
 fsm.writeFileSync(`${dir}/msg-answers.txt`, sheet);
+// Copy answer: one ask's sheet alone, under the lead-in the panel suggests
+const one = CF.answersSheet(TR, 2, [a2]);
+A.equal(one, `ledgr answers ${TR}\nAnswers to your asks from turn 2:\nA2: after the reboot`);
+A.equal(CF.answersLeadIn(["A2"]), "My answer to A2:"); A.equal(CF.answersLeadIn(["A1", "A2"]), "My answers to A1, A2:");
+fsm.writeFileSync(`${dir}/msg-answer-one.txt`, `${CF.answersLeadIn(["A2"])}\n${one}`);
 st.apply(tev("prompt", { turn: 5, prompt_id: "tp5", local: false, prompt_head: sheet, refs: [] }));
 A.equal(a1.status, "open", "the sheet has no [A1] refs: the prompt alone does not answer");
 st.apply(tev("answers_landed", { turn: 5, for_session: OTHER, handles: ["A1"], answers: { A1: "x" } }));

@@ -4,6 +4,9 @@
 // again, a second agent kind with extraction pending; Phase 2: a branch of Q3 (depth 1, its own
 // ask and a ledgr-conclusion), a compaction after the anchor, a refused depth-3 request; Phase 3: a
 // branch of Q2 that rejoined (its confluence landed at turn 12, Q2 resolved by it, terminal closed).
+// Layout cases (nothing may clip at 280-360 px): a long decide with a long recommended option (A10),
+// a 600-character ask (A11), a single unbroken 120-character token (A12), a parked question with a
+// long URL (Q8).
 // Drawn when props().demo, FORCE_DEMO (config.js) or `herdr-app do ledgr.demo`. Never saved,
 // never published to shared(), never written to ledgr-data.
 import { passageHash } from "./store.js";
@@ -70,6 +73,14 @@ export function demoData(now = Date.now()) {
     quote: "OK to remove RC4 from the registry?", ago: 3 });
   ask({ handle: "A8", turn: 17, kind: "review", text: "Review the IIS bindings list in reports/iis-bindings.md for missing sites", origin: "extract_model", seq: 3,
     quote: "Review the IIS bindings list I wrote to `reports/iis-bindings.md`", ago: 3 });
+  ask({ handle: "A10", turn: 17, kind: "decide", seq: 5, ago: 3,
+    text: "Decide whether to run the whole TLS change tonight (registry edits and the 8443 rebinding together) or split it across two nights so the Crystal reports can be checked in between",
+    options: ["Tonight, all at once", "Split it across two nights so the Crystal reports on PRODAPP can be re-run and checked between the registry change and the rebinding"],
+    recommended: "Split it across two nights so the Crystal reports on PRODAPP can be re-run and checked between the registry change and the rebinding" });
+  ask({ handle: "A11", turn: 17, kind: "review", seq: 6, ago: 3,
+    text: "Review the change plan before tonight's window. Step one disables TLS 1.0 and 1.1 in SChannel for the server and client roles and removes RC4 128/128 from the cipher list. Step two sets the cipher order to Mozilla intermediate under Cryptography\\Configuration\\Local\\SSL. Step three rebinds port 8443 to the new certificate so the Crystal runtime stops terminating TLS itself. Step four reboots PRODAPP and re-runs the Qualys scan. If a step fails, the rollback is the exported hive in E:\\Backups\\tls-2026-11-05.reg and the old binding, which I left in place but disabled. Tell me if any step should wait." });
+  ask({ handle: "A12", turn: 17, kind: "confirm", seq: 7, ago: 3,
+    text: "Confirm the new certificate's thumbprint: 9F86D081884C7D659A2FEAA0C55AD015A3BF4F1B2B0B822CD15D6C15B0F00A084E07408562BEDB8B60CE05C1DECFE3AD16B72230967DE01F640B7E47" });
   ask({ handle: "A3", turn: 12, kind: "provide", text: "Send the PRODAPP service account name", seq: 1,
     quote: "please send me the PRODAPP service account name", ago: 2 * 24 * 60 + 30 });
   ask({ handle: "A2", turn: 12, kind: "decide", text: "Decide whether to keep the stale release branch", status: "resolved", resolvedAt: now - 3 * 60 * min, resolvedTurn: 13,
@@ -83,6 +94,8 @@ export function demoData(now = Date.now()) {
   q({ handle: "Q4", turn: 18, kind: "question", text: "Does the reboot also reset the cipher order?", settled: false, capturedDuring: "working", ago: 1 });
   q({ handle: "Q5", turn: 16, kind: "question", text: "What does Crystal need from SChannel?", status: "answered", askedAtTurn: 16, ago: 50 });
   q({ handle: "Q6", turn: 17, kind: "bookmark", text: "", quote: "RC4 is still enabled under `Ciphers\\RC4 128/128`.", ago: 2 });
+  q({ handle: "Q8", turn: 17, kind: "question", ago: 1,
+    text: "Is https://prodapp.work.internal/ReportServer/Pages/ReportViewer.aspx?%2fSOS%2fCrystal%2fTripManifest&rs:Command=Render still the endpoint the old Crystal runtime calls?" });
   q({ handle: "Q7", turn: 17, kind: "question", text: "re [A5] does CIS L1 break the old scanners?", parentId: a5, origin: "btw", btwStagedAt: now - 2 * min, ago: 2 });
   const q2 = q({ handle: "Q2", turn: 11, kind: "question", text: "Is the old cert still bound anywhere?", status: "resolved", resolvedAt: now - 5 * 60 * min, ago: 400,
     resolvedTurn: 12, resolvedBy: "branch", resolution: { branchId: "br_demo_q2_a41b", turn: 12, at: now - 5 * 60 * min } });
@@ -93,7 +106,7 @@ export function demoData(now = Date.now()) {
   items[q3].branch = { branchId: "br_demo_q3_7c1e" };
   items[q2].branch = { branchId: "br_demo_q2_a41b" };
 
-  const sess = (sid, o) => ({ sessionId: sid, turnSource: "hooks", nextHandle: { A: 9, Q: 8 }, startedAt: now - day, updatedAt: now - 60e3, seenAt: now - 30 * min, promptAt: now - 2 * min, surfaced: false, ...o });
+  const sess = (sid, o) => ({ sessionId: sid, turnSource: "hooks", nextHandle: { A: 13, Q: 9 }, startedAt: now - day, updatedAt: now - 60e3, seenAt: now - 30 * min, promptAt: now - 2 * min, surfaced: false, ...o });
   return {
     v: 1,
     items,
