@@ -8,10 +8,10 @@ It is not part of the mod; a stranger never needs it.
   `./ledgr/writer.js`, a byte-identical copy of ledgr's engine that `install.sh` writes into
   `mods/my-tabs/ledgr/` (Herdr refuses imports from another mod's folder). Because this tab bar is
   always shown, it replaces ledgr's own host block.
-- `mods/my-pane/`: a personal pane header (cloned from Herdr's `pane`) with the ledgr chip, in place
-  of `ledgr-pane`.
-- `overlay.json`: which mods to deploy, which one hosts the writer, which one draws the chip, and
-  what the toggle key runs.
+- The pane header is ledgr's own public `ledgr-pane` (the owner's clone, `my-pane`, was retired so
+  the chip's code exists once; the installer removed the live copy once no layout used it).
+- `overlay.json`: which mods to deploy, which one hosts the writer, which mod draws the chip
+  (`ledgr-pane` here; an overlay may name its own), and what the toggle key runs.
 - `answers.json`: the owner's full answers: `./install.sh --yes --answers examples/personal-overlay/answers.json`.
 
 To make your own: copy this folder, put your mods under `mods/`, edit `overlay.json`, and run

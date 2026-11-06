@@ -11,7 +11,8 @@ export const FORCE_DEMO = false;
 // run). These are the hooks' defaults, used only when the file is missing or invalid.
 export const DEFAULTS = {
   v: 1,
-  instruct_block: false,
+  instruct_block: true,
+  instruct_reinject: true,
   extract: { mode: "block-first", provider: "anthropic", model: "claude-haiku-5-5", base_url: null,
     audit_rate: 0, cli_fallback: false, max_chars: 60000, timeout_s: 20,
     // The mod's: asks at or above this level (optional < needed < blocking) are open rows and count on

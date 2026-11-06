@@ -4,6 +4,27 @@
 
 First public shape of the mod. Built on Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311.
 
+### Asks declared first (this release)
+
+- The agent-declared `ledgr-asks` block is the primary channel, the model extractor the fallback.
+  `instruct_block` defaults on with a new, shorter instruction (blocking and needed items only, never
+  suggestions or offers); a blocking ask the extractor found in a reply without a block puts the
+  instruction into that session's next prompt once (`instruct_reinject`, default on).
+- `mods/ledgr/bin/adapters/README.md` defines the adapter contract (identity, turn signal, instruction
+  injection, turn text, optional fork and resume); `adapters/claude/adapter.json` is its manifest, and
+  the session menu groups sessions by agent with "declares asks", "extractor only" or "no asks".
+- The panel follows the focused pane across spaces and says "no ledgr session yet" for an agent pane
+  the hooks have not reported, instead of keeping another session; pinning shows as a "pinned" pill.
+- The owner's overlay uses the public `ledgr-pane`; `my-pane` is gone. `install.sh` retires a mod an
+  earlier install deployed that the answers no longer want, and every JSON file it writes ends with a
+  newline (a missing one in its own earlier write of `~/.claude/settings.json` is restored).
+
+- `install.sh` hooks more than one Claude config: `~/.claude/settings.json` plus each other config
+  folder it finds (`~/.claude-*`, `CLAUDE_CONFIG_DIR=` in `~/.local/bin` wrappers and shell start-up
+  files) or is given (`--claude-settings` repeats; `claude_settings` in an answers file is a list),
+  asked and consented per file; `--check` and `uninstall.sh` cover every file. Branch and Resume keep
+  a session's `CLAUDE_CONFIG_DIR`; the session-name fallback reads that folder.
+
 ### Packaging (this release)
 
 - The `ledgr` mod installs on its own. A host view inside the mod (props `{view: "host"}`, a 96 px

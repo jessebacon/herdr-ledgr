@@ -15,6 +15,9 @@
 
 Answers come from (later wins): built-in defaults, what is installed now, --answers FILE
 (ledgr.install.json), and flags. --yes takes every default without asking.
+Claude settings: ~/.claude/settings.json, plus every other Claude config folder chosen (a Claude Code
+started with CLAUDE_CONFIG_DIR, such as a second account, reads that folder's settings.json). The
+answers key `claude_settings` is a list (a single string is accepted); `--claude-settings` repeats.
 Install state, backups and the saved originals live in ~/.local/state/ledgr (--state-dir)."""
 import argparse
 import datetime
@@ -47,6 +50,7 @@ MOD_KEYS = {"cmd-enter": "ledgr.btw", "tab": "ledgr.tab", "shift-tab": "ledgr.ba
 CAPTURE_ALTS = ["cmd-j", "cmd-alt-j", "cmd-ctrl-j", "cmd-shift-k"]
 TOGGLE_ALTS = ["cmd-shift-j", "cmd-alt-shift-j", "cmd-ctrl-shift-j", "cmd-alt-l"]
 EXCLUDE = {"gpui-kit.d.ts", "jsconfig.json", "__pycache__", ".DS_Store"}
+GENERATED = {"gpui-kit.d.ts", "jsconfig.json", ".DS_Store"}   # Herdr (or Finder) writes these in every mod folder
 PANEL_BLOCK = {"id": "ledgr", "type": "block", "content": {"mod": "ledgr", "props": {"view": "panel"}}}
 DEFAULT_PLACE = {"column": "panel", "stack": "panel-body", "child": "ledgr"}
 HOST_ID, HOST_ROW, PANEL_COL = "ledgr-host", "ledgr-host-row", "ledgr-panel"
@@ -63,6 +67,13 @@ def head(msg):
 
 def expand(p):
     return os.path.abspath(os.path.expanduser(os.path.expandvars(p))) if p else p
+
+
+def as_list(v):
+    """A list of non-empty strings from a string, a list, or nothing."""
+    if not v:
+        return []
+    return [v] if isinstance(v, str) else [x for x in v if isinstance(x, str) and x]
 
 
 def tilde(p):
@@ -98,12 +109,19 @@ def style_of(raw):
         if s[:1] in ('"', "{", "["):
             indent = len(line) - len(s) or 2
             break
-    return {"indent": indent, "nl": raw.endswith("\n"), "ascii": all(ord(c) < 128 for c in raw)}
+    return {"indent": indent, "ascii": all(ord(c) < 128 for c in raw)}
 
 
 def dump(data, style=None):
-    st = style or {"indent": 2, "nl": True, "ascii": False}
-    return json.dumps(data, indent=st["indent"], ensure_ascii=st["ascii"]) + ("\n" if st["nl"] else "")
+    """JSON text as ledgr writes every file: the file's own indent and escaping, and always a final
+    newline (a file that had one keeps it; one that lacked it gets one)."""
+    st = style or {"indent": 2, "ascii": False}
+    return json.dumps(data, indent=st["indent"], ensure_ascii=st["ascii"]) + "\n"
+
+
+def with_nl(b):
+    """Bytes of a JSON file with a final newline (a saved original may lack one)."""
+    return b if not b or b.endswith(b"\n") else b + b"\n"
 
 
 def load_json(path):
@@ -222,7 +240,12 @@ def replace_child(parent, old, new):
 class Ctx:
     def __init__(self, a):
         self.home = expand(a.herdr_home or os.environ.get("HERDR_HOME") or os.environ.get("HERDR_APP_HOME") or "~/.config/herdr-app")
-        self.settings = expand(a.claude_settings or os.environ.get("LEDGR_CLAUDE_SETTINGS") or "~/.claude/settings.json")
+        # The Claude settings files: the first is the primary (~/.claude/settings.json unless given);
+        # gather() adds the other config folders the person chooses.
+        given = as_list(getattr(a, "claude_settings", None)) or [x for x in (os.environ.get("LEDGR_CLAUDE_SETTINGS") or "").split(os.pathsep) if x]
+        self.settings_given = list(dict.fromkeys(expand(x) for x in given)) or None
+        self.settings_all = list(self.settings_given or [expand("~/.claude/settings.json")])
+        self.settings = self.settings_all[0]
         self.state_dir = expand(a.state_dir or os.environ.get("LEDGR_STATE_DIR") or "~/.local/state/ledgr")
         self.keychain = os.environ.get("LEDGR_KEYCHAIN") or None   # a keychain file, for tests only
         self.yes = a.yes
@@ -248,6 +271,8 @@ class Ctx:
             return "claude/settings.json"
         if path.startswith(self.home + "/"):
             return "herdr/" + path[len(self.home) + 1:]
+        if path.startswith(HOME + "/"):
+            return "home/" + path[len(HOME) + 1:]       # another Claude config folder's settings.json
         return "abs/" + path.lstrip("/")
 
     def legacy_rel(self, path):
@@ -314,6 +339,8 @@ class State:
             return self.ctx.settings
         if key.startswith("herdr/"):
             return os.path.join(self.ctx.home, key[6:])
+        if key.startswith("home/"):
+            return os.path.join(HOME, key[5:])
         return key[3:] if key.startswith("abs/") else key
 
     def rec(self, path):
@@ -328,7 +355,7 @@ class State:
         return self.d["layouts"].setdefault(self.ctx.rel(path), {})
 
     def save(self):
-        self.d["herdr_home"], self.d["claude_settings"] = self.ctx.home, self.ctx.settings
+        self.d["herdr_home"], self.d["claude_settings"] = self.ctx.home, [tilde(p) for p in self.ctx.settings_all]
         write_atomic(self.ctx.state_file, dump(self.d))
 
     def pristine(self, path, marked):
@@ -390,6 +417,64 @@ def hook_python():
     return None, None
 
 
+RC_FILES = (".zshrc", ".zprofile", ".zshenv", ".bashrc", ".bash_profile", ".profile")
+CONFIG_DIR_RX = re.compile(r"""CLAUDE_CONFIG_DIR=(["']?)([^"'\s;)]+)\1""")
+
+
+def claude_configs(ctx, home=None):
+    """Other Claude Code config folders (read-only detection): ~/.claude-* folders that hold a
+    settings.json, this shell's CLAUDE_CONFIG_DIR, and CLAUDE_CONFIG_DIR=... in the wrapper scripts
+    under ~/.local/bin and in the shell start-up files. [(settings.json path, why)], the primary
+    excluded. A folder that does not exist is skipped."""
+    home = home or HOME
+    primary = os.path.realpath(ctx.settings)
+    found = {}
+
+    def add(d, why):
+        d = d.replace("${HOME}", home).replace("$HOME", home)
+        d = home + d[1:] if d == "~" or d.startswith("~/") else d
+        d = d if os.path.isabs(d) else os.path.join(home, d)
+        if not os.path.isdir(d):
+            return
+        p = os.path.join(os.path.abspath(d), "settings.json")
+        if os.path.realpath(p) != primary and os.path.realpath(p) not in {os.path.realpath(x) for x in found}:
+            found[p] = why
+
+    try:
+        names = sorted(os.listdir(home))
+    except OSError:
+        names = []
+    for n in names:
+        if n.startswith(".claude-") and os.path.isfile(os.path.join(home, n, "settings.json")):
+            add(os.path.join(home, n), f"~/{n} holds a settings.json")
+    if os.environ.get("CLAUDE_CONFIG_DIR"):
+        add(os.environ["CLAUDE_CONFIG_DIR"], "CLAUDE_CONFIG_DIR in this shell")
+    bindir = os.path.join(home, ".local", "bin")
+    srcs = [os.path.join(bindir, n) for n in (sorted(os.listdir(bindir)) if os.path.isdir(bindir) else [])]
+    srcs += [os.path.join(home, n) for n in RC_FILES]
+    for f in srcs:
+        try:
+            if not os.path.isfile(f) or os.path.getsize(f) > 262144:
+                continue                     # binaries and the like
+        except OSError:
+            continue
+        text = (read_bytes(f) or b"").decode("utf-8", "replace")
+        for m in CONFIG_DIR_RX.finditer(text):
+            add(m.group(2), f"CLAUDE_CONFIG_DIR in ~/{os.path.relpath(f, home)}")
+    return list(found.items())
+
+
+def hooks_in(path):
+    """True when this Claude settings file carries a ledgr hook entry."""
+    try:
+        sett, _, _ = load_json(path)
+    except (ValueError, OSError):
+        return False
+    hooks = (sett or {}).get("hooks") if isinstance(sett, dict) else None
+    return any(HOOK_MARK in (h.get("command") or "") for lst in (hooks or {}).values() if isinstance(lst, list)
+               for e in lst if isinstance(e, dict) for h in (e.get("hooks") or []) if isinstance(h, dict))
+
+
 def layouts_of(ctx):
     out = []
     ldir = os.path.join(ctx.home, "layouts")
@@ -437,6 +522,7 @@ def preflight(ctx, quiet=False):
         f["hard"].append(f"The hooks' python3 ({f['hook_python']}, {f['hook_python_v']}) is older than 3.9 (set LEDGR_PYTHON).")
     f["security"] = shutil.which("security") or ("/usr/bin/security" if os.path.exists("/usr/bin/security") else None)
     f["claude"] = find_claude()
+    f["claude_configs"] = claude_configs(ctx)
     f["claude_version"] = None
     if f["claude"]:
         rc, out, _ = run([f["claude"], "--version"], timeout=20)
@@ -459,6 +545,9 @@ def report_preflight(ctx, f):
         tag = "shipped, read-only" if shipped else "personal"
         say(f"  layout          {name:<14} {tag}{'  <- shown now' if name == f['active'] else ''}")
     say(f"  Claude Code     {(f['claude_version'] or 'found') + '  ' + tilde(f['claude']) if f['claude'] else 'not found'}")
+    say(f"  Claude config   {tilde(ctx.settings)}{'  (hooked)' if hooks_in(ctx.settings) else ''}")
+    for p, why in f["claude_configs"]:
+        say(f"  Claude config   {tilde(p)}  ({why}){'  (hooked)' if hooks_in(p) else ''}")
     say(f"  python3         installer {f['python']}; hooks {f['hook_python'] or 'none'} {f['hook_python_v'] or ''}")
     say(f"  security        {f['security'] or 'not found (macOS Keychain CLI)'}")
     say(f"  node            {f['node'] or 'not found (optional: one offline store test is skipped)'}")
@@ -574,11 +663,12 @@ def derive(ctx, st, f):
         lay["chip"] = hdr if hdr == CHIP or (ov and hdr == ov.get("chip")) else "none"
         a["layout"] = lay
         break
-    sett, _, _ = load_json(ctx.settings) if os.path.exists(ctx.settings) else (None, None, None)
-    registered = any(HOOK_MARK in (h.get("command") or "") for lst in ((sett or {}).get("hooks") or {}).values()
-                     for e in lst for h in (e.get("hooks") or []))
-    if registered:
+    cands = list(dict.fromkeys(ctx.settings_all + [expand(x) for x in as_list(st.d.get("claude_settings"))]
+                               + [p for p, _ in f.get("claude_configs") or []]))
+    hooked = [p for p in cands if hooks_in(p)]
+    if hooked:
         a["agents"], a["hooks"] = ["claude"], True
+        a["claude_settings"] = [tilde(p) for p in hooked]
     a["api_key"] = "keep"
     return a
 
@@ -592,10 +682,10 @@ def merge(base, over):
 
 DEFAULTS = {
     "agents": ["claude"], "provider": "anthropic", "model": None, "base_url": None, "api_key": "prompt",
-    "instruct_block": None, "threshold": "needed", "animations": True, "fold_asks_while_working": False,
+    "instruct_block": True, "threshold": "needed", "animations": True, "fold_asks_while_working": False,
     "keys": {"capture": "cmd-j", "toggle": "cmd-shift-j", "toggle_command": None, "replace_conflicts": False},
     "layout": {"name": None, "clone_from": None, "panel": "stack", "panel_stack": "panel-body", "host": "status", "chip": "ledgr-pane"},
-    "overlay": None, "hooks": True, "run_tests": True,
+    "overlay": None, "hooks": True, "run_tests": True, "claude_settings": None,
 }
 
 
@@ -697,6 +787,26 @@ def resolve_key(ask, keys, layout, role, want, value, alts, ours, replace):
         key = pick
 
 
+def choose_configs(ctx, f, ans, ask):
+    """The Claude settings files to hook: the primary always, and each other config folder found (or
+    given, or hooked before) on a yes. Given ones (--claude-settings, the answers file) decide the
+    defaults; with none given, every one defaults to yes."""
+    given = ctx.settings_given
+    found = dict(f.get("claude_configs") or [])
+    prior = [p for p in (expand(x) for x in as_list(ans.get("claude_settings"))) if os.path.isdir(os.path.dirname(p))]
+    extras = [p for p in dict.fromkeys((given or [])[1:] + prior + list(found))
+              if os.path.realpath(p) != os.path.realpath(ctx.settings)]
+    chosen = [ctx.settings]
+    if extras:
+        say("\nAlso hook these Claude configs?" if not ask.yes else "  Also hook these Claude configs?")
+        for p in extras:
+            why = found.get(p) or ("given" if given and p in given else "hooked by an earlier install")
+            if ask.yesno(f"  {tilde(p)}  ({why})", "A Claude Code started with CLAUDE_CONFIG_DIR reads that folder's settings.json, not "
+                         "~/.claude's; without ledgr's hooks there, its sessions never join the ledger.", (p in given) if given else True):
+                chosen.append(p)
+    return chosen
+
+
 def gather(ctx, st, f, a, file_answers, flags):
     """Merge defaults, installed values, the answers file and flags; then ask what is still open."""
     ask = Asker(ctx.yes)
@@ -718,6 +828,8 @@ def gather(ctx, st, f, a, file_answers, flags):
     ans["agents"] = ["claude"] if want_claude else []
     if want_claude and not f["claude"]:
         f["warn"].append("Claude Code was not found; the hooks are registered and start working once it is installed.")
+    ctx.settings_all = choose_configs(ctx, f, ans, ask) if want_claude else [ctx.settings]
+    ans["claude_settings"] = [tilde(p) for p in ctx.settings_all]
     # provider
     ans["provider"] = ask.choose("Extraction provider", "At the end of each turn a small model lists what the agent asked of you.", PROVIDERS, ans.get("provider") or "anthropic")
     prov = ans["provider"]
@@ -755,9 +867,11 @@ def gather(ctx, st, f, a, file_answers, flags):
             f["warn"].append(f"No API key in the Keychain for {prov}: extraction reports 'no credential' until you run ./install.sh again or "
                              f"`security add-generic-password -s ledgr -a {prov} -w`.")
     ib = ans.get("instruct_block")
-    ans["instruct_block"] = ask.yesno("Ask Claude to write a ledgr-asks block at the end of each turn?",
-                                      "Adds a short instruction to every session's context; with no provider it is the only way asks arrive.",
-                                      (prov == "none") if ib is None else bool(ib))
+    ans["instruct_block"] = ask.yesno("Ask Claude to declare its asks in a ledgr-asks block at the end of a reply?",
+                                      "The primary channel: the agent says what it needs instead of the extractor guessing. Adds a ~120-word "
+                                      "instruction to each session's context (at start, clear and compact, plus one reminder after a missed "
+                                      "blocker); the extractor stays the fallback.",
+                                      True if ib is None else bool(ib))
     ans["threshold"] = ask.choose("Which asks count on the chip and as open rows?", "Asks below the line are kept as folded suggestions.", THRESHOLDS, ans.get("threshold") or "needed")
     ans["animations"] = ask.yesno("Animations?", "Rows fade in and out and the chip pulses once on a change; no reduced-motion setting reaches a mod.", ans.get("animations") is not False)
     ans["fold_asks_while_working"] = ask.yesno("Fold the asks lane while the agent works?", "Off leaves every fold to you; on is the old automatic fold.", bool(ans.get("fold_asks_while_working")))
@@ -802,7 +916,7 @@ def gather(ctx, st, f, a, file_answers, flags):
         lay["host"] = ask.choose("Which always-visible block hosts ledgr's writer?", "A panel block's copy starts only the first time it is shown; the writer must run all the time.",
                                  hchoices, lay.get("host") if lay.get("host") in [v for v, _ in hchoices] else hchoices[0][0])
         cchoices = [(CHIP, "ledgr-pane: Herdr's pane header plus the chip (the layout's pane header switches to it)")]
-        if ov and ov.get("chip"):
+        if ov and ov.get("chip") and ov["chip"] != CHIP:
             cchoices.append((ov["chip"], f"{ov['chip']} from the overlay"))
         cchoices.append(("none", "none: no chip; the host button and the panel still count"))
         lay["chip"] = ask.choose("Pane-header chip?", "A chip in each pane's header counts what is open for that session.", cchoices,
@@ -826,18 +940,27 @@ def gather(ctx, st, f, a, file_answers, flags):
     k["replaced"] = rep1 + rep2
     ans["keys"] = k
     # hooks: the exact entries, before anything is written
+    # hooks: the exact entries, file by file, before anything is written
+    ans["_declined"] = []
     if ans["agents"]:
-        todo, fix = hook_plan(ctx)
-        if todo or fix:
-            say(f"\n  Claude Code hooks: ledgr adds these entries to {tilde(ctx.settings)}, exactly:")
+        want = ans.get("hooks") is not False
+        yes = False
+        for path in ctx.settings_all:
+            todo, fix = hook_plan(ctx, path)
+            if not todo and not fix:
+                yes = True
+                continue
+            say(f"\n  Claude Code hooks: ledgr adds these entries to {tilde(path)}, exactly:")
             for ev, entry in todo:
                 say(f'    "{ev}": [ ..., {json.dumps(entry)} ]')
             for ev, old, new in fix:
                 say(f"    {ev}: {old}  ->  {new}  (the mod moved)")
-            ans["hooks"] = ask.yesno("Add them?", "Claude Code runs them at session start, at each prompt and at each turn's end; each exits in milliseconds and prints nothing to the model.",
-                                     ans.get("hooks") is not False)
-        else:
-            ans["hooks"] = True
+            if ask.yesno(f"Add them to {tilde(path)}?", "Claude Code runs them at session start, at each prompt and at each turn's end; each exits "
+                         "in milliseconds and prints nothing to the model but the ledgr-asks instruction (instruct_block).", want):
+                yes = True
+            else:
+                ans["_declined"].append(path)
+        ans["hooks"] = yes
     else:
         ans["hooks"] = False
     return ans
@@ -975,7 +1098,7 @@ def apply_config(ctx, ans, changes):
         sys.path.insert(0, os.path.join(ctx.mods, MOD, "bin", "lib"))
         os.environ.setdefault("LEDGR_DATA", ctx.data)
         import ledgr_config  # noqa: E402  (the hooks' defaults)
-        cfg, style, raw = json.loads(json.dumps(ledgr_config.DEFAULT_CONFIG)), {"indent": 2, "nl": True, "ascii": False}, None
+        cfg, style, raw = json.loads(json.dumps(ledgr_config.DEFAULT_CONFIG)), None, None
     new = json.loads(json.dumps(cfg))
     ex = new.setdefault("extract", {})
     prov = ans["provider"]
@@ -1263,8 +1386,9 @@ def hook_entries(ctx):
     return [(ev, {"matcher": "*", "hooks": [{"type": "command", "command": hook_command(ctx, s), "timeout": 5}]}, s) for ev, s in HOOKS]
 
 
-def hook_plan(ctx):
-    sett, style, raw = load_json(ctx.settings) if os.path.exists(ctx.settings) else ({}, None, None)
+def hook_plan(ctx, path=None):
+    path = path or ctx.settings
+    sett, style, raw = load_json(path) if os.path.exists(path) else ({}, None, None)
     hooks = (sett or {}).get("hooks") or {}
     todo, fix = [], []
     for ev, entry, script in hook_entries(ctx):
@@ -1278,22 +1402,28 @@ def hook_plan(ctx):
 
 
 def apply_hooks(ctx, st, ans, changes):
+    """Registers the hooks in every chosen Claude settings file (ctx.settings_all)."""
     if not ans["agents"]:
         return
-    todo, fix = hook_plan(ctx)
-    if os.path.exists(ctx.settings):
-        st.pristine(ctx.settings, lambda b: HOOK_MARK.encode() in b)
+    for path in ctx.settings_all:
+        apply_hooks_to(ctx, st, ans, path, changes)
+    st.d["hooks"] = [e for _, e, _ in hook_entries(ctx)]
+
+
+def apply_hooks_to(ctx, st, ans, path, changes):
+    todo, fix = hook_plan(ctx, path)
+    st.pristine(path, lambda b: HOOK_MARK.encode() in b)
     if not todo and not fix:
-        say("  hooks: already registered")
-        st.d["hooks"] = [e for _, e, _ in hook_entries(ctx)]
+        say(f"  hooks: already registered in {tilde(path)}")
+        mend_newline(ctx, st, path, changes)
         return
-    if not ans.get("hooks"):
-        say("  hooks not written (declined): ledgr sees no Claude session until they are (./install.sh again).")
+    if not ans.get("hooks") or path in (ans.get("_declined") or []):
+        say(f"  hooks not written to {tilde(path)} (declined): ledgr sees no session that reads it until they are (./install.sh again).")
         return
     try:
-        sett, style, raw = load_json(ctx.settings) if os.path.exists(ctx.settings) else (None, None, None)
+        sett, style, raw = load_json(path) if os.path.exists(path) else (None, None, None)
     except ValueError:
-        raise SystemExit(f"{ctx.settings} is not valid JSON; nothing written.")
+        raise SystemExit(f"{path} is not valid JSON; nothing written.")
     new = json.loads(json.dumps(sett or {}))
     hooks = new.setdefault("hooks", {})
     for ev, entry in todo:
@@ -1303,12 +1433,105 @@ def apply_hooks(ctx, st, ans, changes):
             for h in e.get("hooks") or []:
                 if h.get("command") == old:
                     h["command"] = cmd
-    ctx.backup(ctx.settings)
-    text = dump(new, style or {"indent": 2, "nl": True, "ascii": False})
-    write_atomic(ctx.settings, text)
-    st.wrote(ctx.settings, text)
-    st.d["hooks"] = [e for _, e, _ in hook_entries(ctx)]
-    changes.append(f"{tilde(ctx.settings)}: {len(todo)} hook entr{'y' if len(todo) == 1 else 'ies'} added" + (f", {len(fix)} repointed" if fix else ""))
+    ctx.backup(path)
+    text = dump(new, style)
+    write_atomic(path, text)
+    st.wrote(path, text)
+    changes.append(f"{tilde(path)}: {len(todo)} hook entr{'y' if len(todo) == 1 else 'ies'} added" + (f", {len(fix)} repointed" if fix else ""))
+
+
+def mend_newline(ctx, st, path, changes):
+    """A JSON file ledgr itself wrote last without a final newline (install.sh before this fix kept a
+    missing one) gets it back. A file someone else has written since is left alone."""
+    cur = read_bytes(path)
+    if not cur or cur.endswith(b"\n") or sha(cur) != st.rec(path).get("written"):
+        return
+    ctx.backup(path)
+    write_atomic(path, cur + b"\n")
+    st.wrote(path, cur + b"\n")
+    changes.append(f"{tilde(path)}: final newline restored")
+
+
+def mod_named(ctx, st, key):
+    """The mod folder a state key is in (herdr/mods/<name>/...), or None."""
+    p, pre = st.path(key), ctx.mods + "/"
+    return p[len(pre):].split("/", 1)[0] if p.startswith(pre) else None
+
+
+def revert_overlay_mod(ctx, st, m, used, drop_edited):
+    """Takes an overlay mod back to before ledgr: its engine copy goes, files ledgr added go, files
+    ledgr replaced get their originals back, and a folder left with only Herdr's generated files
+    goes. A file with no original, or changed since ledgr wrote it, stays as it is, unless
+    drop_edited and no layout uses the mod: then the whole folder goes, after a backup.
+    Returns one line for the summary."""
+    d = os.path.join(ctx.mods, m)
+    if os.path.isdir(os.path.join(d, "ledgr")):
+        ctx.backup(os.path.join(d, "ledgr"))
+        shutil.rmtree(os.path.join(d, "ledgr"))
+    keys = sorted(k for k in st.files if st.path(k).startswith(d + "/"))
+    unknown, restored, deleted = [], 0, 0
+    for key in keys:
+        rec, path = st.files[key], st.path(key)
+        cur = read_bytes(path)
+        if cur is None:
+            continue
+        if rec.get("origin") == "absent" and sha(cur) == rec.get("written"):
+            ctx.backup(path)
+            os.remove(path)
+            deleted += 1
+        elif st.original(rec) is not None and sha(cur) == rec.get("written"):
+            pr = st.original(rec)
+            if pr != cur:
+                ctx.backup(path)
+                write_atomic(path, pr)
+                restored += 1
+        elif rec.get("origin") == "unknown" or (rec.get("written") and sha(cur) != rec.get("written")):
+            unknown.append(os.path.relpath(path, d))
+    if unknown and drop_edited and m not in used:
+        ctx.backup(d)
+        shutil.rmtree(d)
+        return f"mods/{m}: removed (no layout uses it; no copy from before ledgr of {', '.join(unknown)})"
+    if unknown:
+        why = "a layout still uses the mod" if m in used else "changed since ledgr wrote them"
+        return f"mods/{m}: kept {', '.join(unknown)} as they are (no copy from before ledgr, or {why})"
+    left = [fn for _, _, fns in os.walk(d) for fn in fns if fn not in GENERATED]
+    if deleted and not left:
+        shutil.rmtree(d)             # nothing but Herdr's generated files: ledgr had added all of it
+        return f"mods/{m}: removed ({deleted} file(s) ledgr had added, nothing else in it)"
+    if restored or deleted:
+        return (f"mods/{m}: {restored} file(s) back to their originals from before ledgr" + (f", {deleted} added by ledgr removed" if deleted else "")
+                + "; engine copy removed")
+    return (f"mods/{m}: engine copy removed; its other files were already as before ledgr" if keys
+            else f"mods/{m}: engine copy removed; no record of its originals, files left as they are")
+
+
+def retired_mods(ctx, st, keep):
+    """Mods an earlier install deployed that these answers no longer do: ledgr-pane after a chip
+    change, a mod an overlay dropped (the owner's my-pane after he moved to ledgr-pane)."""
+    known = set(st.d["mods"]) | {CHIP} | {mod_named(ctx, st, k) for k in st.files}
+    return sorted(m for m in known if m and m != MOD and m not in keep and os.path.isdir(os.path.join(ctx.mods, m)))
+
+
+def retire_mods(ctx, st, ans, deployed, changes):
+    """Removes what retired_mods finds, once the layout no longer uses it: ledgr-pane is ledgr's own
+    and goes (after a backup); an overlay mod goes back to before ledgr (revert_overlay_mod), which
+    removes it when ledgr had added all of it. A mod some layout still uses is kept and named."""
+    used = layout_refs(ctx)
+    for m in retired_mods(ctx, st, set(deployed)):
+        d = os.path.join(ctx.mods, m)
+        if m in used:
+            changes.append(f"mods/{m}: kept (ledgr no longer deploys it, but a layout still uses it)")
+            continue
+        if m == CHIP:
+            ctx.backup(d)
+            shutil.rmtree(d)
+            changes.append(f"mods/{m}: removed (the chip is now {(ans.get('layout') or {}).get('chip') or 'none'})")
+        else:
+            changes.append(revert_overlay_mod(ctx, st, m, used, drop_edited=False))
+        if not os.path.isdir(d):
+            st.d["mods"] = [x for x in st.d["mods"] if x != m]
+            for k in [k for k in st.files if mod_named(ctx, st, k) == m]:
+                del st.files[k]
 
 
 def herdr_checks(ctx, mods):
@@ -1357,7 +1580,10 @@ def cmd_install(ctx, args, flags):
     say(f"  layout      {('layouts/' + lay['name'] + '.json') if lay.get('name') else 'none'}" +
         (f" (cloned from {lay['clone_from']})" if lay.get("clone_from") else "") +
         (f"; panel {lay.get('panel')}; host {lay.get('host')}; chip {lay.get('chip')}" if lay.get("name") else ""))
-    say(f"  hooks       {'Claude Code: SessionStart, UserPromptSubmit, Stop' if ans['agents'] and ans['hooks'] else 'none'}")
+    say(f"  hooks       {'Claude Code: SessionStart, UserPromptSubmit, Stop in ' + ', '.join(tilde(p) for p in ctx.settings_all if p not in ans['_declined']) if ans['agents'] and ans['hooks'] else 'none'}")
+    retiring = retired_mods(ctx, st, {MOD} | ({CHIP} if lay.get("chip") == CHIP else set()) | set((ov or {}).get("mods") or []) | set(host_mods(ctx)))
+    if retiring:
+        say(f"  retires     {', '.join('mods/' + m for m in retiring)} (an earlier install deployed it; removed once no layout uses it)")
     if ans.get("_key"):
         say(f"  Keychain    store the API key you gave (typed, or LEDGR_API_KEY; service ledgr, account {ans['provider']})")
     say(f"  backups     {tilde(ctx.state_dir)}/backup-{ctx.stamp}/")
@@ -1393,6 +1619,7 @@ def cmd_install(ctx, args, flags):
     apply_config(ctx, ans, changes)
     apply_keys(ctx, st, ans, changes)
     apply_hooks(ctx, st, ans, changes)
+    retire_mods(ctx, st, ans, deployed, changes)
     st.d["toggle_command"] = ans["keys"]["toggle_command"]
     st.d["version"] = f["repo_version"]
     st.d["installed_at"] = datetime.datetime.now().isoformat(timespec="seconds")
@@ -1453,15 +1680,26 @@ def cmd_check(ctx, args):
         say(f"  engine copy     mods/{m}/ledgr: {'identical' if not diff else 'DIFFERS: ' + ', '.join(diff)}")
         if diff:
             bad.append(f"engine copy in mods/{m} differs (run ./install.sh)")
-    sett, _, _ = load_json(ctx.settings) if os.path.exists(ctx.settings) else (None, None, None)
+    files = list(dict.fromkeys([expand(x) for x in as_list(st.d.get("claude_settings"))] or ctx.settings_all))
     for ev, entry, script in hook_entries(ctx):
-        mark = f"mods/ledgr/bin/adapters/claude/{script}"
-        cmds = [h.get("command") for e in ((sett or {}).get("hooks") or {}).get(ev) or [] for h in e.get("hooks") or [] if mark in (h.get("command") or "")]
-        path = os.path.join(ctx.mods, MOD, "bin", "adapters", "claude", script)
-        okx = os.access(path, os.X_OK)
-        say(f"  hook {ev:<17} {'registered' if cmds else 'NOT registered'}; script {'executable' if okx else 'missing or not executable'}")
-        if not cmds or not okx:
-            bad.append(f"hook {ev}")
+        okx = os.access(os.path.join(ctx.mods, MOD, "bin", "adapters", "claude", script), os.X_OK)
+        say(f"  hook {ev:<17} script {'executable' if okx else 'missing or not executable'}")
+        if not okx:
+            bad.append(f"hook {ev} script")
+    for p in files:
+        try:
+            sett, _, _ = load_json(p) if os.path.exists(p) else (None, None, None)
+        except ValueError:
+            sett = None
+        hooks = (sett or {}).get("hooks") or {}
+        missing = [ev for ev, _, script in hook_entries(ctx)
+                   if not any(f"mods/ledgr/bin/adapters/claude/{script}" in (h.get("command") or "") for e in hooks.get(ev) or [] for h in e.get("hooks") or [])]
+        say(f"  hooks in        {tilde(p)}: {'SessionStart, UserPromptSubmit, Stop registered' if not missing else 'NOT registered: ' + ', '.join(missing)}")
+        if missing:
+            bad.append(f"hooks missing in {tilde(p)}")
+    for p, why in f.get("claude_configs") or []:
+        if p not in files and not hooks_in(p):
+            say(f"  ! {tilde(p)} ({why}) has no ledgr hooks: sessions started with that CLAUDE_CONFIG_DIR do not join (./install.sh offers it)")
     newest = 0
     for sub in ("terminals", "sessions", "log", "spool"):
         d = os.path.join(ctx.data, sub)
@@ -1503,12 +1741,12 @@ def cmd_check(ctx, args):
 
 
 # ── uninstall ─────────────────────────────────────────────────────────────────────────────────
-def restore_or_surgical(ctx, st, path, surgical, style, label, notes):
+def restore_or_surgical(ctx, st, path, surgical, style, label, notes, marked=None):
     """Writes the saved original when it equals the surgical result (only ledgr's entries differed);
     otherwise writes the surgical result. Says which."""
     rec = st.rec(path)
     if not rec.get("pristine"):
-        rec = st.pristine(path, (lambda b: HOOK_MARK.encode() in b) if path == ctx.settings else marked_json)
+        rec = st.pristine(path, marked or ((lambda b: HOOK_MARK.encode() in b) if path == ctx.settings else marked_json))
     pr = st.original(rec)
     cur = read_bytes(path)
     if pr is not None:
@@ -1517,6 +1755,7 @@ def restore_or_surgical(ctx, st, path, surgical, style, label, notes):
         except ValueError:
             same = False
         if same:
+            pr = with_nl(pr)
             if pr != cur:
                 ctx.backup(path)
                 write_atomic(path, pr)
@@ -1572,7 +1811,8 @@ def cmd_uninstall(ctx, args):
     say(f"  your current choices: {tilde(out)}")
     say(f"  reinstall later with: ./install.sh --yes --answers {tilde(out)}")
     ov = overlay_manifest(a.get("overlay")) if a.get("overlay") else None
-    sett_has = os.path.exists(ctx.settings) and HOOK_MARK.encode() in (read_bytes(ctx.settings) or b"")
+    sett_files = [p for p in dict.fromkeys(ctx.settings_all + [expand(x) for x in as_list(st.d.get("claude_settings"))]
+                                           + [p for p, _ in f.get("claude_configs") or []]) if hooks_in(p)]
     lays = []
     for name, shipped in f["layouts"]:
         p = os.path.join(ctx.home, "layouts", name + ".json")
@@ -1580,7 +1820,7 @@ def cmd_uninstall(ctx, args):
         if not shipped and (b"ledgr" in b or (ov and ov.get("chip") and f'"{ov["chip"]}"'.encode() in b)):
             lays.append((name, p))
     say("  removes: " + ", ".join(filter(None, [
-        "the Claude Code hooks" if sett_has else None, "ledgr's key bindings",
+        ("the Claude Code hooks in " + ", ".join(tilde(p) for p in sett_files)) if sett_files else None, "ledgr's key bindings",
         ("ledgr blocks in " + ", ".join(f"layouts/{n}.json" for n, _ in lays)) if lays else None,
         "mods/ledgr" + (", mods/ledgr-pane" if os.path.isdir(os.path.join(ctx.mods, CHIP)) else ""),
         ("overlay mods " + ", ".join(ov.get("mods") or []) + " (back to their originals)") if ov else None])))
@@ -1588,9 +1828,9 @@ def cmd_uninstall(ctx, args):
     if not ask.yesno("Uninstall ledgr?", "Every file is backed up first.", True):
         raise SystemExit("Nothing changed.")
     notes = []
-    # 2. hooks
-    if sett_has:
-        sett, style, _ = load_json(ctx.settings)
+    # 2. hooks, in every Claude settings file that has them
+    for path in sett_files:
+        sett, style, _ = load_json(path)
         new = json.loads(json.dumps(sett))
         hooks = new.get("hooks") or {}
         for ev in list(hooks):
@@ -1598,10 +1838,10 @@ def cmd_uninstall(ctx, args):
             if not hooks[ev]:
                 del hooks[ev]
         if "hooks" in new and not new["hooks"]:
-            pr = st.original(st.rec(ctx.settings))
+            pr = st.original(st.rec(path))
             if pr is None or "hooks" not in json.loads(pr.decode("utf-8")):
                 del new["hooks"]          # ledgr made the "hooks" object; nothing else is in it
-        restore_or_surgical(ctx, st, ctx.settings, new, style, tilde(ctx.settings), notes)
+        restore_or_surgical(ctx, st, path, new, style, tilde(path), notes, marked=lambda b: HOOK_MARK.encode() in b)
     # 3. layouts
     chips = {CHIP} | ({ov["chip"]} if ov and ov.get("chip") else set())
     for name, p in lays:
@@ -1666,43 +1906,8 @@ def cmd_uninstall(ctx, args):
     # 5. overlay mods and engine copies
     refs = layout_refs(ctx)
     for m in sorted(set(host_mods(ctx)) | set((ov or {}).get("mods") or [])):
-        d = os.path.join(ctx.mods, m)
-        if not os.path.isdir(d):
-            continue
-        if os.path.isdir(os.path.join(d, "ledgr")):
-            ctx.backup(os.path.join(d, "ledgr"))
-            shutil.rmtree(os.path.join(d, "ledgr"))
-        unknown, restored, deleted = [], 0, 0
-        for key, rec in sorted(st.files.items()):
-            path = st.path(key)
-            if not path.startswith(d + "/"):
-                continue
-            cur = read_bytes(path)
-            if cur is None:
-                continue
-            if rec.get("origin") == "absent" and sha(cur) == rec.get("written"):
-                ctx.backup(path)
-                os.remove(path)
-                deleted += 1
-            elif st.original(rec) is not None and sha(cur) == rec.get("written"):
-                pr = st.original(rec)
-                if pr != cur:
-                    ctx.backup(path)
-                    write_atomic(path, pr)
-                    restored += 1
-            elif rec.get("origin") == "unknown" or (rec.get("written") and sha(cur) != rec.get("written")):
-                unknown.append(os.path.relpath(path, d))
-        if unknown and m not in refs:
-            ctx.backup(d)
-            shutil.rmtree(d)
-            notes.append(f"mods/{m}: removed (no layout uses it; no copy from before ledgr of {', '.join(unknown)})")
-        elif unknown:
-            notes.append(f"mods/{m}: kept {', '.join(unknown)} as they are (no copy from before ledgr, and a layout still uses the mod)")
-        elif restored or deleted:
-            notes.append(f"mods/{m}: {restored} file(s) back to their originals from before ledgr" + (f", {deleted} added by ledgr removed" if deleted else "") + "; engine copy removed")
-        else:
-            notes.append(f"mods/{m}: engine copy removed; its other files were already as before ledgr" if any(st.path(k).startswith(d + "/") for k in st.files)
-                         else f"mods/{m}: engine copy removed; no record of its originals, files left as they are")
+        if os.path.isdir(os.path.join(ctx.mods, m)):
+            notes.append(revert_overlay_mod(ctx, st, m, refs, drop_edited=True))
     # 6. ledgr's own mods
     for m in (CHIP, MOD):
         d = os.path.join(ctx.mods, m)
@@ -1733,6 +1938,23 @@ def cmd_uninstall(ctx, args):
     return 0
 
 
+def make_ctx(args):
+    """The context from the flags, then the answers file's herdr_home and claude_settings (a list or
+    one string) where no flag or HERDR_HOME gives them."""
+    ctx = Ctx(args)
+    if args.answers:
+        try:
+            fa, _, _ = load_json(expand(args.answers))
+        except ValueError:
+            fa = None
+        if isinstance(fa, dict):
+            hh = fa.get("herdr_home") if not args.herdr_home and not os.environ.get("HERDR_HOME") else None
+            cs = None if args.claude_settings else (as_list(fa.get("claude_settings")) or None)
+            if hh or cs:
+                ctx = Ctx(argparse.Namespace(**dict(vars(args), herdr_home=hh or args.herdr_home, claude_settings=cs or args.claude_settings)))
+    return ctx
+
+
 # ── main ──────────────────────────────────────────────────────────────────────────────────────
 def main(argv):
     ap = argparse.ArgumentParser(prog="install.sh", description="Install, check or uninstall the ledgr Herdr mod.")
@@ -1741,7 +1963,8 @@ def main(argv):
     ap.add_argument("--answers", metavar="FILE", help="answers file (ledgr.install.json); see setup/answers.example.json")
     ap.add_argument("--save-answers", metavar="FILE", help="write the answers used to FILE")
     ap.add_argument("--herdr-home", metavar="DIR")
-    ap.add_argument("--claude-settings", metavar="FILE")
+    ap.add_argument("--claude-settings", metavar="FILE", action="append",
+                    help="a Claude settings file to hook; repeat for each config folder (the first is the primary)")
     ap.add_argument("--state-dir", metavar="DIR")
     ap.add_argument("--provider", choices=[p for p, _ in PROVIDERS])
     ap.add_argument("--model")
@@ -1799,15 +2022,7 @@ def main(argv):
         flags["agents"] = [x for x in args.agents.split(",") if x]
     if args.no_hooks:
         flags["agents"] = []
-    ctx = Ctx(args)
-    if args.answers and not args.herdr_home and not os.environ.get("HERDR_HOME"):
-        try:
-            fa, _, _ = load_json(expand(args.answers))
-            if isinstance(fa, dict):
-                if fa.get("herdr_home"):
-                    ctx.__init__(argparse.Namespace(**dict(vars(args), herdr_home=fa["herdr_home"], claude_settings=args.claude_settings or fa.get("claude_settings"))))
-        except ValueError:
-            pass
+    ctx = make_ctx(args)
     try:
         if args.command == "check":
             return cmd_check(ctx, args)

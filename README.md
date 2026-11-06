@@ -10,8 +10,6 @@ A [Herdr](https://herdr.dev) mod for long conversations with coding agents.
 
 ![ledgr](preview.png)
 
-*(Screenshot to come: `preview.png`, the panel beside a working agent.)*
-
 ## Requirements
 
 - Herdr 0.1.13 or newer, on macOS.
@@ -31,7 +29,7 @@ From a clone of this repo:
 It checks your setup first (Herdr home and version, which layouts are Herdr's own and which are yours, Claude Code, python3, `security`, an existing ledgr, keys that would clash), then asks each question with a one-line reason, defaults in brackets: the extraction provider and its key (typed hidden, stored in the Keychain), the threshold, animations, the asks fold, which personal layout gets the panel (it offers to clone a shipped layout first; Herdr's own are read-only), where the panel and the host button go, the optional pane-header chip, the two keys (with clash detection), and the exact Claude Code hook entries it will add. Nothing is written until you confirm the plan. Then it deploys, runs `herdr-app check` on every mod it touched and the offline tests, and prints what changed, where the backups are, and the keys to try.
 
 - No questions: `./install.sh --yes --answers ledgr.install.json` (every key is optional; see `setup/answers.example.json`). With `--yes` an API key comes only from `LEDGR_API_KEY`.
-- Every question also has a flag: `./install.sh --help`.
+- Every question also has a flag: `./install.sh --help`. `--claude-settings FILE` repeats, one per Claude config folder (the answers key `claude_settings` is a list).
 - Run it again any time: it is idempotent and shows what is installed as the defaults.
 - The doctor: `./install.sh --check` (hooks registered and firing, which copy holds the writer role, the Keychain item, engine copies, checks).
 - Remove it: `./uninstall.sh`. It first saves your choices to `~/.local/state/ledgr/last-install.json` (reinstall with `./install.sh --yes --answers ~/.local/state/ledgr/last-install.json`), restores the files saved before ledgr first touched them where only ledgr's entries differ, removes ledgr's entries alone where something else changed since, asks separately before deleting `ledgr-data/`, and never deletes the Keychain item.
@@ -51,6 +49,14 @@ It checks your setup first (Herdr home and version, which layouts are Herdr's ow
 
 The installer offers free alternatives when ⌘J or ⌘⇧J is taken.
 
+## How asks are found
+
+1. **Declared, the primary channel.** Each Claude Code session gets a short instruction (about 120 words, at start and after `/clear` or `/compact`): when something blocks the agent, or needs you to decide or act before the work is truly done, it ends the reply with a fenced `ledgr-asks` block, one JSON object per item with its level. ledgr reads the block when the turn ends; no model call is made. The agent says what it needs instead of ledgr guessing.
+2. **Extracted, the fallback.** A reply without a block goes to the extraction provider (Claude Haiku by default), which lists what the reply asks of you. When it finds a blocking ask the agent did not declare, that session's next prompt carries the instruction once more.
+3. **One threshold for both.** `extract.threshold` decides which levels are open rows and count; asks below it are kept, folded as suggestions.
+
+Other agents need an adapter: something that gets the instruction into that engine's context and reports its turns (`mods/ledgr/bin/adapters/README.md`). A session without one gets the parked-questions lane only; the session menu says which each agent has (declares asks, extractor only, no asks).
+
 ## Configuration
 
 `~/.config/herdr-app/ledgr-data/config.json` (the installer writes it; edits apply within a second, no restart):
@@ -61,7 +67,8 @@ The installer offers free alternatives when ⌘J or ⌘⇧J is taken.
 | `extract.provider` | `anthropic`, `openai-compatible` (with `extract.base_url`), `cli` (`claude -p` on your subscription, untested end to end) | `anthropic` |
 | `extract.model` | the provider's model id | `claude-haiku-5-5` |
 | `extract.mode` | `block-first`, `always-model`, `block-only` (provider `none` in the installer) | `block-first` |
-| `instruct_block` | ask Claude to end each turn with a `ledgr-asks` block (adds an instruction to the session's context) | `false` |
+| `instruct_block` | the agent declares its asks in a `ledgr-asks` block (the primary channel; a ~120-word instruction in the session's context at start, `/clear` and `/compact`) | `true` |
+| `instruct_reinject` | with `instruct_block`: after a turn whose blocking ask only the extractor found, the instruction once more at that session's next prompt | `true` |
 | `ui.animations` | rows fade, the chip pulses; `false` stops all motion | `true` |
 | `ui.foldAsksWhileWorking` | fold the asks lane while the agent works | `false` |
 | `ui.panel` | the layout ids the panel lives in: `{column, stack, child}` | `panel` / `panel-body` / `ledgr` |
@@ -75,8 +82,8 @@ The installer offers free alternatives when ⌘J or ⌘⇧J is taken.
 
 ## What this mod touches
 
-- **Claude Code hooks:** three entries in `~/.claude/settings.json` (SessionStart, UserPromptSubmit, Stop) that run `mods/ledgr/bin/adapters/claude/*.sh`. They do nothing outside a Herdr terminal and print nothing into the model's context.
-- **`~/.claude`:** the hooks read the session's transcript for the turn's last message; the installer edits `settings.json` (after a backup). Nothing else.
+- **Claude Code hooks:** three entries (SessionStart, UserPromptSubmit, Stop) in each Claude settings file you choose: `~/.claude/settings.json`, and the settings.json of any other Claude config folder (a Claude Code started with `CLAUDE_CONFIG_DIR`, such as a second account; the installer lists the ones it finds and asks) that run `mods/ledgr/bin/adapters/claude/*.sh`. They do nothing outside a Herdr terminal. Their only output into the model's context is the ledgr-asks instruction (about 120 words): at session start, after `/clear` and `/compact`, and once at the next prompt after a turn whose blocking ask the agent did not declare (`instruct_block`, `instruct_reinject`; both on by default).
+- **The Claude config folders:** the hooks read the session's transcript (the path Claude Code gives them) for the turn's last message; the installer edits the chosen `settings.json` files (after a backup). Nothing else.
 - **Network:** one call per finished turn to the extraction provider you chose (the Anthropic API by default), carrying that turn's last assistant message and the session's open asks. None with provider `none`, or when the agent wrote a `ledgr-asks` block.
 - **Keychain:** the API key, service `ledgr`, account = provider, read at each call; never on disk.
 - **Programs:** `hc read`, `hc run … claude --resume …` for branches and Resume session, `hc kill`/`hc rm` when you close a branch, `git rev-parse`, `which claude`, the extractor's retry script; the hooks run `python3`, `security` and `curl`.
@@ -88,11 +95,12 @@ The installer offers free alternatives when ⌘J or ⌘⇧J is taken.
 
 ```
 mods/ledgr/             the mod (panel, capture box, host button, writer, Python hooks in bin/)
+mods/ledgr/bin/adapters/   the adapter contract (README.md) and the Claude Code adapter
 mods/ledgr-pane/        optional: Herdr's pane header plus the ledgr chip
 keys.json               the keys the mod expects (merged into yours)
 RECIPE.md               the brief Herdr's manual asks for: what you see, how it behaves, built from, watch out, done when
 setup/                  the installer (ledgr_setup.py), answers example, layout snippets
-examples/personal-overlay/   an example integration: a personal tab bar that hosts the writer, a personal pane header
+examples/personal-overlay/   an example integration: the owner's personal tab bar, which hosts the writer
 docs/                   research, design, reviews, build notes, publishing-requirements.md
 install.sh, uninstall.sh, sync-from-live.sh
 ```

@@ -121,6 +121,16 @@ def hook_mode(input_file):
     note_uuid(sid, t, turn, ph, found)
     C.log(f"{t} extract {sid} turn={turn} source={res['source']} asks={len(res['asks'])} ms={res['ms']} "
           f"uuid={'yes' if found.get('uuid') else 'no'} err={res.get('error')}")
+    if reinject_due(cfg, res) and M.mark_reinject(sid, turn):
+        C.log(f"{t} reinject_pending {sid} turn={turn}")
+
+
+def reinject_due(cfg, res):
+    """The hybrid re-injection rule: the instruction is on, and the model (not a block) found a
+    blocking ask in a message that carried no ledgr-asks block at all."""
+    return (cfg.get("instruct_block") is True and cfg.get("instruct_reinject") is not False
+            and res.get("source") == "model" and not res.get("block_found")
+            and any(a.get("level") == "blocking" for a in res.get("asks") or []))
 
 
 def retry_mode(sid, turn, t):

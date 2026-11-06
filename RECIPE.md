@@ -17,13 +17,23 @@ answers, `/btw` questions and branch results go to the clipboard and the pane is
 
 Tell the person all of this before copying anything (the manual's step 1).
 
-- **Registers Claude Code hooks.** Three entries in `~/.claude/settings.json` (SessionStart,
-  UserPromptSubmit, Stop), each `bash "$HOME/.config/herdr-app/mods/ledgr/bin/adapters/claude/<event>.sh"`
-  with a 5 s timeout. They exit 0 at once, print nothing into the model's context, and do nothing
-  outside a Herdr terminal (`HC_TERMINAL_ID` unset) or inside a process ledgr started (`LEDGR_INNER`).
-- **Reads `~/.claude`.** The hooks read the session's transcript (`~/.claude/projects/…/<id>.jsonl`)
-  for the turn's last message and its uuid; the installer reads and writes `~/.claude/settings.json`
-  for the hook entries (backup first). Nothing else under `~/.claude`.
+- **Registers Claude Code hooks.** Three entries (SessionStart, UserPromptSubmit, Stop) in each of
+  the Claude settings files you chose: `~/.claude/settings.json`, plus any other Claude config folder
+  (a Claude Code started with `CLAUDE_CONFIG_DIR`, such as a second account; the installer lists the
+  `~/.claude-*` folders and the `CLAUDE_CONFIG_DIR=` values in `~/.local/bin` wrappers and shell
+  start-up files it finds, and asks for each), each `bash "$HOME/.config/herdr-app/mods/ledgr/bin/adapters/claude/<event>.sh"`
+  with a 5 s timeout. They exit 0 at once and do nothing outside a Herdr terminal (`HC_TERMINAL_ID`
+  unset) or inside a process ledgr started (`LEDGR_INNER`).
+- **Prints an instruction into the session's context.** Unless `instruct_block` is false, the
+  SessionStart hook prints the ledgr-asks instruction (`mods/ledgr/bin/lib/asks-instruction.txt`,
+  about 120 words: end a reply that has blockers or needed decisions with a fenced `ledgr-asks` JSON
+  block) once per session and again after `/clear` or `/compact`; Claude Code adds it to the context.
+  When the extractor finds a blocking ask in a reply that had no block, the session's next prompt
+  carries it once more (`instruct_reinject`). Nothing else is ever printed.
+- **Reads the Claude config folder.** The hooks read the session's transcript (the path Claude Code
+  passes them, `<config>/projects/…/<id>.jsonl`) for the turn's last message and its uuid, and
+  `<config>/sessions/<pid>.json` for a session name; the installer reads and writes the Claude
+  settings files you chose for the hook entries (backup first). Nothing else there.
 - **Calls one network endpoint.** At the end of each turn the hooks' extractor sends that turn's last
   assistant message (at most 60,000 characters) and the session's open asks to the configured
   provider: the Anthropic Messages API (`claude-haiku-5-5`, the default), an OpenAI-compatible server
@@ -61,8 +71,10 @@ Tell the person all of this before copying anything (the manual's step 1).
 - **Panel** (props `{view: "panel"}`; by default a child of the right-hand `panel-body` stack, the
   column's width, 280-900 px). Rounded card, `background` fill, 1 px `border`, 12.5 px text.
   - Header, 42 px: "ledgr", a session button (agent label pill such as `claude` or `codex`, then the
-    session name, a small dim `pane t21`, chevron) that opens the session list (live sessions, then
-    ENDED SESSIONS), a pin toggle (`pin`/`pin-off` icons), `turn N` (in `working` colour with
+    session name, a small dim `pane t21`, chevron) that opens the session list (live sessions grouped
+    by agent, each group headed by how its asks arrive: `declares asks` in `accent`, `extractor only`
+    or `no asks`; then ENDED SESSIONS), the pin (a faint outline `pin` while the panel follows focus;
+    pinned, an `accent` pill "pinned" whose tooltip says "click to follow focus"), `turn N` (in `working` colour with
     "· working" while the agent works), and a `demo` pill in demo mode.
   - Names a person reads are words: `Ask 9`, `Question 1`, `pane t21` (never a bare `t21`), "branch of
     Question 1" with its short id (`br-q1-c51e`) small beside it. The short forms stay in every machine
@@ -108,6 +120,13 @@ Tell the person all of this before copying anything (the manual's step 1).
 
 ## How it behaves
 
+- Asks arrive two ways. Declared first: the agent, told by the SessionStart instruction, ends a reply
+  that has a blocker or a needed decision with a fenced `ledgr-asks` block, which ledgr reads at Stop
+  with no model call; the agent says what it needs instead of ledgr guessing. Extracted as the
+  fallback: a reply without a block goes to the provider (Haiku by default); a blocking ask found that
+  way puts the instruction into the session's next prompt once more. `extract.threshold` applies to
+  both. An agent ledgr has no adapter for gets the parked-questions lane only
+  (`mods/ledgr/bin/adapters/README.md` is the contract).
 - Agent status: working lets the counts collect and puts "agent working" on the asks lane head; at
   Stop (blocked, done, idle) the host badge and the chip surface (or turn `blocking`). The panel never
   opens itself; no toast, no sound.
@@ -119,7 +138,11 @@ Tell the person all of this before copying anything (the manual's step 1).
   needed) decides which levels are open rows and count. The writer and the panel read `config.json`
   again whenever it changes: no restart.
 - The host button and ⌘⇧J (`ledgr.toggle`) show or hide the panel. The panel follows the focused
-  agent's session unless pinned; a chip click shows the panel on that chip's session.
+  agent's session unless pinned, across spaces too; a chip click shows the panel on that chip's
+  session. A focused agent pane with no ledgr session yet says so ("no ledgr session yet", and that it
+  joins at its next prompt or turn end; a Claude Code with its own `CLAUDE_CONFIG_DIR` needs the hook
+  entries in that folder's settings.json) instead of showing a session from elsewhere; a shell in the
+  same space keeps the last session.
 - ⌘J opens the capture box over a streaming agent; the box takes the keyboard. Enter parks; Enter on an
   empty question with a quote parks a bookmark; Enter with nothing closes. ⌘Enter parks and puts
   `/btw About "<quote>": <question>` on the clipboard, then focuses the agent's pane. Esc cancels. Tab
@@ -156,8 +179,11 @@ Tell the person all of this before copying anything (the manual's step 1).
   `main.js` routes on props (`view: "host"` → `host.js`; `view: "panel"` → `panel.js`; an `overlay` or
   `view: "capture"` → `capture.js`); `writer.js` (the single writer); `store.js`, `spool.js`, `nav.js`,
   `config.js` (defaults, paths, where the panel lives, `liveHome`), `branch.js`, `confluence.js`,
-  `words.js`, `fixtures.js` (demo), `ledgr.svg`; `bin/` (Python 3.9+, standard library only): the
-  Claude Code adapter, the extractor and its providers, the offline tests.
+  `words.js`, `adapters.js` (reads each `bin/adapters/<name>/adapter.json` capability manifest for
+  the session menu's "declares asks / extractor only / no asks"), `fixtures.js` (demo), `ledgr.svg`;
+  `bin/` (Python 3.9+, standard library only): `adapters/README.md` (the adapter contract: identity,
+  turn signal, instruction injection, turn text, optional fork and resume), the Claude Code adapter,
+  the block parser, the extractor and its providers, the offline tests.
 - **Writer election**: only the holder of `shared("ledgr.writer")` `{id, by, at}` writes
   `ledgr-data/store.json`. The host block runs a writer (role `host`); a mod that imports an engine
   copy from its own `ledgr/` folder runs one under its own name; the panel runs one only as a fallback
@@ -179,7 +205,8 @@ Tell the person all of this before copying anything (the manual's step 1).
 - **Data**, `<Herdr home>/ledgr-data/`: `store.json` (written only by the writer), `spool/` (one JSON
   event per file), `terminals/<t>.json` (identity map), `sessions/<sid>.json` and
   `sessions/<sid>/decisions.md`, `turns/<sid>/<n>.md`, `snapshot.json`, `archive/`, `log/`, `tmp/`,
-  `config.json` (`extract.provider`, `model`, `base_url`, `mode`, `threshold`; `instruct_block`;
+  `config.json` (`extract.provider`, `model`, `base_url`, `mode`, `threshold`; `instruct_block`,
+  `instruct_reinject`;
   `ui.animations`, `ui.foldAsksWhileWorking`, `ui.panel`).
 - **Install.** Both paths end in the same files:
   - `./install.sh` asks each question with its reason (defaults in brackets are what is installed
@@ -193,13 +220,13 @@ Tell the person all of this before copying anything (the manual's step 1).
   - By hand, as the manual describes: copy `mods/ledgr/` (and `mods/ledgr-pane/` if wanted) to `mods/`;
     merge `keys.json`, asking before replacing a key in use; add the blocks from
     `setup/layout-blocks.json` to a personal layout; add the three hook entries above to
-    `~/.claude/settings.json`; `chmod +x mods/ledgr/bin/adapters/claude/*.sh`; store the key with
+    `~/.claude/settings.json` (and each other Claude config folder's settings.json you use); `chmod +x mods/ledgr/bin/adapters/claude/*.sh`; store the key with
     `security add-generic-password -s ledgr -a anthropic -w`; `herdr-app check mods/ledgr` (and
     `mods/ledgr-pane`).
 - **Example integration** (`examples/personal-overlay/`, not part of the mod): a personal tab bar
-  (`my-tabs`) that hosts the writer from an engine copy, and a personal pane header (`my-pane`) with
-  the chip. `./install.sh --overlay examples/personal-overlay` deploys them and writes the engine copy;
-  its `answers.json` is that setup's full answer set.
+  (`my-tabs`) that hosts the writer from an engine copy; its pane header is the public `ledgr-pane`.
+  `./install.sh --overlay examples/personal-overlay` deploys it and writes the engine copy; its
+  `answers.json` is that setup's full answer set.
 
 ## Watch out
 
@@ -220,7 +247,9 @@ Tell the person all of this before copying anything (the manual's step 1).
   bytecode under `ledgr-data/.pycache` for that reason.
 - Panel text wraps by itself. Never cap a text box with `max_h` plus `overflow_hidden`: the default line
   height is about 1.6, so a 34 px cap cut a 12.5 px ask inside its second line. Preview boxes that must
-  stay short scroll instead. For shots: `ledgr.fold-mine`, `ledgr.fold-asks`, `ledgr.collapse-all`,
+  stay short scroll instead. For shots (`docs/preview-recipe.md` stages `preview.png` with them):
+  `ledgr.fold-mine`, `ledgr.fold-asks`, `ledgr.collapse-all` (rows, boxes and the note line),
+  `ledgr.hide-branch:<hc name>` (demo only),
   `ledgr.pick:<handle>:<n>`, `ledgr.copy-answer:<handle>`, `ledgr.session:<terminal>`,
   `ledgr.below-threshold`, `ledgr.act:<handle>:<resolve|dismiss|reopen|promote>`,
   `ledgr.whole:<handle>`, `ledgr.menu:<handle>:<defer|more>` / `menu:threshold` / `menu:off`,

@@ -39,6 +39,7 @@ import { goToAnchor, stageText, busy, btwText } from "./nav.js";
 import { demoData, FIXTURE_TURNS, DEMO_SESSION } from "./fixtures.js";
 import { manifest, manifestLines, liveStatus, maxDepthOf, preamble, branchName, transcriptPathOf } from "./branch.js";
 import { itemWords as H, paneWords as P, trunkWords, originWords, branchWords, sessionWords } from "./words.js";
+import { loadAdapters, adapterOf, asksMode } from "./adapters.js";
 import { confluenceMessage, answersSheet, conclusionRequest, extractConclusion, forkTurnOf, wrapperWords, leadIn, answersLeadIn } from "./confluence.js";
 
 const ICON = (n) => `mods/workspace-chrome/${n}.svg`;
@@ -172,6 +173,7 @@ export class Panel {
     if (!(await liveHome())) return;      // herdr-app check: no ping, no fallback writer
     this.inApp = true;
     this.cfg = await loadConfig();
+    this.adapters = await loadAdapters();
     try { localStorage.removeItem("store"); } catch { /* the pre-store.json cache, unused now */ }
     await this.reload();
     this.watchStore(cx);
@@ -302,7 +304,13 @@ export class Panel {
 
   // ── commands (`herdr-app do ledgr.<command>`, shown copies only) ────
   command(c, cx) {
-    if (c === "demo") { if (this.demo && !FORCE_DEMO) { this.demo = false; this.demoStore = null; this.expanded.clear(); this.flash = ""; this.conclude = null; this.confirm = null; this.prevCls = null; } else this.enterDemo(); }
+    if (c === "demo") {
+      if (this.demo && !FORCE_DEMO) {
+        this.demo = false; this.demoStore = null; this.expanded.clear(); this.flash = ""; this.conclude = null; this.confirm = null; this.prevCls = null;
+        // A threshold picked in the demo was held in memory only: read config.json again.
+        cx.spawn(async (cx) => { this.cfg = await loadConfig(); this.obsVer = undefined; cx.notify(); });
+      } else this.enterDemo();
+    }
     else if (c === "capture") run("mod.open", { name: "ledgr" });
     else if (c === "rescan") { if (this.fallback()) this.writer.tick(cx); else cx.spawn(async (cx) => { await this.reload(); cx.notify(); }); }
     else if (c === "check-writer") this.checkWriter(cx);
@@ -379,7 +387,13 @@ export class Panel {
       if (!it) this.flash = `No ${h} in this session.`; else this.goTo(it, s, cx);
     }
     else if (c === "fold-asks") { const st = this.viewStore(), sid = this.current(st), s = sid ? st.d.sessions[sid] : null; if (s) this.setAsksOpen(s, !this.asksOpen(s)); }
-    else if (c === "collapse-all") { this.expanded.clear(); this.whole.clear(); this.brOpen.clear(); this.preOpen.clear(); this.confirm = null; this.conclude = null; this.dd = null; }
+    else if (c === "collapse-all") { this.expanded.clear(); this.whole.clear(); this.brOpen.clear(); this.preOpen.clear(); this.confirm = null; this.conclude = null; this.dd = null; this.flash = ""; }
+    // Demo only, for a staged shot: hide-branch:<hc name> (br-q2-a41b) drops that branch from the demo store.
+    else if (this.demo && c.startsWith("hide-branch:")) {
+      const name = c.slice("hide-branch:".length), st = this.demoStore;
+      const id = Object.keys(st.d.branches).find((k) => st.d.branches[k].name === name);
+      if (id) { delete st.d.branches[id]; this.bump(); } else this.flash = `No branch ${name} in the demo.`;
+    }
     // For scripted checks of the severity and motion paths, the same code as the clicks:
     // act:<handle>:<resolve|dismiss|reopen|promote> on the shown session; suggestions (every
     // "suggestions (N)" line of the shown session, open or fold); demo only: demo-ask:<level>
@@ -469,6 +483,7 @@ export class Panel {
   current(st) {
     const f = shared("ledgr.focus");
     const ft = focused()?.terminal ?? null;
+    this.away = null;
     if (f?.session && Number(f.at) > this.focusAt) { this.focusAt = Number(f.at); this.override = { sid: f.session, terminal: ft }; }
     if (this.pinned && st.d.sessions[this.pinned]) return this.pinned;
     if (this.override && st.d.sessions[this.override.sid]) {
@@ -478,8 +493,32 @@ export class Panel {
     if (this.demo) return DEMO_SESSION;
     const sid = ft ? st.sessionForTerminal(ft) : null;
     if (sid && st.d.sessions[sid]) { this.last = sid; return sid; }
-    if (this.last && st.d.sessions[this.last]) return this.last;
-    return st.sessionsList().find((s) => s.state !== "ended")?.sessionId ?? st.sessionsList()[0]?.sessionId ?? null;
+    const keep = this.last && st.d.sessions[this.last] ? this.last
+      : st.sessionsList().find((s) => s.state !== "ended")?.sessionId ?? st.sessionsList()[0]?.sessionId ?? null;
+    // The focused pane has no ledgr session: its hooks have not reported it yet (it joins at its
+    // next prompt or turn end), or never will (a Claude Code with another CLAUDE_CONFIG_DIR). An agent
+    // pane, or any pane in another space, says so instead of showing a session from elsewhere; a
+    // shell or editor in the same space as the last session keeps that session.
+    if (ft && !this.besides(ft, keep ? st.d.sessions[keep] : null)) { this.away = this.awayOf(ft); return null; }
+    return keep;
+  }
+
+  // Whether the focused pane ft (no ledgr session of its own) may keep showing session s: only a
+  // pane that runs no agent, in the same space as s's terminal.
+  besides(ft, s) {
+    if (this.awayOf(ft).agent || !s?.terminal) return false;
+    const space = focused()?.space ?? null;
+    const home = agents().find((a) => a.address === s.terminal)?.space ?? null;
+    return Boolean(space && home && space === home);
+  }
+
+  // The focused pane as the header names it when it has no session: its agent's name, if any.
+  awayOf(ft) {
+    const a = agents().find((x) => x.address === ft);
+    const p = panes().find((x) => x.terminal === ft);
+    const prog = a?.program ?? p?.program ?? null;
+    const agent = Boolean(a || p?.status || prog?.agent);
+    return { terminal: ft, agent, name: agent ? (prog?.name || a?.app || "agent") : null };
   }
 
   isShown() {
@@ -983,7 +1022,7 @@ export class Panel {
       .child(this.header(t, st, s))
       .when(this.menu, (el) => el.child(this.sessionMenu(t, st, sid)))
       .child(v_flex().id("ledgr-list").flex_1().min_h(0).overflow_y_scrollbar().px(8).py(8).gap(4)
-        .children(s ? this.body(t, st, s) : [this.emptyState(t)]))
+        .children(s ? this.body(t, st, s) : [this.away && st.sessionsList().length ? this.awayState(t, this.away) : this.emptyState(t)]))
       .when(Boolean(s), (el) => el.child(this.footer(t, st, s)))
       .when(Boolean(note), (el) => el.child(
         div().flex_none().px(12).py(6).border_t(1).border_color(t.border).text_size(11).text_color(t.muted).child(note)));
@@ -1056,35 +1095,49 @@ export class Panel {
   }
 
   header(t, st, s) {
-    const name = s ? sessionWords(s) : "no session";
+    const away = !s ? this.away : null;
+    const name = s ? sessionWords(s) : away ? (away.agent ? "no ledgr session yet" : "no agent here") : "no session";
     const pinned = Boolean(this.pinned && s && this.pinned === s.sessionId);
     return h_flex().h(42).flex_none().px(10).gap(6).items_center().border_b(1).border_color(t.border)
       .child(div().flex_none().font_semibold().text_size(13).child("ledgr"))
       .child(h_flex().id("lg-session").flex_1().min_w(0).h(26).px(6).gap(5).items_center().rounded(6).cursor_pointer()
         .hover((x) => x.bg(t.hover)).on_click((_e, cx) => { this.menu = !this.menu; cx.notify(); })
-        .when(Boolean(s), (el) => el.child(this.pill(t, agentLabel(s.agent))))
+        .when(Boolean(s), (el) => el.child(div().id("lg-agent").flex_none().tooltip(this.asksTip(s)).child(this.pill(t, agentLabel(s.agent)))))
+        .when(Boolean(away?.agent), (el) => el.child(this.pill(t, away.name)))
         .when(Boolean(s?.parentSessionId), (el) => el.child(h_flex().id("lg-br-pill").flex_none().gap(3).px(5).py(0.5).rounded(4).items_center().bg(t.accent + "22")
           .tooltip(`Branch of ${st.d.sessions[s.parentSessionId]?.sessionName || String(s.parentSessionId).slice(0, 8)}${s.forkTurn !== undefined && s.forkTurn !== null ? `, forked at its turn ${s.forkTurn}` : ""}`)
           .child(svg(ICON("git-branch")).size(10).text_color(t.accent)).child(div().text_size(10).text_color(t.accent).child(`branch · depth ${s.depth ?? 1}`))))
         .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(name))
-        .when(Boolean(s?.terminal), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(P(s.terminal))))
+        .when(Boolean(s?.terminal || away), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(P(s?.terminal ?? away.terminal))))
         .child(svg(ICON(this.menu ? "chevron-down" : "chevron-right")).size(11).flex_none().text_color(t.dim)))
-      .when(Boolean(s), (el) => el.child(div().id("lg-pin").size(22).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer()
-        .tooltip(pinned ? "Unpin: follow the focused agent" : "Pin this session")
-        .hover((x) => x.bg(t.hover))
+      // Pinned: an accent "pinned" pill, unmistakable. Following focus: a faint outline pin.
+      .when(Boolean(s), (el) => el.child(h_flex().id("lg-pin").h(22).flex_none().gap(3).items_center().justify_center().rounded(6).cursor_pointer()
+        .when(pinned, (x) => x.px(6).bg(t.accent + "26"))
+        .when(!pinned, (x) => x.w(22).opacity(0.6))
+        .tooltip(pinned ? "Pinned to this session; click to follow focus" : "Following the focused pane; click to pin this session")
+        .hover((x) => x.bg(t.hover).opacity(1))
         .on_click((_e, cx) => {
           this.pinned = pinned ? null : s.sessionId;
           try { localStorage.setItem("pinned", this.pinned ?? ""); } catch { /* none */ }
           cx.notify();
         })
-        .child(svg(ICON(pinned ? "pin" : "pin-off")).size(13).text_color(pinned ? t.accent : t.dim))))
+        .child(svg(ICON("pin")).size(12).text_color(pinned ? t.accent : t.dim))
+        .when(pinned, (x) => x.child(div().text_size(10.5).font_semibold().text_color(t.accent).child("pinned")))))
       .when(Boolean(s), (el) => el.child(div().flex_none().text_size(11).text_color(s.state === "working" ? t.working : t.dim)
         .child(`turn ${s.turn}${s.state === "working" ? " · working" : s.state === "ended" ? " · ended" : ""}`)))
       .when(this.demo, (el) => el.child(this.pill(t, "demo", t.accent)));
   }
 
-  // Branch sessions are listed under their parent, indented, not at the top level. Sessions whose
-  // terminal is gone offer Forget (two clicks): the session, its items and its branches go.
+  // How this session's agent declares or yields its asks (adapters.js): a tooltip line.
+  asksTip(s) {
+    const m = asksMode(adapterOf(this.adapters, s), this.cfg);
+    return `${m.word}: ${m.tip}`;
+  }
+
+  // Branch sessions are listed under their parent, indented, not at the top level. Live sessions are
+  // grouped by agent, each group headed by how that agent's asks arrive (declares asks, extractor
+  // only, no asks). Sessions whose terminal is gone offer Forget (two clicks): the session, its items
+  // and its branches go.
   sessionMenu(t, st, sid) {
     const list = st.sessionsList();
     const ids = new Set(list.map((s) => s.sessionId));
@@ -1092,7 +1145,19 @@ export class Panel {
     for (const s of list) if (s.parentSessionId && ids.has(s.parentSessionId)) kids.set(s.parentSessionId, [...(kids.get(s.parentSessionId) ?? []), s]);
     const flat = (s, d) => [[s, d], ...(d < 6 ? (kids.get(s.sessionId) ?? []).flatMap((c) => flat(c, d + 1)) : [])];
     const roots = list.filter((s) => !(s.parentSessionId && ids.has(s.parentSessionId)));
-    const live = roots.filter((s) => s.state !== "ended").flatMap((s) => flat(s, 0));
+    const groups = [];
+    for (const s of roots.filter((x) => x.state !== "ended")) {
+      const k = `${String(s.sessionId).startsWith("herdr:") ? "herdr:" : ""}${agentLabel(s.agent)}`;
+      let g = groups.find((x) => x.k === k);
+      if (!g) groups.push(g = { k, s, rows: [] });
+      g.rows.push(...flat(s, 0));
+    }
+    const groupHead = (g) => {
+      const m = asksMode(adapterOf(this.adapters, g.s), this.cfg);
+      return h_flex().id(`lg-g-${g.k}`).px(8).pt(6).pb(2).gap(6).items_center().tooltip(m.tip)
+        .child(div().text_size(10.5).font_semibold().text_color(t.dim).child(`${agentLabel(g.s.agent).toUpperCase()}${g.k.startsWith("herdr:") ? " (NO HOOKS)" : ""}`))
+        .child(div().text_size(10.5).text_color(m.word === "declares asks" ? t.accent : t.dim).child(m.word));
+    };
     const ended = roots.filter((s) => s.state === "ended").flatMap((s) => flat(s, 0));
     const row = ([s, depth]) => {
       const open = st.itemsOf(s.sessionId).filter((it) => st.counts(it)).length;
@@ -1121,10 +1186,24 @@ export class Panel {
             .on_click((_e, cx) => { cx.stop_propagation(); this.forgetAsk = null; cx.notify(); }).child("keep")));
     };
     return v_flex().flex_none().max_h(220).id("lg-menu").overflow_y_scrollbar().px(6).py(4).gap(1).border_b(1).border_color(t.border).bg(t.surface)
-      .children(live.map(row))
+      .children(groups.flatMap((g) => [groupHead(g), ...g.rows.map(row)]))
       .when(ended.length > 0, (el) => el.child(div().px(8).pt(6).pb(2).text_size(10.5).font_semibold().text_color(t.dim).child("ENDED SESSIONS")))
       .children(ended.map(row))
       .when(!list.length, (el) => el.child(div().px(8).py(6).text_size(11.5).text_color(t.dim).child("No sessions yet.")));
+  }
+
+  // The focused pane has no ledgr session (current()): say so, and why it may not have one yet.
+  awayState(t, away) {
+    const line = (s) => div().text_size(11.5).text_color(t.dim).child(s);
+    return away.agent
+      ? v_flex().p(8).gap(6)
+        .child(div().text_size(12.5).text_color(t.muted).child(`No ledgr session for ${P(away.terminal)} (${away.name}) yet.`))
+        .child(line("It joins at its next prompt or turn end, when ledgr's hooks report it. ⌘J already parks a question for it."))
+        .child(line("Still nothing after a turn? That agent may read another settings file than the one ledgr's hooks are in: a Claude Code started with its own CLAUDE_CONFIG_DIR (a second account, say) needs the three hook entries in that folder's settings.json: ./install.sh offers each Claude config folder it finds."))
+        .child(line("The session menu (›) shows the others."))
+      : v_flex().p(8).gap(6)
+        .child(div().text_size(12.5).text_color(t.muted).child(`${P(away.terminal)} runs no agent ledgr knows.`))
+        .child(line("Focus an agent's pane, or pick a session from the menu (›)."));
   }
 
   emptyState(t) {

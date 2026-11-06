@@ -464,6 +464,15 @@ A.ok(!ra.includes("--parent") && !ra.includes("--fork-session"));
 A.equal(ra[ra.indexOf("--cwd") + 1], "/Users/x/My Repo.v2");
 A.equal(B.transcriptPathOf({ sessionId: R, cwd: "/Users/x/My Repo.v2" }, "/Users/x"), `/Users/x/.claude/projects/-Users-x-My-Repo-v2/${R}.jsonl`);
 A.equal(B.transcriptPathOf({ sessionId: R, transcriptPath: "/t/r.jsonl" }, "/Users/x"), "/t/r.jsonl", "the recorded path wins");
+// A session of another Claude config folder (CLAUDE_CONFIG_DIR) resumes and forks with that folder.
+const work = { sessionId: R, cwd: "/w", transcriptPath: `/Users/x/.claude-work/projects/-w/${R}.jsonl` };
+A.equal(B.configDirOf(work), "/Users/x/.claude-work");
+A.equal(B.configDirOf({ transcriptPath: `/Users/x/.claude/projects/-w/${R}.jsonl` }), null, "the default folder adds nothing");
+A.equal(B.configDirOf({}), null);
+A.deepEqual(B.resumeArgs(work, "/opt/claude").slice(-6), ["--", "/usr/bin/env", "CLAUDE_CONFIG_DIR=/Users/x/.claude-work", "/opt/claude", "--resume", R]);
+const fa = B.claudeArgv({ id: "br_x", label: "L", preamble: "P" }, { parentSessionId: R, anchorTurn: 1, forkTurn: 2, depth: 1, configDir: "/Users/x/.claude-work" }, { id: "rq_1" }, "/opt/claude");
+A.deepEqual(fa.slice(0, 2), ["/usr/bin/env", "CLAUDE_CONFIG_DIR=/Users/x/.claude-work"], "a fork of it too");
+A.equal(B.claudeArgv({ id: "br_x", label: "L", preamble: "P" }, { parentSessionId: R, anchorTurn: 1, forkTurn: 2, depth: 1, configDir: null }, { id: "rq_1" }, "/opt/claude")[1].startsWith("LEDGR_PARENT="), true);
 const sev = checks - phase1 - phase2 - phase3;
 
 console.log(`OK: store, ${checks} checks (${phase1} phase 1, ${phase2} phase 2, ${phase3} phase 3, ${sev} severity and resume), 0 failure(s)`);

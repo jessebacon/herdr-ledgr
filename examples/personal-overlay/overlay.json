@@ -1,7 +1,7 @@
 {
-  "$comment": "An overlay is a folder of your own mods that ledgr's install.sh deploys with it. This one is the repo owner's: his tab bar (my-tabs) hosts ledgr's writer instead of ledgr's host block, and his pane header (my-pane) draws the chip instead of ledgr-pane. A mod that imports ./ledgr/*.js gets ledgr's engine files copied into its ledgr/ folder.",
-  "mods": ["my-tabs", "my-pane"],
+  "$comment": "An overlay is a folder of your own mods that ledgr's install.sh deploys with it. This one is the repo owner's: his tab bar (my-tabs) hosts ledgr's writer instead of ledgr's host block. His pane header is the public ledgr-pane, so the chip's code exists once. A mod that imports ./ledgr/*.js gets ledgr's engine files copied into its ledgr/ folder.",
+  "mods": ["my-tabs"],
   "host": "my-tabs",
-  "chip": "my-pane",
+  "chip": "ledgr-pane",
   "toggle_command": "my-tabs.toggle-ledgr"
 }

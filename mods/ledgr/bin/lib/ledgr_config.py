@@ -8,7 +8,11 @@ import ledgr_core as C
 
 DEFAULT_CONFIG = {
     "v": 1,
-    "instruct_block": False,          # print the ledgr-asks instruction at SessionStart
+    "instruct_block": True,           # print the ledgr-asks instruction at SessionStart (startup,
+                                      # resume, clear, compact): the agent declares its own asks
+    "instruct_reinject": True,        # with instruct_block: after a turn whose blocking ask only the
+                                      # model found (no block in the message), print it once more
+                                      # at that session's next prompt
     "extract": {
         "mode": "block-first",          # block-first | always-model | block-only
         "provider": "anthropic",        # anthropic | openai-compatible | cli

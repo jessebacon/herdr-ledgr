@@ -8,7 +8,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 BIN="$(cd "$(dirname "$0")/.." && pwd)"; AD="$BIN/adapters/claude"
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ledgr-test.XXXXXX")"
 export LEDGR_DATA="$ROOT/data" HC_TERMINAL_ID=t99 LEDGR_KEYCHAIN_SERVICE=ledgr-test-missing-service
-unset LEDGR_TERMINAL LEDGR_INNER LEDGR_ANTHROPIC_KEY HC_SCOPE LEDGR_OWNER_PID LEDGR_OWNER_COMM LEDGR_PARENT LEDGR_BRANCH
+unset LEDGR_TERMINAL LEDGR_INNER LEDGR_ANTHROPIC_KEY HC_SCOPE LEDGR_OWNER_PID LEDGR_OWNER_COMM LEDGR_PARENT LEDGR_BRANCH CLAUDE_CONFIG_DIR
 D="$LEDGR_DATA"; SID=11111111-2222-3333-4444-555555555555
 TP="$ROOT/fake.jsonl"; : >"$TP"
 P=0; F=0
@@ -30,7 +30,7 @@ out=$(run SessionStart "{$base,\"hook_event_name\":\"SessionStart\",\"source\":\
 out+=$(run UserPromptSubmit "{$base,\"hook_event_name\":\"UserPromptSubmit\",\"prompt_id\":\"p1\",\"prompt\":\"re [A2] go\"}")
 out+=$(run UserPromptSubmit "{$base,\"hook_event_name\":\"UserPromptSubmit\",\"prompt_id\":\"p2\",\"prompt\":\"/btw why\"}")
 out+=$(run Stop "{$base,\"hook_event_name\":\"Stop\",\"stop_hook_active\":false,\"last_assistant_message\":\"Done. Please confirm the deploy.\"}")
-t "stdout empty for all hooks (instruct_block defaults to false)" test -z "$out"
+t "SessionStart prints the instruction (instruct_block defaults to true); the other hooks print nothing" test "$out" = "$(cat "$BIN/lib/asks-instruction.txt")"
 t "map: session, turn 1, idle, agent claude-code, name, owner pid recorded" jq -e --arg s "$SID" '.session_id==$s and .turn==1 and .state=="idle" and .agent=="claude-code" and .session_name=="t" and .last_event=="Stop" and (.owner_pid|type)=="number" and (.owner_comm|type)=="string"' "$D/terminals/t99.json"
 t "turn text saved" test "$(cat "$D/turns/$SID/1.md")" = "Done. Please confirm the deploy."
 t "part A events: session_start, prompt x2, pending" test "$(/bin/ls "$D/spool" | grep -c -E -- '-(session_start|prompt|pending)-')" = 4
@@ -43,7 +43,7 @@ t "stop event from part B: turn, text_path, passage_hash, message_uuid null (no 
 t "order per turn: pending < stop < asks" jq -s -e --arg s $SID '[.[] | select(.session_id==$s and (.type=="pending" or .type=="stop" or .type=="asks"))] | sort_by(.at) | map(.type) == ["pending","stop","asks"]' "$D"/spool/*.json
 t "session record: last_passage_hash, turn_base ledgr, prompt_id p1" jq -e --arg h "$H" '.last_passage_hash==$h and .turn_base=="ledgr" and .prompt_id=="p1"' "$D/sessions/$SID.json"
 t "envelope fields on every event" jq -s -e 'all(.v==1 and (.id|length)==36 and (.at|type)=="number" and .terminal=="t99" and .session_id=="'$SID'")' "$D"/spool/*.json
-t "config.json created: instruct_block false, provider anthropic, no things" jq -e '.instruct_block==false and .extract.provider=="anthropic" and .extract.audit_rate==0 and (has("things")|not)' "$D/config.json"
+t "config.json created: instruct_block and instruct_reinject true, provider anthropic, no things" jq -e '.instruct_block==true and .instruct_reinject==true and .extract.provider=="anthropic" and .extract.audit_rate==0 and (has("things")|not)' "$D/config.json"
 t "hook.log: one line per hook run" test "$(grep -c -E 't99 (SessionStart|UserPromptSubmit|Stop) ' "$D/log/hook.log")" = 4
 t "no bytecode in the mod folder" test -z "$(find "$BIN" -name '__pycache__' -o -name '*.pyc')"
 
@@ -78,26 +78,38 @@ out=$(printf '%s' "{$base,\"source\":\"startup\"}" | LEDGR_DATA="$I" bash "$AD/s
 t "instruct_block true: SessionStart prints exactly the instruction" test "$out" = "$(cat "$BIN/lib/asks-instruction.txt")"
 B="$ROOT/badcfg"; mkdir -p "$B"; echo '{broken' >"$B/config.json"
 out=$(printf '%s' "{$base,\"source\":\"startup\"}" | LEDGR_DATA="$B" bash "$AD/session-start.sh")
-t "invalid config.json: defaults used (no output), file left alone, record written" test -z "$out" -a "$(cat "$B/config.json")" = "{broken" -a -f "$B/sessions/$SID.json"
+t "invalid config.json: defaults used (the instruction), file left alone, record written" test "$out" = "$(cat "$BIN/lib/asks-instruction.txt")" -a "$(cat "$B/config.json")" = "{broken" -a -f "$B/sessions/$SID.json"
+O="$ROOT/instr-off"; mkdir -p "$O"; echo '{"instruct_block": false}' >"$O/config.json"
+out=$(printf '%s' "{$base,\"source\":\"startup\"}" | LEDGR_DATA="$O" bash "$AD/session-start.sh")
+t "instruct_block false: SessionStart prints nothing" test -z "$out"
+
+CF="$ROOT/claude-other"; mkdir -p "$CF/sessions"; SN=77777777-0000-0000-0000-0000000000c1
+printf '{"pid": 1, "sessionId": "%s", "name": "second account"}' "$SN" >"$CF/sessions/1.json"
+printf '%s' "{\"session_id\":\"$SN\",\"cwd\":\"/tmp\",\"source\":\"startup\"}" | CLAUDE_CONFIG_DIR="$CF" HC_TERMINAL_ID=t56 bash "$AD/session-start.sh" >/dev/null
+t "CLAUDE_CONFIG_DIR: the session name comes from that folder's sessions/<pid>.json" jq -e '.session_name=="second account"' "$D/sessions/$SN.json"
+SM=77777777-0000-0000-0000-0000000000c2
+printf '{"pid": 2, "sessionId": "%s", "name": "from the transcript path"}' "$SM" >"$CF/sessions/2.json"
+printf '%s' "{\"session_id\":\"$SM\",\"cwd\":\"/tmp\",\"source\":\"startup\",\"transcript_path\":\"$CF/projects/-tmp/$SM.jsonl\"}" | env -u CLAUDE_CONFIG_DIR HC_TERMINAL_ID=t57 bash "$AD/session-start.sh" >/dev/null
+t "no CLAUDE_CONFIG_DIR: the folder above projects/ in the transcript path" jq -e '.session_name=="from the transcript path"' "$D/sessions/$SM.json"
 
 echo "== owner guard (a child agent cannot repoint the terminal)"
 sleep 120 & LIVE=$!
 OA=88888888-0000-0000-0000-00000000000a; OB=88888888-0000-0000-0000-00000000000b
-printf '%s' "{\"session_id\":\"$OA\",\"cwd\":\"/tmp\",\"source\":\"startup\"}" | HC_TERMINAL_ID=t50 LEDGR_OWNER_PID=$LIVE LEDGR_OWNER_COMM=sleep bash "$AD/session-start.sh"
-printf '%s' "{\"session_id\":\"$OB\",\"cwd\":\"/tmp\",\"source\":\"startup\"}" | HC_TERMINAL_ID=t50 LEDGR_OWNER_PID=$$ LEDGR_OWNER_COMM=bash bash "$AD/session-start.sh"
+printf '%s' "{\"session_id\":\"$OA\",\"cwd\":\"/tmp\",\"source\":\"startup\"}" | HC_TERMINAL_ID=t50 LEDGR_OWNER_PID=$LIVE LEDGR_OWNER_COMM=sleep bash "$AD/session-start.sh" >/dev/null
+printf '%s' "{\"session_id\":\"$OB\",\"cwd\":\"/tmp\",\"source\":\"startup\"}" | HC_TERMINAL_ID=t50 LEDGR_OWNER_PID=$$ LEDGR_OWNER_COMM=bash bash "$AD/session-start.sh" >/dev/null
 t "other session, other pid, owner alive: ignored (map unchanged, no record)" test "$(jq -r .session_id "$D/terminals/t50.json")" = $OA -a ! -e "$D/sessions/$OB.json"
 printf '%s' "$(J $OB "$TP" "Child agent says: decide whether to keep the cache warm overnight or not.")" | HC_TERMINAL_ID=t50 LEDGR_OWNER_PID=$$ LEDGR_OWNER_COMM=bash bash "$AD/stop.sh"; sleep 1
 t "ignored Stop starts no extractor (no pending/stop/asks)" test "$(ev $OB pending | jq length)$(ev $OB asks | jq length)" = 00
-printf '%s' "{\"session_id\":\"$OA\",\"cwd\":\"/tmp\",\"source\":\"clear\"}" | HC_TERMINAL_ID=t50 LEDGR_OWNER_PID=$LIVE LEDGR_OWNER_COMM=sleep bash "$AD/session-start.sh"
+printf '%s' "{\"session_id\":\"$OA\",\"cwd\":\"/tmp\",\"source\":\"clear\"}" | HC_TERMINAL_ID=t50 LEDGR_OWNER_PID=$LIVE LEDGR_OWNER_COMM=sleep bash "$AD/session-start.sh" >/dev/null
 OC=88888888-0000-0000-0000-00000000000c
-printf '%s' "{\"session_id\":\"$OC\",\"cwd\":\"/tmp\",\"source\":\"clear\"}" | HC_TERMINAL_ID=t50 LEDGR_OWNER_PID=$LIVE LEDGR_OWNER_COMM=sleep bash "$AD/session-start.sh"
+printf '%s' "{\"session_id\":\"$OC\",\"cwd\":\"/tmp\",\"source\":\"clear\"}" | HC_TERMINAL_ID=t50 LEDGR_OWNER_PID=$LIVE LEDGR_OWNER_COMM=sleep bash "$AD/session-start.sh" >/dev/null
 t "same pid, new session (/clear): accepted" test "$(jq -r .session_id "$D/terminals/t50.json")" = $OC
 kill $LIVE 2>/dev/null; wait $LIVE 2>/dev/null
-printf '%s' "{\"session_id\":\"$OB\",\"cwd\":\"/tmp\",\"source\":\"startup\"}" | HC_TERMINAL_ID=t50 LEDGR_OWNER_PID=$$ LEDGR_OWNER_COMM=bash bash "$AD/session-start.sh"
+printf '%s' "{\"session_id\":\"$OB\",\"cwd\":\"/tmp\",\"source\":\"startup\"}" | HC_TERMINAL_ID=t50 LEDGR_OWNER_PID=$$ LEDGR_OWNER_COMM=bash bash "$AD/session-start.sh" >/dev/null
 t "owner gone: a new process takes the terminal" test "$(jq -r .session_id "$D/terminals/t50.json")" = $OB
 jq '.owner_pid='$$' | .owner_comm="claude" | .session_id="88888888-0000-0000-0000-0000000000dd"' "$D/terminals/t50.json" >"$ROOT/m.json" && mv "$ROOT/m.json" "$D/terminals/t50.json"
 OD=88888888-0000-0000-0000-00000000000e
-printf '%s' "{\"session_id\":\"$OD\",\"cwd\":\"/tmp\",\"source\":\"startup\"}" | HC_TERMINAL_ID=t50 LEDGR_OWNER_PID=1234567 LEDGR_OWNER_COMM=claude bash "$AD/session-start.sh"
+printf '%s' "{\"session_id\":\"$OD\",\"cwd\":\"/tmp\",\"source\":\"startup\"}" | HC_TERMINAL_ID=t50 LEDGR_OWNER_PID=1234567 LEDGR_OWNER_COMM=claude bash "$AD/session-start.sh" >/dev/null
 t "recorded pid alive but now another program (pid reuse): accepted" test "$(jq -r .session_id "$D/terminals/t50.json")" = $OD
 
 echo "== extractor (no key)"
@@ -132,31 +144,31 @@ t "no settle events exist" test -z "$(/bin/ls "$D/spool" | grep -- -settle-)"
 echo "== branches and compaction (Phase 2)"
 PSID=66666666-0000-0000-0000-000000000001; CH=66666666-0000-0000-0000-0000000000c1
 ss() { printf '%s' "{\"session_id\":\"$1\",\"cwd\":\"/tmp\",\"hook_event_name\":\"SessionStart\",\"source\":\"$2\",\"session_title\":\"Q1: why\"}"; }
-ss $PSID startup | HC_TERMINAL_ID=t61 bash "$AD/session-start.sh"
+ss $PSID startup | HC_TERMINAL_ID=t61 bash "$AD/session-start.sh" >/dev/null
 for i in 1 2 3; do printf '%s' "{\"session_id\":\"$PSID\",\"cwd\":\"/tmp\",\"prompt_id\":\"pp$i\",\"prompt\":\"go $i\"}" | HC_TERMINAL_ID=t61 bash "$AD/user-prompt-submit.sh"; done
-ss $CH fork | HC_TERMINAL_ID=t62 LEDGR_PARENT="$PSID:rq_item1:2" LEDGR_BRANCH="br_test1:1:3:$CH" bash "$AD/session-start.sh"
+ss $CH fork | HC_TERMINAL_ID=t62 LEDGR_PARENT="$PSID:rq_item1:2" LEDGR_BRANCH="br_test1:1:3:$CH" bash "$AD/session-start.sh" >/dev/null
 t "fork + LEDGR_PARENT: session record carries the lineage" jq -e --arg p $PSID '.parent_session_id==$p and .parent_item=="rq_item1" and .anchor_turn==2 and .fork_turn==3 and .depth==1 and .branch_id=="br_test1" and .last_source=="fork"' "$D/sessions/$CH.json"
 t "fork + LEDGR_PARENT: map entry carries the lineage" jq -e --arg p $PSID '.parent_session_id==$p and .depth==1 and .fork_turn==3 and .anchor_turn==2 and .branch_id=="br_test1" and .parent_item=="rq_item1"' "$D/terminals/t62.json"
 t "branch_started: child sid + terminal, parent, item, anchor, fork, depth, branch id" jq -e --arg p $PSID 'length==1 and (.[0] | .terminal=="t62" and .parent_session_id==$p and .item_id=="rq_item1" and .anchor_turn==2 and .fork_turn==3 and .depth==1 and .branch_id=="br_test1" and .source=="fork")' <<<"$(ev $CH branch_started)"
 t "branch_started comes after session_start (later ms, so later in name order)" test "$(ev $CH branch_started | jq '.[0].at')" -gt "$(ev $CH session_start | jq '.[0].at')"
-ss $CH fork | HC_TERMINAL_ID=t62 LEDGR_PARENT="$PSID:rq_item1:2" LEDGR_BRANCH="br_test1:1:3:$CH" bash "$AD/session-start.sh"
+ss $CH fork | HC_TERMINAL_ID=t62 LEDGR_PARENT="$PSID:rq_item1:2" LEDGR_BRANCH="br_test1:1:3:$CH" bash "$AD/session-start.sh" >/dev/null
 t "a repeated fork SessionStart for the same session: no second branch_started" test "$(ev $CH branch_started | jq length)" = 1
 CH2=66666666-0000-0000-0000-0000000000c2
-ss $CH2 fork | HC_TERMINAL_ID=t62 LEDGR_PARENT="$PSID:rq_item1:2" LEDGR_BRANCH="br_test1:1:3:$CH" bash "$AD/session-start.sh"
+ss $CH2 fork | HC_TERMINAL_ID=t62 LEDGR_PARENT="$PSID:rq_item1:2" LEDGR_BRANCH="br_test1:1:3:$CH" bash "$AD/session-start.sh" >/dev/null
 t "fork of another id in the branch's process (planned child differs): no lineage" test "$(ev $CH2 branch_started | jq length)" = 0 -a "$(jq -r .parent_session_id "$D/sessions/$CH2.json")" = null
 CH3=66666666-0000-0000-0000-0000000000c3
-ss $CH3 clear | HC_TERMINAL_ID=t63 LEDGR_PARENT="$PSID:rq_item1:2" bash "$AD/session-start.sh"
+ss $CH3 clear | HC_TERMINAL_ID=t63 LEDGR_PARENT="$PSID:rq_item1:2" bash "$AD/session-start.sh" >/dev/null
 t "source clear with LEDGR_PARENT in the environment: no lineage, no event" test "$(ev $CH3 branch_started | jq length)" = 0 -a "$(jq -r .parent_session_id "$D/sessions/$CH3.json")" = null
 CH4=66666666-0000-0000-0000-0000000000c4
-ss $CH4 fork | HC_TERMINAL_ID=t64 LEDGR_PARENT="$PSID:rq_item9:1" bash "$AD/session-start.sh"
+ss $CH4 fork | HC_TERMINAL_ID=t64 LEDGR_PARENT="$PSID:rq_item9:1" bash "$AD/session-start.sh" >/dev/null
 t "LEDGR_PARENT alone: fork turn from the parent's record (3), depth parent + 1 (1), no branch id" jq -e '.[0] | .fork_turn==3 and .depth==1 and .branch_id==null and .anchor_turn==1' <<<"$(ev $CH4 branch_started)"
 CH5=66666666-0000-0000-0000-0000000000c5
-ss $CH5 fork | HC_TERMINAL_ID=t65 LEDGR_PARENT="$CH:rq_item2:0" bash "$AD/session-start.sh"
+ss $CH5 fork | HC_TERMINAL_ID=t65 LEDGR_PARENT="$CH:rq_item2:0" bash "$AD/session-start.sh" >/dev/null
 t "a branch of a branch: depth 2 from the parent's record" jq -e '.[0].depth==2 and .[0].fork_turn==0' <<<"$(ev $CH5 branch_started)"
 CH6=66666666-0000-0000-0000-0000000000c6
-ss $CH6 fork | HC_TERMINAL_ID=t66 LEDGR_PARENT="not:a valid" bash "$AD/session-start.sh"
+ss $CH6 fork | HC_TERMINAL_ID=t66 LEDGR_PARENT="not:a valid" bash "$AD/session-start.sh" >/dev/null
 t "malformed LEDGR_PARENT: ignored (record written, no lineage, no event)" test -f "$D/sessions/$CH6.json" -a "$(ev $CH6 branch_started | jq length)" = 0 -a "$(jq -r .parent_session_id "$D/sessions/$CH6.json")" = null
-ss $PSID compact | HC_TERMINAL_ID=t61 bash "$AD/session-start.sh"
+ss $PSID compact | HC_TERMINAL_ID=t61 bash "$AD/session-start.sh" >/dev/null
 t "compact: compacted event with the session's turn (3)" jq -e 'length==1 and .[0].turn==3 and .[0].terminal=="t61"' <<<"$(ev $PSID compacted)"
 t "compact: record keeps compactions [{turn 3}], last_source compact, state still working" jq -e '(.compactions|length)==1 and .compactions[0].turn==3 and .last_source=="compact" and .state=="working"' "$D/sessions/$PSID.json"
 t "compact: no branch_started for the parent" test "$(ev $PSID branch_started | jq length)" = 0
@@ -252,6 +264,87 @@ A1: blue
 </pasted_content id=\"d\">
 A2: typed after the paste, not part of the sheet"
 t "lead-in + wrapped answer sheet: answers_landed with the block's handles only" jq -e --arg s $LF 'length==1 and .[0].for_session==$s and .[0].handles==["A1"] and .[0].answers=={"A1":"blue"}' <<<"$(ev $LF answers_landed)"
+
+echo "== hybrid re-injection (instruct_reinject)"
+# A fake OpenAI-compatible server stands in for the model: a message with BLOCKER yields one blocking
+# ask, one with NEEDED one needed ask, anything else none.
+R="$ROOT/reinject"; RO="$ROOT/reinject-off"; mkdir -p "$R" "$RO"; PORTF="$ROOT/fake-port"
+$PYQ -I - "$PORTF" <<'PY' &
+import json, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
+        msg = body["messages"][-1]["content"]
+        asks = []
+        if "BLOCKER" in msg:
+            asks = [{"text": "Give me the production database password.", "kind": "provide", "level": "blocking",
+                     "quote": "I need the production database password (BLOCKER)."}]
+        elif "NEEDED" in msg:
+            asks = [{"text": "Review the migration before release.", "kind": "review", "level": "needed",
+                     "quote": "Please review the migration before release (NEEDED)."}]
+        out = json.dumps({"id": "fake-1", "model": "fake", "usage": {},
+                          "choices": [{"finish_reason": "stop", "message": {"content": json.dumps({"asks": asks})}}]}).encode()
+        self.send_response(200); self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(out))); self.end_headers(); self.wfile.write(out)
+srv = HTTPServer(("127.0.0.1", 0), H)
+open(sys.argv[1], "w").write(str(srv.server_port)); srv.serve_forever()
+PY
+FAKE=$!
+for i in $(seq 50); do [ -s "$PORTF" ] && break; sleep 0.1; done
+CFG='{"instruct_block": true, "extract": {"provider": "openai-compatible", "base_url": "http://127.0.0.1:'"$(cat "$PORTF")"'/v1", "model": "fake", "timeout_s": 5}}'
+echo "$CFG" >"$R/config.json"
+$PYQ -I -c 'import json,sys; d=json.loads(sys.argv[1]); d["instruct_reinject"]=False; print(json.dumps(d))' "$CFG" >"$RO/config.json"
+INSTR="$(cat "$BIN/lib/asks-instruction.txt")"
+rj() { printf '%s' "$4" | LEDGR_DATA="$1" HC_TERMINAL_ID="$2" bash "$(script "$3")"; }   # rj <data> <terminal> <event> <json>
+rstart() { rj "$1" "$2" SessionStart "{\"session_id\":\"$3\",\"cwd\":\"/tmp\",\"source\":\"${4:-startup}\"}"; }
+rprompt() { rj "$1" "$2" UserPromptSubmit "{\"session_id\":\"$3\",\"cwd\":\"/tmp\",\"prompt_id\":\"$4\",\"prompt\":\"$5\"}"; }
+rstop() { rj "$1" "$2" Stop "$(J "$3" "$TP" "$4")"; }
+rev() { jq -s -c --arg s "$2" --arg ty "$3" 'map(select(.session_id==$s and .type==$ty))' "$1"/spool/*.json 2>/dev/null; }
+rwait() { local i; for i in $(seq 60); do [ "$(rev "$1" "$2" asks | jq length)" -ge 1 ] 2>/dev/null && return 0; sleep 0.25; done; return 1; }
+flag() { jq -r '.reinject_pending // "none"' "$1/sessions/$2.json"; }
+flagwait() { local i; for i in $(seq 20); do [ "$(flag "$1" "$2")" != none ] && return 0; sleep 0.1; done; return 1; }
+RB=99999999-0000-0000-0000-0000000000b1; RM=99999999-0000-0000-0000-0000000000b2
+RN=99999999-0000-0000-0000-0000000000b3; RX=99999999-0000-0000-0000-0000000000b4; RC=99999999-0000-0000-0000-0000000000b5
+# block present: the agent declared its blocker, nothing to remind
+rstart "$R" t71 $RB >/dev/null; rprompt "$R" t71 $RB b1 "go" >/dev/null
+rstop "$R" t71 $RB "$(cat "$BIN/tests/fixtures/blocks/valid.md")"$'\n'"I need the production database password (BLOCKER)."; rwait "$R" $RB
+t "block present: source block (no model call)" jq -e '.[0].source=="block" and .[0].block_found==true' <<<"$(rev "$R" $RB asks)"
+sleep 0.3; out=$(rprompt "$R" t71 $RB b2 "next")
+t "block present: no reinject, the next prompt prints nothing" test -z "$out" -a "$(flag "$R" $RB)" = none
+# blocking ask found by the model, no block: one reminder on the next real prompt
+rstart "$R" t72 $RM >/dev/null; rprompt "$R" t72 $RM m1 "go" >/dev/null
+rstop "$R" t72 $RM "I stopped here. I need the production database password (BLOCKER). Nothing else is left to do."; rwait "$R" $RM
+t "model-found blocking, no block: source model, one blocking ask, block_found false" jq -e '.[0] | .source=="model" and .block_found==false and (.asks|length)==1 and .asks[0].level=="blocking"' <<<"$(rev "$R" $RM asks)"
+flagwait "$R" $RM; t "...the session is marked for the turn (reinject_pending 1)" test "$(flag "$R" $RM)" = 1
+out=$(rprompt "$R" t72 $RM m2 "/btw is it saved")
+t "...a local /btw prints nothing and keeps the mark" test -z "$out" -a "$(flag "$R" $RM)" = 1
+out=$(rprompt "$R" t72 $RM m3 "here it is")
+t "...the next real prompt prints exactly the instruction" test "$out" = "$INSTR"
+t "...and clears the mark" test "$(flag "$R" $RM)" = none
+out=$(rprompt "$R" t72 $RM m4 "and again")
+t "...exactly once: the prompt after prints nothing" test -z "$out"
+t "...hook.log records reinject_pending and reinject" test "$(grep -c -E "t72 (reinject_pending|reinject) $RM" "$R/log/hook.log")" = 2
+# needed only, no block: no reminder
+rstart "$R" t73 $RN >/dev/null; rprompt "$R" t73 $RN n1 "go" >/dev/null
+rstop "$R" t73 $RN "Done with the change. Please review the migration before release (NEEDED). The rest is merged."; rwait "$R" $RN
+t "needed only, no block: source model, one needed ask" jq -e '.[0] | .source=="model" and (.asks|length)==1 and .asks[0].level=="needed"' <<<"$(rev "$R" $RN asks)"
+sleep 0.3; out=$(rprompt "$R" t73 $RN n2 "next")
+t "needed only: no reinject, the next prompt prints nothing" test -z "$out" -a "$(flag "$R" $RN)" = none
+# instruct_reinject false: no mark
+rstart "$RO" t74 $RX >/dev/null; rprompt "$RO" t74 $RX x1 "go" >/dev/null
+rstop "$RO" t74 $RX "I stopped here. I need the production database password (BLOCKER). Nothing else is left to do."; rwait "$RO" $RX
+sleep 0.3; out=$(rprompt "$RO" t74 $RX x2 "next")
+t "instruct_reinject false: blocking found by the model, no reinject" test -z "$out" -a "$(flag "$RO" $RX)" = none
+# a SessionStart (compact) prints the instruction anyway and clears a pending mark
+rstart "$R" t75 $RC >/dev/null; rprompt "$R" t75 $RC c1 "go" >/dev/null
+rstop "$R" t75 $RC "I stopped here. I need the production database password (BLOCKER). Nothing else is left to do."; rwait "$R" $RC; flagwait "$R" $RC
+out=$(rstart "$R" t75 $RC compact)
+t "SessionStart (compact) with a mark: prints the instruction once and clears the mark" test "$out" = "$INSTR" -a "$(flag "$R" $RC)" = none
+out=$(rprompt "$R" t75 $RC c2 "next")
+t "...so the next prompt prints nothing" test -z "$out"
+kill $FAKE 2>/dev/null; wait $FAKE 2>/dev/null
 
 echo "== layout"
 $PYQ -I -B -S -c 'import sys; sys.path[:0]=[sys.argv[1]]; import ledgr_spool; bad=[m for m in sys.modules if m.startswith(("claude_","last_assistant","providers"))]; sys.exit(1 if bad else 0)' "$BIN/lib"

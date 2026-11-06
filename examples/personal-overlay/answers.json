@@ -2,14 +2,15 @@
   "$comment": "The repo owner's answers: ./install.sh --yes --answers examples/personal-overlay/answers.json",
   "overlay": "examples/personal-overlay",
   "agents": ["claude"],
+  "claude_settings": ["~/.claude/settings.json", "~/.claude-work/settings.json"],
   "provider": "anthropic",
   "model": "claude-haiku-5-5",
   "api_key": "keep",
-  "instruct_block": false,
+  "instruct_block": true,
   "threshold": "blocking",
   "animations": true,
   "fold_asks_while_working": false,
   "keys": { "capture": "cmd-j", "toggle": "cmd-shift-j" },
-  "layout": { "name": "custom", "panel": "stack", "panel_stack": "panel-body", "host": "my-tabs", "chip": "my-pane" },
+  "layout": { "name": "custom", "panel": "stack", "panel_stack": "panel-body", "host": "my-tabs", "chip": "ledgr-pane" },
   "run_tests": true
 }

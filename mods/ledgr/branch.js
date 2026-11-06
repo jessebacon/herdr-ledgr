@@ -75,7 +75,7 @@ export function manifest(st, item, opts = {}) {
   else if (ps.state === "ended") refused = "the parent session has ended";
   return {
     parentSessionId: sid, parentName: ps?.sessionName || ps?.repo || shortSid(sid), parentTerminal: ps?.terminal ?? null,
-    parentAgent: ps?.agent ?? null, cwd: ps?.cwd ?? "",
+    parentAgent: ps?.agent ?? null, cwd: ps?.cwd ?? "", configDir: configDirOf(ps),
     anchorTurn, forkTurn, later: Math.max(0, forkTurn - anchorTurn),
     parentWorking: ps?.state === "working",
     compactedAfter, compactionsKnown: comps.length,
@@ -150,9 +150,18 @@ export function preamble(item, m, name) {
 export const parentEnv = (m, item) => `LEDGR_PARENT=${m.parentSessionId}:${item.id}:${m.anchorTurn}`;
 export const branchEnv = (br, m) => `LEDGR_BRANCH=${br.id}:${m.depth}:${m.forkTurn}:${br.childSid ?? ""}`;
 
+// A session started with CLAUDE_CONFIG_DIR (a second account: `claude-work`) keeps its transcript
+// under <that folder>/projects/…, and only a claude with the same CLAUDE_CONFIG_DIR can resume or fork
+// it. The folder, from the recorded transcript path; null for ~/.claude (the default) or unknown.
+export function configDirOf(s) {
+  const m = /^(.+)\/projects\/[^/]+\/[^/]+\.jsonl$/.exec(String(s?.transcriptPath ?? ""));
+  return m && !/\/\.claude$/.test(m[1]) ? m[1] : null;
+}
+const configEnv = (dir) => (dir ? [`CLAUDE_CONFIG_DIR=${dir}`] : []);
+
 // The program argv (env prefix + claude). Used by hc run, and by the worktree dialog's space.new.
 export function claudeArgv(br, m, item, claudePath = "claude") {
-  const argv = ["/usr/bin/env", parentEnv(m, item), branchEnv(br, m),
+  const argv = ["/usr/bin/env", ...configEnv(m.configDir), parentEnv(m, item), branchEnv(br, m),
     claudePath, "--resume", m.parentSessionId, "--fork-session"];
   if (br.childSid) argv.push("--session-id", br.childSid);
   argv.push("-n", br.label, br.preamble);
@@ -171,8 +180,9 @@ export function hcRunArgs(br, m, item, claudePath = "claude") {
 // session's folder, in a terminal of its own: no parent, no preamble, nothing typed. Its SessionStart
 // hook (source "resume") maps the new terminal to the same session id.
 export function resumeArgs(s, claudePath = "claude") {
+  const dir = configDirOf(s);
   return ["run", "--bg", "--json", "--no-parent", "--no-notify", "--cwd", s?.cwd || ".",
-    "--label", `ledgr.resume=${s?.sessionId}`, "--", claudePath, "--resume", String(s?.sessionId)];
+    "--label", `ledgr.resume=${s?.sessionId}`, "--", ...(dir ? ["/usr/bin/env", ...configEnv(dir)] : []), claudePath, "--resume", String(s?.sessionId)];
 }
 
 // Where Claude Code keeps a session's transcript: the recorded path, else

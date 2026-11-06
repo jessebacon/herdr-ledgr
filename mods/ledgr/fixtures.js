@@ -7,7 +7,8 @@
 // Layout cases (nothing may clip at 280-360 px): a long decide with a long recommended option (A10),
 // a 600-character ask (A11), a single unbroken 120-character token (A12), a parked question with a
 // long URL (Q8). Severity: A6 blocking (sorted first, ◆, the chip's blocking state), A13 and A14
-// optional (the folded "suggestions (2)" line of turn 17, each with promote).
+// optional (the folded "suggestions (2)" line of turn 17, each with promote). A15 a blocking decide
+// with options, sorted after A6 (the staged preview expands it: docs/preview-recipe.md).
 // Drawn when props().demo, FORCE_DEMO (config.js) or `herdr-app do ledgr.demo`. Never saved,
 // never published to shared(), never written to ledgr-data.
 import { passageHash } from "./store.js";
@@ -26,6 +27,7 @@ const T17 = `I checked the migration output against the staging database for sho
 2. Run the load test after tonight's deploy. I am waiting on that result before I close the ticket.
 3. OK to drop the \`orders_legacy\` view? It is a one-line change and reversible.
 4. Review the pool settings export I wrote to \`reports/pool-settings.md\` and tell me if any service is missing.
+5. Choose the cutover night for the pool change: tonight after the deploy, or Thursday. I cannot schedule it until you pick one.
 
 Want me to also script the settings export for next time? And you may want to move the reporting job off the primary at some point.`;
 
@@ -81,6 +83,9 @@ export function demoData(now = Date.now()) {
     quote: "Pick the connection pool mode for production. I recommend transaction pooling", draft: "Transaction pooling, as you recommended.", ago: 3 });
   ask({ handle: "A6", turn: 17, kind: "do", text: "Run the load test after tonight's deploy", level: "blocking", blocking: true, seq: 1,
     quote: "Run the load test after tonight's deploy. I am waiting on that result", ago: 3 });
+  ask({ handle: "A15", turn: 17, kind: "decide", text: "Choose the cutover night for the pool change", level: "blocking", blocking: true, seq: 1.5,
+    options: ["Tonight, after the deploy", "Thursday night"], recommended: "Thursday night",
+    quote: "Choose the cutover night for the pool change: tonight after the deploy, or Thursday. I cannot schedule it until you pick one.", ago: 3 });
   ask({ handle: "A7", turn: 17, kind: "confirm", text: "OK to drop the orders_legacy view?", status: "answered", answer: "Yes, drop it.", seq: 2,
     quote: "OK to drop the `orders_legacy` view?", ago: 3 });
   ask({ handle: "A8", turn: 17, kind: "review", text: "Review the pool settings export in reports/pool-settings.md for missing services", origin: "extract_model", seq: 3,
@@ -125,7 +130,7 @@ export function demoData(now = Date.now()) {
   items[q3].branch = { branchId: "br_demo_q3_7c1e" };
   items[q2].branch = { branchId: "br_demo_q2_a41b" };
 
-  const sess = (sid, o) => ({ sessionId: sid, turnSource: "hooks", nextHandle: { A: 15, Q: 9 }, startedAt: now - day, updatedAt: now - 60e3, seenAt: now - 30 * min, promptAt: now - 2 * min, surfaced: false, ...o });
+  const sess = (sid, o) => ({ sessionId: sid, turnSource: "hooks", nextHandle: { A: 16, Q: 9 }, startedAt: now - day, updatedAt: now - 60e3, seenAt: now - 30 * min, promptAt: now - 2 * min, surfaced: false, ...o });
   return {
     v: 1,
     items,
@@ -157,7 +162,7 @@ export function demoData(now = Date.now()) {
     terminals: { t21: { sessionId: SID, agent: "claude-code", updatedAt: now - 60e3 }, t27: { sessionId: SID2, agent: "codex", updatedAt: now - 120e3 } },
     turns: {
       [SID]: {
-        17: { stopAt: now - 3 * min, textHead: T17.slice(0, 400), asks: { source: "block", count: 4, at: now - 3 * min } },
+        17: { stopAt: now - 3 * min, textHead: T17.slice(0, 400), asks: { source: "block", count: 5, at: now - 3 * min } },
         15: { stopAt: now - 120 * min, asks: { source: "error", error: "no credential", count: 0, at: now - 120 * min } },
         12: { stopAt: now - 2 * day, asks: { source: "model", count: 2, at: now - 2 * day } },
       },

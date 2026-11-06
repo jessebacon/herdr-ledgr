@@ -251,6 +251,33 @@ def handle(event, sid, t, agent, fields):
     return rec
 
 
+# The hybrid re-injection of the ledgr-asks instruction (config instruct_reinject). The extractor
+# marks the session after a turn whose blocking ask only the model found (the message had no block);
+# the session's next real prompt prints the instruction once and clears the mark. SessionStart,
+# which prints it anyway, clears it too.
+def mark_reinject(sid, turn):
+    with C.Lock("session-" + sid):
+        sf = C.path("sessions", sid + ".json")
+        rec = C.read_json(sf)
+        if not isinstance(rec, dict):
+            return False
+        rec["reinject_pending"] = int(turn or 0)
+        C.write_json(sf, rec)
+    return True
+
+
+def take_reinject(sid):
+    """True once after mark_reinject: clears the mark."""
+    with C.Lock("session-" + sid):
+        sf = C.path("sessions", sid + ".json")
+        rec = C.read_json(sf)
+        if not isinstance(rec, dict) or rec.get("reinject_pending") is None:
+            return False
+        rec.pop("reinject_pending", None)
+        C.write_json(sf, rec)
+    return True
+
+
 def prune(folder, max_age_s):
     import time
     cutoff = time.time() - max_age_s

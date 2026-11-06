@@ -129,6 +129,7 @@ def extract(msg, cfg, rec, sid, snapshot_path=None):
         res["source"] = "skip"
         return done()
     pb = parse_block.parse(msg)
+    res["block_found"] = pb["found"]                                    # the agent wrote a block (any)
     block_ok = pb["found"] and pb["valid"] and len(pb["asks"]) > 0     # only a non-empty block counts
     if pb["found"] and not pb["valid"]:
         res["block_error"] = pb["error"]

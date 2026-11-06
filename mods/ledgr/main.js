@@ -16,7 +16,8 @@
 //   (the session menu); Phase 3: conclude (Conclude… on the newest branch that can), conclude-edit:<text>
 //   (append a line to the open editor), send-to-trunk, ask-conclusion, copy-confluence, close-branch
 //   (twice: the two clicks), copy-answers (the newest turn with typed answers).
-//   For scripted looks: fold-mine, fold-asks (fold or unfold a lane), collapse-all (every open row and box);
+//   For scripted looks: fold-mine, fold-asks (fold or unfold a lane), collapse-all (every open row, box and note),
+//   hide-branch:<hc name> (demo only: drop that branch from the demo store);
 //   pick:<handle>:<n> (click option n of an ask), copy-answer:<handle> (its Copy answer button),
 //   go:<handle> (its ⋯ Go to anchor), session:<terminal|sid prefix> (show that session, as the session
 //   menu does).
