@@ -79,10 +79,10 @@ The installer offers free alternatives when ⌘J or ⌘⇧J is taken.
 - **`~/.claude`:** the hooks read the session's transcript for the turn's last message; the installer edits `settings.json` (after a backup). Nothing else.
 - **Network:** one call per finished turn to the extraction provider you chose (the Anthropic API by default), carrying that turn's last assistant message and the session's open asks. None with provider `none`, or when the agent wrote a `ledgr-asks` block.
 - **Keychain:** the API key, service `ledgr`, account = provider, read at each call; never on disk.
-- **Programs:** `hc read`, `hc keys <pane> ctrl+o /` (Go to anchor: opens Claude's transcript search in an idle pane), `hc run … claude --resume …` for branches and Resume session, `hc kill`/`hc rm` when you close a branch, `git rev-parse`, `which claude`, the extractor's retry script; the hooks run `python3`, `security` and `curl`.
-- **Clipboard:** read when the capture box opens (to offer the copied passage as a quote); written when you copy answers, a `/btw`, a branch's answer or an anchor slice.
+- **Programs:** `hc read`, `hc run … claude --resume …` for branches and Resume session, `hc kill`/`hc rm` when you close a branch, `git rev-parse`, `which claude`, the extractor's retry script; the hooks run `python3`, `security` and `curl`.
+- **Clipboard and focus:** the clipboard is read when the capture box opens (to offer the copied passage as a quote) and written when you copy answers, a `/btw`, a branch's answer or an anchor slice; those actions also focus the agent's pane. That is all the mod does to a terminal.
 - **Files:** only under the Herdr home: `ledgr-data/` and the mod's folders. Install state and backups in `~/.local/state/ledgr/`.
-- **Never:** types into an agent's prompt or presses Enter, calls anything but the one provider, or touches other applications.
+- **Never:** sends keystrokes to a terminal (no `hc keys`, no `hc send`: nothing is typed into an agent's prompt and Enter is never pressed; a test checks the source), calls anything but the one provider, or touches other applications.
 
 ## Repository
 

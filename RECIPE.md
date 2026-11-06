@@ -32,8 +32,7 @@ Tell the person all of this before copying anything (the manual's step 1).
   (service `ledgr`, account = provider name) at each call and never written to disk: `/usr/bin/curl`
   gets it in a config on stdin, and the message in a 0600 file under `ledgr-data/tmp/`, deleted after.
 - **Runs programs.** The mod, through `exec` and `hc`: `hc read <terminal>` (checks a clipboard quote
-  against a working agent's screen), `hc keys <terminal> ctrl+o /` (Go to anchor on an idle Claude
-  pane: opens Claude's transcript search), `hc run … -- claude --resume <sid> --fork-session …`
+  against a working agent's screen), `hc run … -- claude --resume <sid> --fork-session …`
   (Launch on a Branch: a new Claude Code session on your plan), `hc run … -- claude --resume <sid>`
   (Resume session), `hc kill` and `hc rm` (Close branch, after its answer landed),
   `git -C <cwd> rev-parse` (whether "isolate in a worktree" applies), `/usr/bin/which claude` once,
@@ -41,12 +40,14 @@ Tell the person all of this before copying anything (the manual's step 1).
   `python3`, `/usr/bin/security find-generic-password` (the key) and `/usr/bin/curl` (the call).
 - **Reads the clipboard.** The capture box reads it when it opens, to offer the copied passage as the
   question's quote (attached only if it matches the agent's saved turn text or screen). The panel
-  writes the clipboard for Copy answer, Copy answers, `/btw`, Send to trunk and Go to anchor.
+  writes the clipboard for Copy answer, Copy answers, `/btw`, Send to trunk and Go to anchor, and
+  focuses the pane (`pane.focus`); that is all it does to a terminal.
 - **Writes under the Herdr home only.** `ledgr-data/` (store, spool, saved turn texts, per-session
   `decisions.md`, logs, `config.json`) and the mod's own files.
-- **Never:** types into a terminal's prompt or presses Enter (no `hc send`; the only keystrokes are Go
-  to anchor's `ctrl+o /`); reaches the network beyond the one extraction provider; contacts any other
-  application; reads files outside the Herdr home and `~/.claude`.
+- **Never:** sends keystrokes to a terminal (no `hc keys`, no `hc send`: nothing is typed into a
+  prompt and Enter is never pressed; `bin/tests/test_no_keystrokes.py` checks the source); reaches the
+  network beyond the one extraction provider; contacts any other application; reads files outside the
+  Herdr home and `~/.claude`.
 
 ## What you see
 
@@ -125,10 +126,11 @@ Tell the person all of this before copying anything (the manual's step 1).
   moves between the question and the hand quote field.
 - Row actions: **Done**, **Defer ▾** (tomorrow, in a week, next session), the row's own step (Promote,
   Branch… on a question, Copy confluence again, Reopen), and **⋯** holding **Not needed**, Ask about
-  this, Copy for prompt (`[Q3] <question>`), Stage /btw, Call off, and Go to anchor (focuses the pane;
-  for an idle Claude it puts a 20-40 character slice of the quote on the clipboard and presses
-  `ctrl+o /`). A session whose terminal is gone offers **Resume session…** (`claude --resume` in a new
-  pane) or **Transcript gone**. "Copy answers" builds `ledgr answers <session id>`, `Answers to your
+  this, Copy for prompt (`[Q3] <question>`), Stage /btw, Call off, and Go to anchor (opens the row on
+  its whole message with the passage marked, focuses the pane, puts a 20-40 character slice of the
+  quote on the clipboard, and says how to search for it: in Claude, ctrl+o for the transcript, then
+  `/`, ⌘V, Enter; it presses no keys itself). A session whose terminal is gone offers **Resume
+  session…** (`claude --resume` in a new pane) or **Transcript gone**. "Copy answers" builds `ledgr answers <session id>`, `Answers to your
   asks from turn N:`, then `A5: …` lines; when that prompt is sent, the hook marks those asks answered.
 - A prompt that contains `[A5]` marks that ask answered; `[Q3]` marks the question sent.
 - Branch… on a parked question: a confirmation shows the context manifest (what the fork knows and does
@@ -172,7 +174,7 @@ Tell the person all of this before copying anything (the manual's step 1).
   (`ledgr.writer`, `ledgr.ping`, `ledgr.chips` (`a` counts at or above the threshold, `b` the blocking
   ones), `ledgr.focus`, `ledgr.ui` `{animations, panel}`), `focused`, `agents`, `panes`, `terminals`,
   `layout`, `placement`, `run` (`pane.focus`, `layout.select`, `layout.show`, `layout.hide`,
-  `mod.open`, `terminal.keep`, `terminal.search`, `terminal.peek`), `openOverlay`, `closeOverlay`,
+  `mod.open`, `terminal.keep`, `terminal.peek`), `openOverlay`, `closeOverlay`,
   `nextCommand`, `hc`, `exec`; `cx.read_from_clipboard`, `cx.write_to_clipboard`.
 - **Data**, `<Herdr home>/ledgr-data/`: `store.json` (written only by the writer), `spool/` (one JSON
   event per file), `terminals/<t>.json` (identity map), `sessions/<sid>.json` and

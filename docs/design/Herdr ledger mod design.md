@@ -863,6 +863,8 @@ What Herdr can and cannot do:
 
 The button is disabled while the agent is `working` or `blocked`, so keystrokes never land in a permission prompt.
 
+**Superseded 2026-11-06.** Steps 3 and 4 and the disabled state are gone: ledgr sends no keystrokes to any terminal and opens no find bar (`bin/tests/test_no_keystrokes.py`, `tests/test_nav.mjs`). Go to anchor opens the row on its whole message with the passage marked, focuses the pane, copies the slice, and the status line says how to search (in Claude: ctrl+o, `/`, ⌘V, Enter). Reason: `ctrl+o` is a toggle (`app:toggleTranscript`, keybindings.md), so the same two keys enter the transcript viewer or leave it and drop `/` into the prompt, depending on a screen state the mod cannot see; Jesse reported a stray "detailed transcript" toggle. `config.nav.autoSearch` is unused.
+
 ### 6.7 Performance rules
 
 - Everything the panel draws comes from the store in memory; file reads happen in the ingest loop and on row expand.

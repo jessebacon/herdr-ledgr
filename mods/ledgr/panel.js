@@ -372,6 +372,12 @@ export class Panel {
       else if (c.startsWith("pick:")) { const o = (it.options ?? [])[Number(n)]; if (o === undefined) this.flash = `${h} has no option ${n}.`; else this.setDraft(it, o, cx); }
       else this.copyAnswer(it, s, cx);
     }
+    // `go:<handle>`: that item's Go to anchor (the ⋯ menu's), on the shown session.
+    else if (c.startsWith("go:")) {
+      const st = this.viewStore(), sid = this.current(st), s = sid ? st.d.sessions[sid] : null, h = c.slice("go:".length);
+      const it = s ? st.byHandle(sid, h) : null;
+      if (!it) this.flash = `No ${h} in this session.`; else this.goTo(it, s, cx);
+    }
     else if (c === "fold-asks") { const st = this.viewStore(), sid = this.current(st), s = sid ? st.d.sessions[sid] : null; if (s) this.setAsksOpen(s, !this.asksOpen(s)); }
     else if (c === "collapse-all") { this.expanded.clear(); this.whole.clear(); this.brOpen.clear(); this.preOpen.clear(); this.confirm = null; this.conclude = null; this.dd = null; }
     // For scripted checks of the severity and motion paths, the same code as the clicks:
@@ -584,9 +590,12 @@ export class Panel {
     cx.notify();
   }
 
+  // Go to anchor: the row opens on its whole message (the passage, highlighted), the pane is focused
+  // and a search slice of the quote is copied (nav.js). No keys are sent to the terminal.
   goTo(it, s, cx) {
     this.expandItem(it, cx);
-    this.flash = this.demo ? "(demo) Would focus the agent's pane and open its search with the quote on the clipboard." : goToAnchor(it, s, cx);
+    this.whole.add(it.id);
+    this.flash = this.demo ? "(demo) Would focus the agent's pane and copy a search slice of the quote; the passage is shown here." : goToAnchor(it, s, cx);
     cx.notify();
   }
 
@@ -1452,7 +1461,6 @@ export class Panel {
           : v_flex().gap(3).child(this.passageView(t, it, text, true)).child(toggle);
     const quote = it.anchor?.quote ? squash(it.anchor.quote) : "";
     const input = this.inputs.get(it.id);
-    const tBusy = !this.demo && busy(s.terminal);
     // Few buttons: Done, Defer ▾ (tomorrow, in a week, next session), the row's own primary action
     // (Promote, Branch…, Copy confluence again) and ⋯ for the rest (Not needed, Ask about this, the
     // question's copy actions, Go to anchor or Resume session).
@@ -1488,7 +1496,7 @@ export class Panel {
     const gone = this.terminalGone(st, s);
     const rs = s.resume;
     const resuming = Boolean(rs && (rs.state === "launching" || rs.state === "launched") && Date.now() - (rs.at ?? 0) < 60000);
-    if (!gone) m("go", "Go to anchor", (_e, cx) => this.goTo(it, s, cx), { disabled: tBusy, tip: tBusy ? "The agent is working: keys would land in its prompt" : "Focus the pane and open its search" });
+    if (!gone) m("go", "Go to anchor", (_e, cx) => this.goTo(it, s, cx), { tip: "Show the passage here, focus the pane and copy a slice of the quote to search for (no keys are sent)" });
     else if (!this.branchable(s)) m("go", "Go to anchor", () => {}, { disabled: true, tip: `Its terminal${s.terminal ? ` (${P(s.terminal)})` : ""} is gone, and only a Claude Code session can be resumed. The saved passage is above.` });
     else {
       const tx = this.transcriptOk(s);

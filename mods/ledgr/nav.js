@@ -1,9 +1,12 @@
-// ledgr navigation (spec 6.6): the passage comes to the panel first; then the agent's pane
-// is focused; then, for an idle agent, a slice of the quote goes on the clipboard and the
-// agent's own search is opened (Claude fullscreen transcript search via `hc keys <t> ctrl+o /`,
-// else Herdr's find bar). Nothing is ever typed into an agent: text goes to the clipboard and
-// the person pastes. `hc send` is never used (it presses Enter).
-import { run, hc, agents, terminals } from "herdr";
+// ledgr navigation (spec 6.6): the passage comes to the panel first (the row opens on its whole
+// message); then the agent's pane is focused and a distinctive slice of the quote goes on the
+// clipboard, with a note saying how to search for it.
+// ledgr never sends keystrokes to a terminal: no `hc keys`, no `hc send` (it presses Enter), and it
+// opens no find bar. Every staging (answers, /btw, a confluence, a search slice) is clipboard plus
+// `pane.focus`; the person types and pastes. Until 2026-11-06 Go to anchor pressed `ctrl+o /` in an
+// idle Claude pane. Removed: ctrl+o toggles Claude Code's transcript viewer, so what those keys did
+// depended on a screen state the mod cannot see (bin/tests/test_no_keystrokes.py guards this).
+import { run, agents, terminals } from "herdr";
 
 export function agentOf(t) {
   return t ? agents().find((a) => a.address === t) ?? null : null;
@@ -40,24 +43,24 @@ export function searchSlice(quote) {
   return best.length >= 20 ? best : s.slice(0, 40);
 }
 
-// Focus the agent's pane (if live), stage the search. Must be called from an event handler:
-// the clipboard is written with that call's cx before anything is awaited.
-// Returns a one-line note for the panel's status line.
+const isClaude = (app) => app === "claude-code" || app === "claude";
+
+// Go to anchor: the search slice on the clipboard, then the agent's pane focused (if live). Nothing
+// is sent to the terminal. Must be called from an event handler: the clipboard is written with that
+// call's cx. Returns a one-line note for the panel's status line saying what to do next.
 export function goToAnchor(item, session, cx) {
   const t = session?.terminal ?? item?.terminal ?? null;
   if (!t || !isLive(t)) return "Agent terminal is not live: the passage is shown here.";
-  run("pane.focus", { terminal: t });
-  if (busy(t)) return "Agent is busy: pane focused, search not opened.";
   const slice = searchSlice(item?.anchor?.quote);
-  if (!slice) return "Pane focused. No quote saved for this item, so no search.";
-  cx.write_to_clipboard(slice);
+  if (slice) cx.write_to_clipboard(slice);
+  run("pane.focus", { terminal: t });
+  if (!slice) return `Pane ${t} focused. No quote saved for this item: the passage is shown here.`;
   const app = agentOf(t)?.app ?? session?.agent ?? null;
-  if (app === "claude-code" || app === "claude") {
-    cx.spawn(async () => { await hc(["keys", t, "ctrl+o", "/"]).catch(() => null); });
-    return `Claude transcript search opened in pane ${t}: ⌘V, Enter (q to return). Copied: “${slice}”`;
-  }
-  run("terminal.search");
-  return `Find bar opened in pane ${t}: ⌘V to search. Copied: “${slice}”`;
+  const how = isClaude(app)
+    ? "in Claude press ctrl+o (transcript), then /, ⌘V, Enter; q goes back to the prompt"
+    : "paste it into the agent's own search, or Herdr's terminal search (command palette)";
+  const wait = busy(t) ? " The agent is working: search once it is idle." : "";
+  return `Passage shown here; pane ${t} focused and “${slice}” copied. To find it there, ${how}.${wait}`;
 }
 
 // Clipboard + focus, never typed (spec 5.5, 6.4 and the build brief).
