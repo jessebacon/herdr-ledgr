@@ -1,6 +1,7 @@
-// ledgr settings: paths under ~/.config/herdr-app/ledgr-data and the defaults of
-// ledgr-data/config.json. The mod only reads config.json; the hooks create and own it.
-import { appHome, readTextFile } from "herdr";
+// ledgr settings: paths under <Herdr home>/ledgr-data, the defaults of ledgr-data/config.json, and
+// where the panel sits in the person's layout. The mod only reads config.json; the hooks and
+// install.sh create it.
+import { appHome, readTextFile, layout, run, shared } from "herdr";
 
 // true: every copy draws the fixture store (fixtures.js) instead of live data.
 // Used for `herdr-app check` with populated lanes. Keep false in normal use.
@@ -25,7 +26,10 @@ export const DEFAULTS = {
   // ASKED OF YOU lane folds while the agent works and opens at the end of each turn); false (the
   // default) leaves every fold to the person. animations: false turns off every ledgr motion (rows
   // entering and leaving, highlights, the chip's pulse, ledgr's spinners spin no more).
-  ui: { foldAsksWhileWorking: false, animations: true },
+  // panel: the layout node ids the panel lives in (install.sh writes them when it puts the block
+  // somewhere else): `column` is shown and hidden, `stack` (null: none) selects `child`. The default
+  // is the right-hand panel stack of Herdr's `main` layout and its clones.
+  ui: { foldAsksWhileWorking: false, animations: true, panel: { column: "panel", stack: "panel-body", child: "ledgr" } },
   retention_days: 14,
 };
 
@@ -74,4 +78,51 @@ export function agentLabel(agent) {
   const a = String(agent).toLowerCase();
   if (a === "claude-code" || a === "claude") return "claude";
   return a.replace(/[^a-z0-9-]/g, "").slice(0, 12) || "agent";
+}
+
+// Running in the app, not in `herdr-app check`? check refuses reads outside the mod's folder, and
+// it shares the running window's shared state, so a copy that claimed the writer role or pinged
+// from a check would leave a claim nobody holds. Every Herdr home has AGENTS.md.
+export async function liveHome() {
+  try { return (await readTextFile(`${appHome()}/AGENTS.md`)) !== null; } catch { return false; }
+}
+
+// ── where the panel lives ─────────────────────────────────────────────
+// The writer publishes config.json's ui.panel as shared("ledgr.ui").panel, so every copy (the host
+// block, the panel, the pane-header chip) shows and hides the same node.
+export function panelPlace(cfg) {
+  const d = DEFAULTS.ui.panel;
+  const p = cfg?.ui?.panel ?? shared("ledgr.ui")?.panel ?? null;
+  if (!p || typeof p !== "object") return d;
+  const column = typeof p.column === "string" && p.column ? p.column : d.column;
+  const stack = p.stack === null ? null : typeof p.stack === "string" && p.stack ? p.stack : d.stack;
+  const child = typeof p.child === "string" && p.child ? p.child : d.child;
+  return { column, stack, child };
+}
+
+export function findNode(node, id) {
+  if (!id) return null;
+  if (node?.id === id) return node;
+  for (const c of node?.children ?? []) { const f = findNode(c, id); if (f) return f; }
+  return null;
+}
+
+// true or false; null when the layout has no such column (then nothing can show or hide it).
+export function panelShown(place = panelPlace()) {
+  const root = layout(), col = findNode(root, place.column);
+  if (!col) return null;
+  if (col.hidden) return false;
+  if (!place.stack) return true;
+  const stack = findNode(root, place.stack);
+  return stack ? stack.active === place.child : null;
+}
+
+export function showPanel(place = panelPlace()) {
+  if (place.stack) run("layout.select", { stack: place.stack, child: place.child });
+  run("layout.show", { id: place.column });
+}
+
+export function togglePanel(place = panelPlace()) {
+  if (panelShown(place)) run("layout.hide", { id: place.column });
+  else showPanel(place);
 }

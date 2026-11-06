@@ -12,7 +12,7 @@
 //   ledgr answers <session id>
 // The Python parser and these composers must agree (tests/test-store.sh checks one against the other).
 //
-// SOURCE OF TRUTH: mods/ledgr/confluence.js. mods/my-tabs/ledgr/confluence.js is a byte-identical copy
+// SOURCE OF TRUTH: mods/ledgr/confluence.js. A host in another mod imports a byte-identical copy from mods/<name>/ledgr/confluence.js
 // (Herdr refuses imports from outside a mod's folder).
 
 export const CONFLUENCE_MARK = "ledgr confluence";

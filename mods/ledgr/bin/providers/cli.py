@@ -15,7 +15,7 @@ from ._http import result
 
 def complete(system, user_text, schema, opts):
     model, timeout = opts["model"], max(int(opts["timeout"]), 90)
-    exe = shutil.which("claude", path="/opt/homebrew/bin:/usr/local/bin:" + os.path.join(C.HOME, ".local/bin"))
+    exe = shutil.which("claude", path=C.TOOL_PATH + ":" + os.path.join(C.HOME, ".claude/local"))
     if not exe:
         return result(error="claude CLI not found", model=model)
     env = {k: v for k, v in os.environ.items()

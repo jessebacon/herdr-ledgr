@@ -5,7 +5,7 @@
      "text": "Decide whether to keep or delete the stale release/5.4 branch", "kind": "decide",
      "anchor": {"sessionId": "fixture-reask", "turn": 3}, "updatedAt": 1793899000000},
     {"id": "rq_5c7e9a20-1d3b-4f6e-8a90-b1c2d3e4f5a6", "handle": "A4", "direction": "agent_to_human", "status": "dismissed",
-     "text": "Run the Qualys rescan of PRODAPP", "kind": "do",
+     "text": "Run the vulnerability rescan of the staging server", "kind": "do",
      "anchor": {"sessionId": "fixture-reask", "turn": 4}, "updatedAt": 4102444800000, "resolvedAt": 4102444800000},
     {"id": "rq_99999999-0000-0000-0000-000000000000", "handle": "A1", "direction": "agent_to_human", "status": "open",
      "text": "An ask from another session that must not be listed", "kind": "do",

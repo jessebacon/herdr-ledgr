@@ -12,7 +12,7 @@
 // question parked at turn A and branched at turn F also carries turns A+1..F: the manifest and
 // the preamble say so.
 //
-// SOURCE OF TRUTH: mods/ledgr/branch.js. mods/my-tabs/ledgr/branch.js is a byte-identical copy
+// SOURCE OF TRUTH: mods/ledgr/branch.js. A host in another mod imports a byte-identical copy from mods/<name>/ledgr/branch.js
 // (Herdr refuses imports from outside a mod's folder).
 
 export const DEFAULT_MAX_DEPTH = 2;

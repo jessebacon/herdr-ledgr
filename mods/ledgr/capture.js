@@ -20,7 +20,7 @@ import { paneWords } from "./words.js";
 
 const squash = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
 // Fullscreen Claude renders **bold** and `code` without their marks, so a copied passage lacks
-// them; both sides drop them before the second comparison (BUILD-NOTES-mod.md).
+// them; both sides drop them before the second comparison (docs/build-notes/BUILD-NOTES-mod.md in the repo).
 const unmark = (s) => squash(String(s ?? "").replace(/[*`]+/g, ""));
 const occursIn = (text, q) => Boolean(text) && (squash(text).includes(squash(q)) || unmark(text).includes(unmark(q)));
 

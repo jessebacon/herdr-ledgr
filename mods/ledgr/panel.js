@@ -1,8 +1,10 @@
-// ledgr panel (spec 6): the panel-body stack child in layouts/custom.json, props {view: "panel"}.
+// ledgr panel (spec 6): a layout block, props {view: "panel"}, by default a child of the right-hand
+// `panel-body` stack (config.json ui.panel says where; config.js panelPlace).
 // A reader: it loads ledgr-data/store.json and follows it with watchFolder. The writer (spool
-// ingest, store.json, chips) runs in the always-shown my-tabs copy (writer.js); every act here
-// (resolve, defer, dismiss, reopen, draft, seen, retry) is posted as a spool event. Only when no
-// my-tabs writer answers does this copy run a fallback Writer. localStorage holds UI prefs only.
+// ingest, store.json, chips) runs in an always-shown host copy (writer.js: the ledgr host block, or
+// an overlay's tab bar); every act here (resolve, defer, dismiss, reopen, draft, seen, retry) is
+// posted as a spool event. Only when no host writer answers does this copy run a fallback Writer.
+// localStorage holds UI prefs only.
 // It follows the focused agent's session unless pinned; two lanes: asks of you (agent asks,
 // grouped by turn) and your questions (parked human asks).
 // Phase 2: "Branch…" on a parked question opens a confirmation with the context manifest; Launch
@@ -29,7 +31,7 @@ import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, P
 import { theme, props, shared, setShared, focused, layout, run, watchFolder, readTextFile, writeTextFile, openOverlay, agents, terminals, panes, exec, home } from "herdr";
 import * as fs from "fs/promises";
 import { randomUUID } from "crypto";
-import { FORCE_DEMO, DEFAULTS, loadConfig, dataDir, turnPath, agentLabel, storePath } from "./config.js";
+import { FORCE_DEMO, DEFAULTS, loadConfig, dataDir, turnPath, agentLabel, storePath, panelPlace, panelShown, liveHome } from "./config.js";
 import { Store, isAgentAsk, isHuman, isClosed, levelOf, isSuggestion, isBlocking, thresholdOf, LEVELS } from "./store.js";
 import { writeEvent } from "./spool.js";
 import { Writer, writerClaim, engineDrift } from "./writer.js";
@@ -56,11 +58,6 @@ const BR_WORD = { working: "working", blocked: "needs you", done: "done", idle: 
   launched: "starting", running: "running", closed: "closed", ended: "ended", failed: "launch failed", refused: "refused",
   nostart: "did not start (see its terminal's error toast)", concluded: "concluded", rejoined: "rejoined" };
 
-function findNode(node, id) {
-  if (node?.id === id) return node;
-  for (const c of node?.children ?? []) { const f = findNode(c, id); if (f) return f; }
-  return null;
-}
 
 // [start, end) of the quote in the message text, tolerant of whitespace and markdown marks.
 function locate(text, quote) {
@@ -110,7 +107,7 @@ export class Panel {
     this.panelId = randomUUID();
     this.live = new Store(null);   // store.json as read (reader mode)
     this.liveText = null;
-    this.writer = null;            // a fallback Writer, only when no my-tabs writer answers
+    this.writer = null;            // a fallback Writer, only when no host writer answers
     this.localActs = [];           // acts posted but not yet in store.json (shown at once)
     this.drafts = new Map();       // answer text typed but not yet posted
     this.demoStore = null;
@@ -168,10 +165,12 @@ export class Panel {
   }
 
   // ── reader lifecycle ─────────────────────────────────────────────────
-  // The panel reads ledgr-data/store.json and follows it with watchFolder; the writer is the
-  // my-tabs copy (writer.js). If none answers a ping within 4 s, this copy runs a fallback
-  // writer, and hands the role back as soon as a my-tabs writer claims it.
+  // The panel reads ledgr-data/store.json and follows it with watchFolder; the writer is a host
+  // copy (writer.js). If none answers a ping within 4 s, this copy runs a fallback writer, and
+  // hands the role back as soon as a host writer claims it.
   async start(cx) {
+    if (!(await liveHome())) return;      // herdr-app check: no ping, no fallback writer
+    this.inApp = true;
     this.cfg = await loadConfig();
     try { localStorage.removeItem("store"); } catch { /* the pre-store.json cache, unused now */ }
     await this.reload();
@@ -179,9 +178,9 @@ export class Panel {
     this.checkWriter(cx);
     const drift = await engineDrift();
     if (drift.length) {
-      const warn = this.flash = `mods/my-tabs/ledgr/ differs from mods/ledgr/ (${drift.join(", ")}): copy those files over so both writers run the same code.`;
+      const warn = this.flash = `An engine copy differs from mods/ledgr/ (${drift.join(", ")}): run install.sh again so every writer runs the same code.`;
       // install.sh syncs mods/ledgr (which reloads this copy) a moment before it copies the engine
-      // into my-tabs: look once more before keeping the warning.
+      // into a host's ledgr/ folder: look once more before keeping the warning.
       cx.timer.after(5000, (cx) => cx.spawn(async (cx) => {
         if (this.flash === warn && !(await engineDrift()).length) { this.flash = ""; cx.notify(); }
       }));
@@ -266,18 +265,18 @@ export class Panel {
     });
   }
 
-  // Ask whether a my-tabs writer is alive (it re-claims on a newer ping); none in 4 s: fallback.
+  // Ask whether a host writer is alive (it re-claims on a newer ping); none in 4 s: fallback.
   checkWriter(cx) {
-    if (FORCE_DEMO || this.fallback()) return;
+    if (FORCE_DEMO || this.fallback() || !this.inApp) return;
     const at = Date.now();
     this.checkedAt = at;
     setShared("ledgr.ping", { at, id: this.panelId });
     cx.timer.after(4000, (cx) => {
       const w = writerClaim();
-      if (w && w.by === "my-tabs" && Number(w.at) >= at) { this.writerNote = null; cx.notify(); return; }
+      if (w && w.by !== "panel" && Number(w.at) >= at) { this.writerNote = null; cx.notify(); return; }
       if (this.writer && !this.writer.retired) return;
       this.writer = new Writer("panel");
-      this.writerNote = "No my-tabs writer answered: this panel is ingesting (fallback writer).";
+      this.writerNote = "No host writer answered: this panel is ingesting (fallback writer). Add the ledgr host block to the layout for live chips.";
       cx.spawn(async (cx) => { await this.writer.start(cx); cx.notify(); });
     });
   }
@@ -407,7 +406,7 @@ export class Panel {
       const st = this.demoStore, s = st.d.sessions[DEMO_SESSION], level = c.slice("demo-ask:".length);
       const turn = Math.max(...st.itemsOf(DEMO_SESSION).filter(isAgentAsk).map((it) => it.anchor?.turn ?? 0));
       const n = s.nextHandle.A;
-      const text = { blocking: `Send the PRODAPP admin password (demo ask ${n})`, optional: `Decide whether the agent should also tidy the old bindings (demo ask ${n})` }[level] ?? `Confirm the reboot window for PRODAPP (demo ask ${n})`;
+      const text = { blocking: `Send the staging database password (demo ask ${n})`, optional: `Decide whether the agent should also tidy the old migrations (demo ask ${n})` }[level] ?? `Confirm the maintenance window for the cutover (demo ask ${n})`;
       st.apply({ v: 1, id: `demo-${n}`, type: "asks", at: Date.now(), terminal: s.terminal, session_id: DEMO_SESSION, turn, source: "model",
         asks: [{ text, kind: level === "blocking" ? "provide" : "confirm", level: ["blocking", "needed", "optional"].includes(level) ? level : "needed", options: [], recommended: null, quote: null }] });
       this.bump();
@@ -478,9 +477,12 @@ export class Panel {
   }
 
   isShown() {
-    const root = layout(), panel = findNode(root, "panel"), body = findNode(root, "panel-body");
-    if (!panel || !body) return true;
-    return !panel.hidden && body.active === "ledgr";
+    return panelShown(panelPlace(this.cfg)) !== false;
+  }
+
+  // The View's close: a fallback writer gives the role up so a host takes it at once.
+  release() {
+    try { this.writer?.release(); } catch { /* closing */ }
   }
 
   // ── acts ─────────────────────────────────────────────────────────────
@@ -943,7 +945,7 @@ export class Panel {
     this.renders++;
     this.rcx = cx;
     const t = theme();
-    // A fallback writer steps down when a my-tabs writer claims the role.
+    // A fallback writer steps down when a host writer claims the role.
     if (this.writer && this.writer.started && !this.writer.holds() && !this.writer.retired) {
       this.writer.retire();
       this.writerNote = null;
@@ -978,7 +980,7 @@ export class Panel {
         div().flex_none().px(12).py(6).border_t(1).border_color(t.border).text_size(11).text_color(t.muted).child(note)));
   }
 
-  // A small menu under a trigger: gpui-base's Popup, as the shipped linear mod opens its pickers.
+  // A small menu under a trigger: gpui-base's Popup (a choice, a press outside or Esc closes it).
   // One open at a time (this.dd); a choice, a press outside or Esc closes it. Items are
   // [id, label, fn, {tip, disabled, danger, hint}]; o.small draws a quiet trigger for a lane head.
   menuButton(t, key, label, items, o = {}) {

@@ -1,0 +1,9 @@
+{
+  "place": "none",
+  "title": "Pane header (ledgr chip)",
+  "version": "0.1.0",
+  "cloned_from": {
+    "name": "pane",
+    "version": "0.1.13"
+  }
+}

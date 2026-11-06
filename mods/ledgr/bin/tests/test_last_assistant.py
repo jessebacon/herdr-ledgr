@@ -48,13 +48,12 @@ out = subprocess.run([sys.executable, "-I", "-B", os.path.join(ADAPTER, "last_as
 os.unlink(exp)
 check("CLI prints the same JSON", json.loads(out or "{}") == {"uuid": "c2", "api_id": "msg_C"}, out)
 
-# Real transcript: the newest finished one under the the project project, read independently.
-proj = os.path.expanduser("~/.claude/projects/-Users-you-Projects-app")
-cands = sorted(glob.glob(os.path.join(proj, "*.jsonl")), key=os.path.getmtime)
-real = next((p for p in cands if os.path.getsize(p) < 3_000_000), None)
-if real:
+# Real transcript: the newest finished one under any local Claude project, read independently.
+# Bounded: only the 20 newest *.jsonl files by mtime are considered, skipping any under 3 MB that
+# is still being written (touched in the last minute) or holds no assistant text.
+def last_main_text(path):
     last = None
-    with open(real, encoding="utf-8", errors="replace") as fh:
+    with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
             try:
                 rr = json.loads(line)
@@ -65,6 +64,22 @@ if real:
                 txt = "".join(b.get("text", "") for b in m.get("content") or [] if isinstance(b, dict) and b.get("type") == "text")
                 if txt.strip():
                     last = (rr.get("uuid"), m.get("id"), txt)
+    return last
+
+
+cands = sorted(glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")), key=os.path.getmtime, reverse=True)[:20]
+real = last = None
+for p in cands:
+    try:
+        if os.path.getsize(p) >= 3_000_000 or time.time() - os.path.getmtime(p) < 60:
+            continue
+        last = last_main_text(p)
+    except OSError:
+        continue
+    if last:
+        real = p
+        break
+if real:
     t0 = time.monotonic()
     r = last_assistant.find(real, last[2]) if last else {}
     ms = int((time.monotonic() - t0) * 1000)
@@ -73,7 +88,7 @@ if real:
     r = last_assistant.find(real, "This sentence was never written by the assistant in that session.")
     check("real transcript, non-matching text -> {}", r == {}, r)
 else:
-    print("SKIP real transcript: none found")
+    print("skipped: no local transcripts (real-transcript check; looked in ~/.claude/projects/*/*.jsonl)")
 
 print(f"\n{'OK' if not fails else 'FAILED'}: last_assistant, {fails} failure(s)")
 sys.exit(1 if fails else 0)

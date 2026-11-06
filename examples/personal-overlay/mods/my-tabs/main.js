@@ -3,8 +3,9 @@ import { h_flex } from "gpui-base";
 import { spaces, panes, run, openOverlay, theme, window, shared, layout, settings, nextCommand, appHome } from "herdr";
 import * as fs from "fs/promises";
 // The ledgr writer (spool ingest, ledgr-data/store.json, the header chips) runs here because this
-// copy is always shown. mods/my-tabs/ledgr/ is a byte-identical copy of mods/ledgr's engine
-// (config, store, spool, writer): Herdr refuses imports from outside a mod's folder.
+// copy is always shown: this tab bar is a ledgr host, in place of ledgr's own host block.
+// mods/my-tabs/ledgr/ is a byte-identical copy of mods/ledgr's engine (writer.js ENGINE_FILES),
+// written by ledgr's install.sh: Herdr refuses imports from outside a mod's folder.
 import { Writer } from "./ledgr/writer.js";
 
 function find(node, id) {
@@ -89,7 +90,7 @@ export default class Tabs extends View {
   }
 
   render(cx) {
-    try { this.ledgr?.respond(); this.ledgr?.track(cx); } catch { /* ledgr only */ }
+    try { this.ledgr?.respond(cx); this.ledgr?.track(cx); } catch { /* ledgr only */ }
     const t = theme();
     const space = spaces().find(p => p.active);
     const shown = space?.tabs ?? [];

@@ -1,9 +1,21 @@
 # ledgr Claude Code adapter: shared preamble, sourced by the hook entry scripts.
 # Absolute tool paths, so the hooks work from Herdr's GUI login-shell PATH.
-export PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-PY=/opt/homebrew/bin/python3
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 case "$0" in */*) HERE="${0%/*}" ;; *) HERE=. ;; esac
-D="${LEDGR_DATA:-$HOME/.config/herdr-app/ledgr-data}"
+# python3 (3.9 or newer): LEDGR_PYTHON, else Homebrew's, /usr/local's, then the system's.
+PY="${LEDGR_PYTHON:-}"
+if [ -z "$PY" ] || [ ! -x "$PY" ]; then
+  for PY in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do [ -x "$PY" ] && break; done
+fi
+# ledgr-data: LEDGR_DATA, else beside the mods folder these hooks are installed in
+# (<Herdr home>/mods/ledgr/bin/adapters/claude), else ~/.config/herdr-app/ledgr-data.
+if [ -z "${LEDGR_DATA:-}" ]; then
+  _LH="$(cd "$HERE/../../../../.." 2>/dev/null && pwd)"
+  if [ -n "$_LH" ] && [ -f "$_LH/AGENTS.md" ] && [ -d "$_LH/mods" ]; then LEDGR_DATA="$_LH/ledgr-data"
+  else LEDGR_DATA="$HOME/.config/herdr-app/ledgr-data"; fi
+fi
+export LEDGR_DATA
+D="$LEDGR_DATA"
 # Bytecode is cached under ledgr-data/.pycache, never in the mod folder (a save there reloads the mod).
 PYRUN=("$PY" -I -S -X "pycache_prefix=$D/.pycache")
 

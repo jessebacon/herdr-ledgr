@@ -1,13 +1,18 @@
 // ledgr writer: the single writer of ledgr-data/store.json (spec 3.3, coordinator decision
-// 2026-11-05 option c). It runs in the always-shown my-tabs copy (role "my-tabs"); the ledgr
-// panel runs one only as a fallback (role "panel") when no my-tabs writer answers.
-//   - claims shared("ledgr.writer") = {id, by, at}; whoever holds the key writes, nobody else;
+// 2026-11-05 option c). It runs in an always-shown host copy: the ledgr host block (props
+// {view: "host"}, role "host"), or any other mod that carries a copy of the engine (an overlay's
+// tab bar, role = its name). The ledgr panel runs one only as a fallback (role "panel") when no
+// host writer answers its ping.
+//   - claims shared("ledgr.writer") = {id, by, at}; whoever holds the key writes, nobody else.
+//     Hosts elect one writer among themselves: a host that starts later takes over; a host that
+//     lost the role takes it back (re-reading store.json first) when the claim is empty or held by
+//     a panel fallback; a host that goes away releases it (release(), from the View's close);
 //   - loads store.json before reading or unlinking any spool file;
 //   - ingests ledgr-data/spool with watchFolder, writes store.json after every change and before
 //     unlinking the files it applied; publishes shared("ledgr.chips"); writes snapshot.json and
 //     archive/; runs the extractor's --retry for `retry` events;
 //   - track(cx) from the host's render: interrupts and tier-3 status turns (spec 6.5, 2.9);
-//   - respond() from the host's render: answers a panel's shared("ledgr.ping") by re-claiming;
+//   - respond(cx) from the host's render: answers a panel's shared("ledgr.ping") by re-claiming;
 //   - Phase 2: launches the branches the store accepted from a panel's `branch` event
 //     (launchBranch): the only process the mod starts on its own initiative.
 //   - Phase 3: appends one line per landed confluence to ledgr-data/sessions/<trunk sid>/decisions.md
@@ -18,13 +23,15 @@
 //   - re-reads ledgr-data/config.json whenever it changes (watchConfig): extract.threshold (which
 //     asks count on the chips) and branch.maxDepth apply without a restart.
 //
-// SOURCE OF TRUTH: mods/ledgr/{config,store,spool,writer,branch,confluence}.js. mods/my-tabs/ledgr/ holds byte-
-// identical copies, because Herdr refuses imports that resolve outside a mod's own folder
-// (symlinks included). The panel compares the two sets and says so when they differ.
+// SOURCE OF TRUTH: mods/ledgr/{config,store,spool,writer,branch,confluence}.js (ENGINE_FILES). A
+// host in another mod (an overlay's tab bar) imports byte-identical copies from its own
+// mods/<name>/ledgr/, because Herdr refuses imports that resolve outside a mod's own folder
+// (symlinks included); install.sh writes them. The panel compares every such set and says so when
+// one differs.
 import * as fs from "fs/promises";
 import { randomUUID } from "crypto";
-import { shared, setShared, readTextFile, writeTextFile, watchFolder, agents, terminals, panes, layout, run, exec, hc, openOverlay, appHome, home } from "herdr";
-import { DEFAULTS, loadConfig, dataDir, spoolDir, turnPath, storePath, binDir, agentLabel } from "./config.js";
+import { shared, setShared, readTextFile, writeTextFile, watchFolder, agents, terminals, panes, run, exec, hc, openOverlay, appHome, home } from "herdr";
+import { DEFAULTS, loadConfig, dataDir, spoolDir, turnPath, storePath, binDir, agentLabel, panelPlace, panelShown, showPanel, liveHome } from "./config.js";
 import { Store, isHuman, thresholdOf } from "./store.js";
 import { SpoolReader, readMap, writeAtomic } from "./spool.js";
 import { maxDepthOf, hcRunArgs, claudeArgv, resumeArgs, transcriptPathOf } from "./branch.js";
@@ -37,12 +44,6 @@ const plain = (s) => squash(String(s ?? "").replace(/[`*_#>]+/g, ""));
 export function writerClaim() {
   const w = shared("ledgr.writer");
   return w && typeof w === "object" && w.id ? w : null;
-}
-
-function findNode(node, id) {
-  if (node?.id === id) return node;
-  for (const c of node?.children ?? []) { const f = findNode(c, id); if (f) return f; }
-  return null;
 }
 
 export class Writer {
@@ -73,10 +74,19 @@ export class Writer {
   amWriter() { return this.started && this.holds(); }
   retire() { this.retired = true; }
 
+  // This copy is going away (the View's close): give the role up so another host takes it at once.
+  release() {
+    const held = this.holds();
+    this.retired = true;
+    if (held) setShared("ledgr.writer", null);
+  }
+
   // Taking the role: claim, then load store.json before any spool file is read or unlinked.
   // Missing: start empty. Unreadable: keep a copy aside, start empty. Until loaded, amWriter()
   // is false, so the reader leaves every spool file where it is.
   async start(cx) {
+    if (!this.booted && !(await liveHome())) { this.retired = true; this.note = "not in the app (herdr-app check): no writer"; return; }
+    this.booted = true;
     const before = writerClaim();
     this.claim();
     // Taking over from a live holder: let a store.json write it already started land first.
@@ -109,13 +119,14 @@ export class Writer {
     cx.notify();
   }
 
-  // The config values the store applies itself (branch.maxDepth, extract.threshold), and the one
-  // the chips need: shared("ledgr.ui") = {animations} (my-pane cannot read ledgr-data itself).
+  // The config values the store applies itself (branch.maxDepth, extract.threshold), and the ones
+  // the chips and the host need: shared("ledgr.ui") = {animations, panel} (a pane-header chip
+  // cannot read ledgr-data itself).
   applyConfig(cfg) {
     this.cfg = cfg;
     this.live.maxDepth = maxDepthOf(cfg);
     this.live.threshold = thresholdOf(cfg);
-    const ui = { animations: cfg?.ui?.animations !== false };
+    const ui = { animations: cfg?.ui?.animations !== false, panel: panelPlace(cfg) };
     if (this.holds() && JSON.stringify(shared("ledgr.ui") ?? null) !== JSON.stringify(ui)) setShared("ledgr.ui", ui);
   }
 
@@ -240,18 +251,12 @@ export class Writer {
     for (const id of launches) this.launchBranch(id, cx);
     for (const id of closes) this.closeBranch(id, cx);
     for (const sid of resumes) this.resumeSession(sid, cx);
-    if (newAsks && this.cfg.surface?.openPanelOnAsks && !this.panelShown()) {
-      run("layout.select", { stack: "panel-body", child: "ledgr" });
-      run("layout.show", { id: "panel" });
-    }
+    if (newAsks && this.cfg.surface?.openPanelOnAsks && this.panelShown() === false) showPanel(panelPlace(this.cfg));
     cx.notify();
     return true;
   }
 
-  panelShown() {
-    const root = layout(), panel = findNode(root, "panel"), body = findNode(root, "panel-body");
-    return Boolean(panel && body && !panel.hidden && body.active === "ledgr");
-  }
+  panelShown() { return panelShown(panelPlace(this.cfg)); }
 
   // A question parked during turn N points at N's message; if its quote is not in that
   // message, the saved turns are searched backward (spec 5.3).
@@ -494,9 +499,10 @@ export class Writer {
     await this.saveStore();
   }
 
-  // The host's 60 s timer: safety rescan, deferred items waking, housekeeping.
+  // The host's 60 s timer: safety rescan, deferred items waking, housekeeping. A host that does
+  // not hold the role checks instead that the holder is alive (probe).
   tick(cx) {
-    if (!this.amWriter()) return;
+    if (!this.amWriter()) { this.probe(cx); return; }
     cx.spawn(async (cx) => {
       await this.reader.drain(cx);
       if (!this.watching && this.reader.missing === false) this.watch(cx);
@@ -542,23 +548,62 @@ export class Writer {
     }
   }
 
-  // From the host's render: a panel asks "is a writer alive?" by setting shared("ledgr.ping");
-  // the my-tabs writer answers by claiming again (claim.at > ping.at). The my-tabs writer also
-  // takes the role back from a panel fallback writer.
-  respond() {
-    if (this.retired || this.role !== "my-tabs" || !this.started) return;
+  // From a host's render: a panel asks "is a writer alive?" by setting shared("ledgr.ping"); the
+  // holding host answers by claiming again (claim.at > ping.at). A host that does not hold the
+  // role takes it when nobody does or a panel fallback does, re-reading store.json first (another
+  // writer changed it meanwhile). Without a cx (an older host), it only answers pings.
+  respond(cx) {
+    if (this.retired || this.role === "panel" || this.starting) return;
     const w = writerClaim(), ping = shared("ledgr.ping");
-    if (w?.by === "panel" || (this.holds() && ping && Number(ping.at) > this.claimAt)) this.claim();
+    if (this.started && this.holds()) {
+      if (ping && Number(ping.at) > this.claimAt) this.claim();
+      return;
+    }
+    if (!this.booted || !cx) return;
+    if (!w || w.by === "panel") this.regain(cx);
+  }
+
+  // A holder that went away without releasing (a crash, a forced quit) leaves a claim nobody
+  // answers. A host that does not hold the role pings, at most every 2 minutes after the claim was
+  // last refreshed, and takes the role when the claim is not renewed within 4 s.
+  probe(cx) {
+    if (this.retired || this.role === "panel" || !this.booted || this.starting || !cx) return;
+    const w = writerClaim();
+    if (!w || w.by === "panel") { this.regain(cx); return; }
+    if (w.id === this.id || Date.now() - Number(w.at || 0) < 120000 || this.probing) return;
+    const at = Date.now();
+    this.probing = true;
+    setShared("ledgr.ping", { at, id: this.id });
+    cx.timer.after(4000, (cx) => {
+      this.probing = false;
+      const now = writerClaim();
+      if (!this.holds() && !this.starting && (!now || (now.id === w.id && Number(now.at) < at) || now.by === "panel")) this.regain(cx);
+    });
+  }
+
+  regain(cx) {
+    this.starting = true;
+    this.started = false;
+    cx.spawn(async (cx) => {
+      try { await this.start(cx); } finally { this.starting = false; }
+      cx.notify();
+    });
   }
 }
 
-// Are the my-tabs copies the same as mods/ledgr's? Resolves the names that differ.
+// Does any host's engine copy (mods/<name>/ledgr/) differ from mods/ledgr's? Resolves
+// "<name>/<file>" for each file that differs.
 export async function engineDrift() {
   const out = [];
-  for (const f of ENGINE_FILES) {
-    const a = await readTextFile(`${appHome()}/mods/ledgr/${f}`).catch(() => null);
-    const b = await readTextFile(`${appHome()}/mods/my-tabs/ledgr/${f}`).catch(() => null);
-    if (b !== null && a !== b) out.push(f);
+  const mods = await fs.readdir(`${appHome()}/mods`).catch(() => []);
+  for (const m of mods) {
+    if (m === "ledgr" || m.startsWith(".")) continue;
+    if (!(await fs.exists(`${appHome()}/mods/${m}/ledgr/writer.js`).catch(() => false))) continue;
+    for (const f of ENGINE_FILES) {
+      const a = await readTextFile(`${appHome()}/mods/ledgr/${f}`).catch(() => null);
+      const b = await readTextFile(`${appHome()}/mods/${m}/ledgr/${f}`).catch(() => null);
+      if (a !== b) out.push(`${m}/${f}`);
+    }
   }
   return out;
 }

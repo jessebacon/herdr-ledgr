@@ -1,7 +1,7 @@
-I drafted the TLS hardening script for PRODAPP. It disables TLS 1.0 and 1.1 and RC4 in SChannel and sets the cipher suite order.
+I drafted the connection pool config for the shop API database. It routes the app through a pooler, caps the direct connections to the primary, and sets the pool mode.
 
-Two things before I run it: pick the cipher order (Mozilla intermediate or CIS Level 1; I recommend Mozilla intermediate), and confirm it is OK to reboot PRODAPP tonight after 9 pm.
+Two things before I apply it: pick the pool mode (transaction pooling or session pooling; I recommend transaction pooling), and confirm it is OK to restart the API tonight after 9 pm.
 
 ```ledgr-asks
-[{"text": "Pick the cipher suite order for PRODAPP", "kind": "decide", "options": ["Mozilla intermediate", "CIS Level 1"],
+[{"text": "Pick the pool mode for the shop API database", "kind": "decide", "options": ["Transaction pooling", "Session pooling"],
 ```

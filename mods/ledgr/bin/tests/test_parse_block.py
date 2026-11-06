@@ -49,11 +49,11 @@ check("valid: no rejected levels", r["rejected"] == [], r["rejected"])
 r = parse_block.parse(load("levels.md"))
 lv = {a["text"]: a["level"] for a in r["asks"]}
 check("levels: valid, 5 asks (the unknown level rejected)", r["valid"] and len(r["asks"]) == 5, list(lv))
-check("levels: explicit blocking", lv.get("Paste the LINEAR_WEBHOOK_SECRET value") == "blocking", lv)
+check("levels: explicit blocking", lv.get("Paste the TRACKER_WEBHOOK_SECRET value") == "blocking", lv)
 check("levels: no level -> needed", lv.get("Check the DM on your phone") == "needed", lv)
 check("levels: optional", lv.get("Decide whether to add a digest later") == "optional", lv)
 check("levels: ' Needed ' -> needed (case and space ignored)", lv.get("Pick the message template") == "needed", lv)
-check("levels: legacy blocking true without level -> blocking", lv.get("Approve the Teams app") == "blocking", lv)
+check("levels: legacy blocking true without level -> blocking", lv.get("Approve the Slack app") == "blocking", lv)
 check("levels: unknown level 'urgent' rejected with a reason",
       "Rotate the old bot secret" not in lv and any("urgent" in x for x in r["rejected"]), r["rejected"])
 check("levels: blocking field follows the level",

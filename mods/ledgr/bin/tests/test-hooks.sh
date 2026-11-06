@@ -4,7 +4,7 @@
 # item (LEDGR_KEYCHAIN_SERVICE names a service that does not exist), so every model path ends in
 # the "no credential" result.     bash tests/test-hooks.sh
 set -u
-export PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 BIN="$(cd "$(dirname "$0")/.." && pwd)"; AD="$BIN/adapters/claude"
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ledgr-test.XXXXXX")"
 export LEDGR_DATA="$ROOT/data" HC_TERMINAL_ID=t99 LEDGR_KEYCHAIN_SERVICE=ledgr-test-missing-service
@@ -17,7 +17,8 @@ t() { local name="$1"; shift; "$@" >/dev/null 2>&1; ok $? "$name"; }
 script() { case "$1" in SessionStart) echo "$AD/session-start.sh";; UserPromptSubmit) echo "$AD/user-prompt-submit.sh";; Stop) echo "$AD/stop.sh";; SessionEnd) echo "$AD/session-end.sh";; esac; }
 run() { printf '%s' "$2" | bash "$(script "$1")"; }
 base='"session_id":"'$SID'","transcript_path":"'$TP'","cwd":"/tmp"'
-PYQ=/opt/homebrew/bin/python3
+PYQ="${LEDGR_PYTHON:-}"
+if [ -z "$PYQ" ] || [ ! -x "$PYQ" ]; then for PYQ in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do [ -x "$PYQ" ] && break; done; fi
 sha12() { $PYQ -I -c 'import sys,re,hashlib; s=re.sub(r"\s+"," ",sys.stdin.read()).strip(); print(hashlib.sha1(s.encode()).hexdigest()[:12])'; }
 J() { $PYQ -I -c 'import json,sys; print(json.dumps({"session_id":sys.argv[1],"transcript_path":sys.argv[2],"cwd":"/tmp","hook_event_name":"Stop","stop_hook_active":False,"last_assistant_message":sys.argv[3]}))' "$@"; }
 ev() { jq -s -c --arg s "$1" --arg ty "$2" 'map(select(.session_id==$s and .type==$ty))' "$D"/spool/*.json 2>/dev/null; }
@@ -167,14 +168,14 @@ upr() { up "$@" | HC_TERMINAL_ID=t70 bash "$AD/user-prompt-submit.sh"; }
 nland() { ev $LS "$1" | jq length; }
 BRID=br_0a1b2c3d-0000-4000-8000-00000000abcd; RQID=rq_0a1b2c3d-0000-4000-8000-00000000ef01
 CONF="ledgr confluence $BRID $RQID
-Parked question Q1, from turn 1: Why does the scan still flag TLS 1.0?
+Parked question Q1, from turn 1: Why does the load test still time out?
 Conclusion:
-answer: Because the binding on 8443 terminates TLS itself.
+answer: Because the gateway on 8443 opens its own connections.
 changes: none
 I am adopting this branch's conclusion as the answer to Q1; the branch (br-q1-abcd, a fork of this conversation) saw the trunk through turn 2."
 out=$(upr $LS l1 "go"); out+=$(upr $LS l2 "$CONF")
 t "confluence prompt: stdout empty (nothing reaches the model's context)" test -z "$out"
-t "confluence_landed: turn 2, branch and item ids, prompt id, conclusion head, terminal" jq -e --arg b $BRID --arg r $RQID 'length==1 and (.[0] | .turn==2 and .branch_id==$b and .item_id==$r and .prompt_id=="l2" and .terminal=="t70" and .conclusion_head=="Because the binding on 8443 terminates TLS itself.")' <<<"$(ev $LS confluence_landed)"
+t "confluence_landed: turn 2, branch and item ids, prompt id, conclusion head, terminal" jq -e --arg b $BRID --arg r $RQID 'length==1 and (.[0] | .turn==2 and .branch_id==$b and .item_id==$r and .prompt_id=="l2" and .terminal=="t70" and .conclusion_head=="Because the gateway on 8443 opens its own connections.")' <<<"$(ev $LS confluence_landed)"
 t "the confluence prompt still makes its prompt event (turn 2, not local)" jq -e 'map(select(.prompt_id=="l2")) | length==1 and .[0].turn==2 and .[0].local==false' <<<"$(ev $LS prompt)"
 t "confluence_landed sorts after its prompt event (later ms, so later by name)" test "$(ev $LS confluence_landed | jq '.[0].at')" -gt "$(ev $LS prompt | jq 'map(select(.prompt_id=="l2"))[0].at')"
 WRAP=$(printf '<pasted_content id="p1">\n%s\n</pasted_content id="p1">' "$CONF")
@@ -210,7 +211,7 @@ uprf() { up "$@" | HC_TERMINAL_ID=t71 bash "$AD/user-prompt-submit.sh"; }
 nlf() { ev $LF "$1" | jq length; }
 out=$(uprf $LF f1 "Adopt this branch result for Q1:
 $WRAP")
-t "lead-in typed before a wrapped paste: detected (the marker is the block's first line), stdout empty" jq -e --arg b $BRID 'length==1 and .[0].prompt_id=="f1" and .[0].branch_id==$b and .[0].conclusion_head=="Because the binding on 8443 terminates TLS itself."' <<<"$(ev $LF confluence_landed)"
+t "lead-in typed before a wrapped paste: detected (the marker is the block's first line), stdout empty" jq -e --arg b $BRID 'length==1 and .[0].prompt_id=="f1" and .[0].branch_id==$b and .[0].conclusion_head=="Because the gateway on 8443 opens its own connections."' <<<"$(ev $LF confluence_landed)"
 t "...and the hook printed nothing" test -z "$out"
 uprf $LF f2 "Adopt this branch result for Q1:
 $CONF"

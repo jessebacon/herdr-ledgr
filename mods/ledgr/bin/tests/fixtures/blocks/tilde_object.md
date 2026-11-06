@@ -1,5 +1,5 @@
 Prose with a tilde block.
 
   ~~~ ledgr-asks  
-{"asks": [{"text": "Send the group object id", "kind": "provide"}]}
+{"asks": [{"text": "Send the group id", "kind": "provide"}]}
   ~~~

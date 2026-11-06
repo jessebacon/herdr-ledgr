@@ -1,0 +1,33 @@
+{
+  "$comment": "The layout pieces install.sh adds, for adding them by hand to a personal layout (never to a shipped one: clone it first, herdr-app do layout.clone '{\"name\":\"main\",\"as\":\"my-layout\"}'). Take each value, not this wrapper.",
+
+  "panel_in_stack": {
+    "$where": "append to the children of the right-hand stack `panel-body` (Herdr's main layout and its clones); its parent column `panel` is what shows and hides",
+    "id": "ledgr", "type": "block", "content": { "mod": "ledgr", "props": { "view": "panel" } }
+  },
+
+  "panel_column": {
+    "$where": "only when the layout has no `panel-body` stack: insert into the row that holds the tab block, right after it; then set ui.panel to {\"column\": \"ledgr-panel\", \"stack\": null, \"child\": \"ledgr\"} in ledgr-data/config.json",
+    "id": "ledgr-panel", "type": "column", "size": { "px": 380 }, "min": 280, "max": 900, "hidden": true,
+    "children": [ { "id": "ledgr", "type": "block", "content": { "mod": "ledgr", "props": { "view": "panel" } } } ]
+  },
+
+  "host_beside_status": {
+    "$where": "replace the `status` block with this row, moving the status block's `size` onto the row; the first child is the status block as it was",
+    "id": "ledgr-host-row", "type": "row", "resizable": false, "size": { "px": 28 },
+    "children": [
+      { "id": "status", "type": "block", "content": { "mod": "workspace-status" } },
+      { "id": "ledgr-host", "type": "block", "size": { "px": 96 }, "content": { "mod": "ledgr", "props": { "view": "host", "bar": "status" } } }
+    ]
+  },
+
+  "host_floating": {
+    "$where": "append to the `floating` list of the tab block (the block whose content is {\"tab\": \"active\"})",
+    "id": "ledgr-host", "content": { "mod": "ledgr", "props": { "view": "host" } }, "edge": "bottom", "align": "end"
+  },
+
+  "chip_pane_header": {
+    "$where": "the tab block's content.pane.header; with no pane frame yet, add \"pane\": {\"header\": ...}",
+    "content": { "mod": "ledgr-pane" }, "height": 30, "position": "top", "reveal": "always"
+  }
+}

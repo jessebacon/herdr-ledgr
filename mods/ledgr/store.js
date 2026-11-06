@@ -3,7 +3,7 @@
 // after every change (panel.js saveStore); localStorage is not used for it. apply(event)
 // folds one spool event in. Pure data: no files, no UI.
 //
-// Contract change (2026-11-05, Jesse via coordinator): anchors do not require a Claude
+// Contract change (2026-11-05, the owner via the coordinator): anchors do not require a Claude
 // message uuid. `anchor.uuid` is optional (spec name `messageUuid` is read too); identity
 // and de-duplication use `anchor.turn` plus `anchor.hash`, a short hash of the passage.
 //
@@ -74,7 +74,7 @@ export function norm(s) {
 const squash = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
 
 // The passage hash: sha1 of the whitespace-collapsed passage (quote, else text), first 12
-// hex chars. Events that carry `hash` win; this is the fallback (BUILD-NOTES-mod.md).
+// hex chars. Events that carry `hash` win; this is the fallback (docs/build-notes/BUILD-NOTES-mod.md in the repo).
 export function passageHash(passage) {
   const s = squash(passage);
   if (!s) return null;

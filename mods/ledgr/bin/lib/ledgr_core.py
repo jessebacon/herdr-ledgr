@@ -7,16 +7,22 @@ import hashlib
 import json
 import os
 import re
+import sys
 import time
 
 HOME = os.path.expanduser("~")
-DATA = os.environ.get("LEDGR_DATA") or os.path.join(HOME, ".config/herdr-app/ledgr-data")
 LIB = os.path.dirname(os.path.abspath(__file__))       # bin/lib
 ROOT = os.path.dirname(LIB)                              # bin/
-PYTHON = "/opt/homebrew/bin/python3"
+_HERDR = os.path.dirname(os.path.dirname(os.path.dirname(ROOT)))   # <Herdr home> when installed
+# LEDGR_DATA (the hooks' _env.sh exports it), else beside the mods folder this file is installed in,
+# else Herdr's default home.
+DATA = os.environ.get("LEDGR_DATA") or (
+    os.path.join(_HERDR, "ledgr-data") if os.path.isfile(os.path.join(_HERDR, "AGENTS.md")) and os.path.isdir(os.path.join(_HERDR, "mods"))
+    else os.path.join(HOME, ".config/herdr-app/ledgr-data"))
+PYTHON = os.environ.get("LEDGR_PYTHON") or sys.executable or "python3"
 SECURITY = "/usr/bin/security"
 CURL = "/usr/bin/curl"
-TOOL_PATH = "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+TOOL_PATH = "/opt/homebrew/bin:/usr/local/bin:" + os.path.join(HOME, ".local/bin") + ":/usr/bin:/bin:/usr/sbin:/sbin"
 KEYCHAIN_SERVICE = os.environ.get("LEDGR_KEYCHAIN_SERVICE") or "ledgr"
 
 def now_ms():
