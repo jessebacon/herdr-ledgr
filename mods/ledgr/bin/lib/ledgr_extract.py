@@ -1,7 +1,10 @@
 """ledgr extraction pipeline (spec 4), agent-agnostic: the asks in an agent's final message.
 
 extract(msg, cfg, rec, sid, snapshot_path=None) -> {source, asks, model, provider, usage, ms, error,
-block_error, extract_request_id, [error_detail], [truncated]}
+block_error, extract_request_id, [error_detail], [truncated], [rejected]}
+  Every ask carries `level` (blocking | needed | optional, ledgr_asks.LEVELS); asks of every level
+  are returned. Which levels become open rows is the mod's choice (config extract.threshold).
+  `rejected`: why asks were dropped for an unknown level (block or model), when any were.
   1. under 40 characters: source "skip";
   2. parse_block: only a valid NON-EMPTY ledgr-asks block settles it (block-first mode, no model
      call); an empty or invalid block falls through to the model;
@@ -94,7 +97,11 @@ def model_asks(prose, cfg, rec, sid, snapshot_path=None):
     except Exception as ex:
         r["ok"], r["error"] = False, f"invalid JSON from model: {ex}"[:300]
         return [], r
-    return A.validate(items, prose, "extract_model", known), r
+    rejected = []
+    asks = A.validate(items, prose, "extract_model", known, rejected=rejected)
+    if rejected:
+        r["rejected"] = rejected
+    return asks, r
 
 
 def extract(msg, cfg, rec, sid, snapshot_path=None):
@@ -115,6 +122,8 @@ def extract(msg, cfg, rec, sid, snapshot_path=None):
             res["truncated"] = True
         if r.get("detail"):
             res["error_detail"] = r["detail"]
+        if r.get("rejected"):
+            res["rejected"] = (res.get("rejected") or []) + r["rejected"][:10]
 
     if len((msg or "").strip()) < MIN_CHARS:
         res["source"] = "skip"
@@ -123,6 +132,8 @@ def extract(msg, cfg, rec, sid, snapshot_path=None):
     block_ok = pb["found"] and pb["valid"] and len(pb["asks"]) > 0     # only a non-empty block counts
     if pb["found"] and not pb["valid"]:
         res["block_error"] = pb["error"]
+    if pb.get("rejected"):
+        res["rejected"] = pb["rejected"][:10]
 
     if mode == "block-only":
         res["source"], res["asks"] = ("block", pb["asks"]) if block_ok else ("skip", [])

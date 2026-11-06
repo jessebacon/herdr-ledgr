@@ -3,8 +3,12 @@
 A side panel that keeps a two-direction list of asks around one agent conversation. Questions you
 park while reading (⌘J, even while the agent is still streaming) sit in the top lane; the asks the
 agent made of you at the end of each turn (decide, confirm, do, provide, review) sit in the lane below,
-one row each, answerable in place. A small chip in each pane header counts what is open. Nothing is
-ever typed into an agent: answers and `/btw` questions go to the clipboard and the pane is focused.
+one row each, answerable in place. Every ask has a level: blocking (the agent stopped or cannot finish
+without you), needed (the task is not truly done until you act), optional (an offer or suggestion).
+Asks below the threshold (`extract.threshold`, set from the ASKED OF YOU head) are kept in a folded
+"below threshold" line. A small chip in each
+pane header counts what is open. Nothing is ever typed into an agent: answers and `/btw` questions go
+to the clipboard and the pane is focused.
 (No preview.png is included in this build.)
 
 ## Before you add it (disclosure)
@@ -20,6 +24,11 @@ ever typed into an agent: answers and `/btw` questions go to the clipboard and t
   `terminal.keep` to give it a pane beside the trunk. "isolate in a worktree" opens Herdr's worktree
   dialog, which runs `git worktree add` under `~/.herdr/worktrees/` and a new space. The panel runs
   `git -C <cwd> rev-parse` to know whether that toggle applies, and `which claude` once.
+- **Resumes a session.** Resume session…, offered in place of Go to anchor when a Claude session's
+  terminal is gone, makes the writer run `hc run --bg --json --no-parent --no-notify --cwd <its folder>
+  -- claude --resume <session id>` (no fork, no preamble; it uses your Claude plan), then
+  `terminal.keep` beside the focused pane and `pane.focus`. It first checks that the transcript
+  (`~/.claude/projects/…/<session id>.jsonl`) still exists.
 - **Ends a branch terminal (Phase 3).** Close branch, offered after a branch's confluence reached its
   trunk, makes the writer run `hc kill <branch terminal>` and `hc rm <branch terminal>`. Conclude's
   "Send to trunk" and "Ask for a conclusion" only write the clipboard and focus a pane: nothing is
@@ -38,24 +47,41 @@ ever typed into an agent: answers and `/btw` questions go to the clipboard and t
 - **Panel** (the fourth child of the right-hand `panel-body` stack, 280-900 px wide, the column's
   width; toggled by the "ledgr" tab-bar button or ⌘⇧J). Rounded card, `background` fill, 1 px
   `border`, 12.5 px text.
-  - Header, 42 px: "ledgr", a session button (agent label pill such as `claude` or `codex`, then
-    `t3 · <session name>`, chevron) that opens the session list (live sessions, then ENDED SESSIONS),
+  - Header, 42 px: "ledgr", a session button (agent label pill such as `claude` or `codex`, then the
+    session name, a small dim `pane t3`, chevron) that opens the session list (live sessions, then
+    ENDED SESSIONS; name first, `pane t3` after it),
     a pin toggle (`pin`/`pin-off` icons), `turn N` (in `working` colour with "· working" while the
     agent works), and a `demo` pill in demo mode.
-  - **YOUR QUESTIONS** lane (top): parked questions, newest first. Each row: status glyph, `Q<n>`,
-    kind (`question`, `bookmark`), text (two lines), and a dim line `t14 · re A5 · “quote…”`; a
-    question parked mid-turn reads "parked during turn 17; anchors at end of turn" with a hollow
-    glyph. Badges: `/btw`, `sent t18`.
-  - **ASKED OF YOU** lane (second): folded while the agent works, opened at the end of each turn (a
-    click holds your choice until the next stop). Grouped by turn, newest group open, older groups one
-    line (`turn 12 · 2 asks, 1 open`). Each row: glyph, `A<n>`, kind, text, `blocking` (in
-    `blocked`), `raised again` (in `accent`) for an ask you dismissed that the agent raised again;
-    decide rows show option chips, the recommended one marked "(rec.)". A spinner and
-    "extracting turn N" sit in the lane head while extraction runs. A failed turn shows one dim line
-    "asks not extracted for turn N: <error>" with Retry.
-  - Clicking a row expands it: the quote in italics, then the anchoring message rendered as markdown
-    with the paragraph (or list line) holding the quote drawn with a 2 px `accent` bar on an `accent`
-    tint; "show whole message"; for asks an Answer field; action buttons.
+  - Names a person reads are words: `Ask 9`, `Question 1`, `pane t3` (never a bare `t3`), "branch of
+    Question 1" with its short id (`br-q1-c51e`) small beside it. The short forms stay in every
+    machine format: the answer sheet's `A9: …` lines and lead-in, the confluence and answer markers,
+    `[A9]` / `[Q1]` refs in a prompt, store keys (`words.js`).
+  - **YOUR QUESTIONS** lane (top): parked questions, newest first. Each row: status glyph,
+    `Question 3`, kind (`question`, `bookmark`), text, and a dim line `turn 14 · re Ask 5 · “quote…”`;
+    a question parked mid-turn reads "parked during turn 17; anchors at end of turn" with a hollow
+    glyph. Badges: `/btw`, `sent at turn 18`, `branched`.
+  - **ASKED OF YOU** lane (second): folded or open only when you click its head (kept across reloads,
+    in the copy's localStorage); while the agent works the head says "agent working" in `working`,
+    nothing folds. `ui.foldAsksWhileWorking: true` in `config.json` brings back the old rule (folded
+    while working, open at each stop). The head carries the threshold control, a quiet `blocking only ▾`
+    / `blocking + needed ▾` / `everything ▾` menu that writes `extract.threshold` to `config.json`
+    (the writer and the panel follow the file at once). Grouped by turn, newest group open, older groups one line
+    (`turn 12 · 2 asks, 1 open, 1 blocking`). Each row: glyph, `Ask 5`, kind, text, `raised again` (in
+    `accent`) for an ask you dismissed that the agent raised again; decide rows show option chips, the
+    recommended one marked "(rec.)". Blocking asks sort first in their group, with a `◆` glyph and a
+    `blocking` tag (both in `blocked`). Asks below the threshold sit in one folded line at the bottom of
+    their group, `below threshold (N)`: open, each row is dim with a hollow glyph, its level tag, and a
+    `promote` pill (one click: an open row that counts, tagged `promoted`); they never count in the
+    lane's "N open" or on the chip. A spinner and "extracting turn N" sit in the lane head while
+    extraction runs. A failed turn shows one dim line "asks not extracted for turn N: <error>" with
+    Retry.
+  - Clicking a row expands it: the quote in italics (over 300 characters it is cut with "…"), then
+    "show whole message", which opens the anchoring message, as markdown, at its full height (no
+    box cap: the panel's list scrolls to its last line), the paragraph (or list line) holding the
+    quote drawn with a 2 px `accent` bar on an `accent` tint ("hide whole message" closes it); for
+    asks an Answer field with Copy answer beside it; the buttons (below); a dim
+    line in words: `Ask 13 · found by the extractor · needed · turn 19` (origins: found by the
+    extractor, declared by the agent, parked by you; the passage hash is its tooltip).
   - Footer, 30 px: `older than a day (n) ›  deferred (n) ›  closed (n) ›` folds.
   - Status line at the bottom for the last action's result.
 - **Capture box** (⌘J): a popup at the top of the window, 600 × 236, no dimming, so the stream stays
@@ -63,14 +89,39 @@ ever typed into an agent: answers and `/btw` questions go to the clipboard and t
   question field; the clipboard quote with a checkbox when it checks out, else a "Quote (optional):
   paste the passage by hand" field and a one-line reason; key hints; `session: t3 ↻ 1/3` to switch.
 - **Header chip** (in `my-pane`, the cloned pane header), 18 px, 10.5 px text: hidden with nothing
-  open; `? 2` dim while the agent works and you parked questions this turn; `2 parked · 3 asks` in
-  `accent` on a faint `accent` tint after a turn ends with something new; `? 1 · 2` muted once seen;
-  a small spinner while that turn's asks are being extracted.
+  open; `? 2` dim while the agent works and you parked questions this turn; `1 blocking · 2 asks ·
+  1 parked` in `blocked` on a faint `blocked` tint while a blocking ask is open and the agent is not
+  working; `2 parked · 3 asks` in `accent` on a faint `accent` tint after a turn ends with something
+  new; `? 1 · 2` muted once seen; a small spinner while that turn's asks are being extracted.
+  Suggestions are not counted. Turning loud (surfaced or blocking, or loud again for a later turn)
+  pulses the chip once: a halo under it fades over about 0.9 s.
+- **Motion** (`ui.animations`, default true; false stops all of it, spinners included): only on a
+  state change, found by comparing the store's items before and after it changed. A row entering
+  its lane (a new ask, a parked question, a promoted below-threshold ask, a reopened item) fades in from 6 px
+  above under a highlight that decays over about a second (`blocked` tint for a blocking ask,
+  `accent` otherwise; several at once are staggered 45 ms). A row leaving (resolved, dismissed,
+  deferred) fades out in place and, when you closed it yourself, collapses from its height. An ask
+  that becomes answered glows `done` and folds its open details. A new below-threshold ask lights its fold
+  line. Lane folds do not ease: the toolkit eases only numeric heights.
 
 ## How it behaves
 
-- Agent status: working folds the asks lane and lets the chip collect; at Stop (blocked, done, idle)
-  the chip surfaces and the asks lane opens. The panel never opens itself, no toast, no sound.
+- Agent status: working lets the chip collect and puts "agent working" on the asks lane head; at
+  Stop (blocked, done, idle) the chip surfaces (or turns `blocking`). No lane folds by itself unless
+  `ui.foldAsksWhileWorking` is true. The panel never opens itself, no toast, no sound.
+- Status is not an ask: a statement of what is done, pending or uncommitted yields nothing; an ask
+  exists only when the message asks you to do or decide something, or says the agent waits on you.
+  `needed` needs the message to say you must do it for the work to be complete; else optional.
+- Borderline asks: a closing line that only offers to go on or invites a look ("ready when you are",
+  "have a look") is optional unless the message says the agent cannot proceed; a review is needed
+  only when one specific thing must be verified by you; a quote is the one or two sentences that make
+  the ask, never the whole message.
+- Severity: the extractor gives each ask a level (blocking, needed, optional; a `ledgr-asks` block
+  item without one is needed). `extract.threshold` in `ledgr-data/config.json` (optional, needed or
+  blocking; default needed; the lane head's menu writes it) decides which levels are open rows and
+  count on the chip. The writer and
+  the panel read `config.json` again whenever it changes: a new threshold or `ui` value applies at
+  once, no restart.
 - The panel follows the focused agent's session unless pinned; a chip click shows the panel on that
   chip's session.
 - ⌘J opens the capture box over a streaming agent; the box takes the keyboard. Enter parks; Enter on
@@ -79,12 +130,23 @@ ever typed into an agent: answers and `/btw` questions go to the clipboard and t
   moves between the question and the hand quote field.
 - A clipboard quote is attached only if it occurs (whitespace-normalised; `*` and backticks ignored on
   both sides) in the session's saved turn text, or, while the agent works, in `hc read` of its screen.
-- Row actions: Resolve, Defer: tomorrow, Defer: next session, Dismiss, Reopen, Ask about this (opens
-  the box with `re [A5] `), Copy for prompt (`[Q3] <question>`), Stage /btw, Go to anchor (focuses the
+- Row actions, few on purpose: **Done** (resolve; tooltip "Done: you did or decided it"), **Defer ▾**
+  (a menu: tomorrow, in a week, next session), the row's own step (Promote below the threshold,
+  Branch… on a question, Copy confluence again while one is staged; Reopen on a closed or deferred
+  row), and **⋯**, a menu holding **Not needed** (dismiss; "Not needed: close it; the agent may raise
+  it again"), Ask about this (opens the box with `re [A5] `), on a question Copy for prompt
+  (`[Q3] <question>`) and Stage /btw, Call off for a staged confluence, and Go to anchor (focuses the
   pane; for an idle Claude it puts a 20-40 character slice of the quote on the clipboard and presses
-  `ctrl+o /` to open transcript search; disabled while the agent works). "Copy answers" builds
+  `ctrl+o /` to open transcript search; disabled while the agent works). When the session's terminal
+  is gone (not in Herdr's terminals or agents, or its pane now holds another session), a Claude
+  session's button reads **Resume session…** (`claude --resume` in a new pane, focused; its
+  SessionStart hook moves the session to that pane, and the button reads "Resuming…" until then), or
+  **Transcript gone** (disabled) when the transcript file no longer exists. "Copy answers" builds
   `ledgr answers <session id>`, `Answers to your asks from turn N:`, then `A5: …` lines, copies,
   focuses the pane; when that prompt is sent, the hook's `answers_landed` marks those asks answered.
+  Menus are gpui-base `Popup`s (the shipped linear mod's pattern): a choice, a press outside or Esc
+  closes them. A branch row keeps one step visible (Conclude… / Edit conclusion…, or Close branch
+  after rejoin) and puts Focus, Copy the confluence again, Ask for a conclusion and the preamble in ⋯.
 - A prompt that contains `[A5]` marks that ask answered; `[Q3]` marks the question sent, and answered
   at that turn's end.
 - Branch rows (Phase 3): Conclude… opens an editor prefilled with the branch's `ledgr-conclusion`
@@ -114,14 +176,17 @@ ever typed into an agent: answers and `/btw` questions go to the clipboard and t
 - `keys.json`: `"cmd-j": "mod.open:ledgr"`, `"cmd-shift-j": "my-tabs.toggle-ledgr"`, and
   `"mod:ledgr": { "cmd-enter": "ledgr.btw", "tab": "ledgr.tab", "shift-tab": "ledgr.backtab" }`.
 - herdr: `watchFolder`, `readTextFile`, `writeTextFile`, `fs/promises`, `shared`/`setShared`
-  (`ledgr.writer` `{id, by, at}`, `ledgr.ping`, `ledgr.chips`, `ledgr.focus`), `focused`, `agents`, `panes`, `terminals`, `layout`,
+  (`ledgr.writer` `{id, by, at}`, `ledgr.ping`, `ledgr.chips` (`a` counts at or above the threshold,
+  `b` the blocking ones), `ledgr.focus`, `ledgr.ui` `{animations}`), `focused`, `agents`, `panes`, `terminals`, `layout`,
   `run` (`pane.focus`, `layout.select`, `layout.show`, `mod.open`, `terminal.search`), `openOverlay`,
   `closeOverlay`, `nextCommand`, `hc`, `exec`; `cx.read_from_clipboard`, `cx.write_to_clipboard`.
 - Data, `~/.config/herdr-app/ledgr-data/`: `store.json` (the store, written only by the writer; the
   panel reads it and watches it), `spool/` (one JSON event per file: the hooks' events, the box's
   `capture`, the panel's `act` and `retry`), `terminals/<t>.json` (identity map), `turns/<sid>/<n>.md`
   (saved turn text), `snapshot.json` (open and recently dismissed items, for the extractor), `archive/`.
-  `config.json` belongs to the hooks.
+  `config.json` belongs to the hooks (they create it); the mod's keys in it are `extract.threshold`
+  and `ui.{foldAsksWhileWorking, animations}`, whose defaults `config.js` and `bin/lib/ledgr_config.py`
+  both carry.
 
 ## Watch out
 
@@ -141,9 +206,25 @@ ever typed into an agent: answers and `/btw` questions go to the clipboard and t
   inside its second line and the options below drew against it. A row is a meta line (glyph,
   handle, kind, badges) with its text, options, notes and details hung at `IND` (18 px) below it;
   preview boxes that must stay short scroll (`overflow_y_scrollbar`) instead of hiding the rest.
-  For shots of the lower lane: `ledgr.fold-mine`, `ledgr.fold-asks`, `ledgr.collapse-all`; for the
-  answer path `ledgr.pick:<handle>:<n>`, `ledgr.copy-answer:<handle>`, `ledgr.session:<terminal>`;
-  `app.zoom_out` shows more of the list with the same wrapping (zoom back in afterwards).
+  For shots of the lower lane: `ledgr.fold-mine`, `ledgr.fold-asks`, `ledgr.collapse-all` (the lane
+  folds are saved: fold them back afterwards); for the answer path `ledgr.pick:<handle>:<n>`,
+  `ledgr.copy-answer:<handle>`, `ledgr.session:<terminal>`; for severity and motion
+  `ledgr.below-threshold`, `ledgr.act:<handle>:<resolve|dismiss|reopen|promote>`,
+  `ledgr.whole:<handle>`, `ledgr.menu:<handle>:<defer|more>` / `menu:threshold` / `menu:off`,
+  `ledgr.threshold:<level>`, in the demo
+  `ledgr.demo-ask:<level>` and `ledgr.demo-answer:<handle>`, and `my-pane.demo-chip:<state|off>`
+  (a chip state, and its pulse, on every shown header); `app.zoom_out` shows more of the list with
+  the same wrapping (zoom back in afterwards).
+- Motion is native (`transition`), never a timer. A transition animates changes made after it is
+  attached, so an animated element carries it from its first frame and the target changes one frame
+  later (16 ms; that frame is the only extra render). Only numeric heights ease (auto height jumps),
+  which is why lane folds do not animate and a leaving row collapses only when the pointer measured
+  it (`on_mouse_move` bounds); otherwise it fades in place and the list closes up. A config change or
+  a store read while the panel was hidden records the new state without motion. An idle panel does
+  not render: `herdr-app do ledgr.render-stats` writes the render count to
+  `ledgr-data/log/panel-renders-<copy>.json` (one file per panel copy).
+- No reduced-motion setting reaches a mod (the toolkit exposes none, and ledgr does not read macOS
+  preferences): `ui.animations: false` is the switch.
 - A branch shares the trunk's checkout unless isolated: the preamble forbids edits, nothing enforces
   it. The fork is taken at the end of the session, so it also sees every turn after the anchor; the
   manifest says how many. See `BUILD-NOTES-phase2.md`.
@@ -166,3 +247,13 @@ ever typed into an agent: answers and `/btw` questions go to the clipboard and t
   (or Enter) writes `ledgr-data/spool/<ms>-capture-mod-<rand>.json`, which the writer applies and
   unlinks within a second; the row appears in YOUR QUESTIONS and the chip shows `? 1 · 0`.
 - A JSON file moved into `ledgr-data/spool/` from a shell is applied and unlinked in under a second.
+- The demo shows A6 first in turn 17 with `◆` and `blocking`, `below threshold (2)` (A13, A14) folded at
+  the bottom of the group, and the lane open while the demo session works ("agent working").
+- `ledgr.demo-ask:blocking` fades a new row in under a `blocked` highlight that is gone within about a
+  second; `ledgr.act:<handle>:resolve` fades it out; `my-pane.demo-chip:seen`, then `:surfaced`,
+  pulses the chip once. `ledgr.render-stats` twice, 30 s apart with nothing happening, differs by one
+  (the command's own render).
+- Editing `extract.threshold` in `ledgr-data/config.json`, or choosing on the lane head's menu,
+  changes the chip's count and the lanes within a couple of seconds, with no restart.
+- In the demo, `ledgr.session:t7`, `ledgr.whole:A1` opens a 1,511-word message at full height; the
+  list scrolls to its last line ("LAST LINE OF THE 1,500-WORD MESSAGE").

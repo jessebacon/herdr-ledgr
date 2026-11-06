@@ -92,7 +92,7 @@ export function manifest(st, item, opts = {}) {
 // (times are as at the launch), else the confirmation before launch.
 export function manifestLines(m, { frozen = false } = {}) {
   const out = [];
-  out.push(["Parent", `${m.parentTerminal ?? "?"} · ${m.parentName} (${shortSid(m.parentSessionId)}), depth ${m.parentDepth}`]);
+  out.push(["Parent", `${m.parentName} · ${m.parentTerminal ? `pane ${m.parentTerminal}` : "no pane"} (session ${shortSid(m.parentSessionId)}), depth ${m.parentDepth}`]);
   out.push(["Depth", `${m.depth} of branch.maxDepth ${m.maxDepth}${m.depth > m.maxDepth ? " — refused" : ""}`]);
   const later = m.later === 0
     ? "no later turns: the question was parked at the last turn"
@@ -108,7 +108,7 @@ export function manifestLines(m, { frozen = false } = {}) {
     (m.cache.idleMin === null ? "" : `; the parent's last turn ${frozen ? "had ended" : "ended"} ${m.cache.idleMin < 1 ? "under a minute" : `${m.cache.idleMin} min`} ${frozen ? "before the launch" : "ago"}${m.cache.warm ? "" : frozen ? ", so it likely paid a full cache write" : ", so expect a full cache write"}`)]);
   const dnk = [];
   if (m.doesNotKnow.branches.length) dnk.push(`branches ${m.doesNotKnow.branches.join(", ")}`);
-  if (m.doesNotKnow.parked.length) dnk.push(`parked ${m.doesNotKnow.parked.join(", ")}`);
+  if (m.doesNotKnow.parked.length) dnk.push(`parked ${m.doesNotKnow.parked.map((h) => String(h).replace(/^Q(\d+)$/, "Question $1")).join(", ")}`);
   dnk.push("/btw answers");
   out.push(["Not known", dnk.join("; ")]);
   if (m.refused) out.push(["Refused", m.refused]);
@@ -165,6 +165,21 @@ export function hcRunArgs(br, m, item, claudePath = "claude") {
     "--name", br.name, "--cwd", m.cwd || ".",
     "--label", `ledgr.branch=${br.id}`, "--label", `ledgr.parent_session=${m.parentSessionId}`, "--label", `ledgr.item=${item.id}`,
     "--", ...claudeArgv(br, m, item, claudePath)];
+}
+
+// Resume session (a session whose terminal is gone): `hc run` of `claude --resume <sid>` in the
+// session's folder, in a terminal of its own: no parent, no preamble, nothing typed. Its SessionStart
+// hook (source "resume") maps the new terminal to the same session id.
+export function resumeArgs(s, claudePath = "claude") {
+  return ["run", "--bg", "--json", "--no-parent", "--no-notify", "--cwd", s?.cwd || ".",
+    "--label", `ledgr.resume=${s?.sessionId}`, "--", claudePath, "--resume", String(s?.sessionId)];
+}
+
+// Where Claude Code keeps a session's transcript: the recorded path, else
+// ~/.claude/projects/<cwd with every non-alphanumeric as "-">/<session id>.jsonl.
+export function transcriptPathOf(s, homeDir) {
+  if (s?.transcriptPath) return s.transcriptPath;
+  return `${homeDir}/.claude/projects/${String(s?.cwd ?? "").replace(/[^A-Za-z0-9]/g, "-")}/${s?.sessionId}.jsonl`;
 }
 
 // The live word for a branch: Herdr's agent status for its terminal (a sub-agent without a pane

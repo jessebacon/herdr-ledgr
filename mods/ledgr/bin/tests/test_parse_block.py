@@ -41,6 +41,27 @@ check("valid: origin extract_block, repeat_of null, no queue_kind",
       a0.get("origin") == "extract_block" and a0.get("repeat_of") is None and a0.get("repeat_of_handle") is None
       and "queue_kind" not in a0, a0)
 
+check("valid: legacy blocking true -> level blocking; blocking false -> needed",
+      a1.get("level") == "blocking" and a0.get("level") == "needed" and a0.get("blocking") is False, (a0, a1))
+check("valid: no rejected levels", r["rejected"] == [], r["rejected"])
+
+# Severity (2026-11-05): level blocking | needed | optional; none -> needed; unknown -> the ask is rejected.
+r = parse_block.parse(load("levels.md"))
+lv = {a["text"]: a["level"] for a in r["asks"]}
+check("levels: valid, 5 asks (the unknown level rejected)", r["valid"] and len(r["asks"]) == 5, list(lv))
+check("levels: explicit blocking", lv.get("Paste the LINEAR_WEBHOOK_SECRET value") == "blocking", lv)
+check("levels: no level -> needed", lv.get("Check the DM on your phone") == "needed", lv)
+check("levels: optional", lv.get("Decide whether to add a digest later") == "optional", lv)
+check("levels: ' Needed ' -> needed (case and space ignored)", lv.get("Pick the message template") == "needed", lv)
+check("levels: legacy blocking true without level -> blocking", lv.get("Approve the Teams app") == "blocking", lv)
+check("levels: unknown level 'urgent' rejected with a reason",
+      "Rotate the old bot secret" not in lv and any("urgent" in x for x in r["rejected"]), r["rejected"])
+check("levels: blocking field follows the level",
+      all(a["blocking"] == (a["level"] == "blocking") for a in r["asks"]), r["asks"])
+r = parse_block.parse(load("badlevel.md"))
+check("only unknown levels: found, invalid, error names them",
+      r["found"] and not r["valid"] and r["error"].startswith("no valid items (") and "critical" in r["error"] and len(r["rejected"]) == 2, r)
+
 r = parse_block.parse(load("broken.md"))
 check("broken JSON: found, invalid, error set", r["found"] and not r["valid"] and (r["error"] or "").startswith("block:"), r)
 check("broken JSON: block still removed from prose", "ledgr-asks" not in r["prose"], r["prose"])

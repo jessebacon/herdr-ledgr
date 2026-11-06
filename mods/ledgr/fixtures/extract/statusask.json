@@ -1,0 +1,3 @@
+{"note": "a status line ('two commits are uncommitted') beside one real needed ask (check the DM link on the phone): exactly one ask, needed, and nothing about the commits",
+ "offline": {"source": "error", "error": "no credential"},
+ "live": {"source": "model", "count": 1, "level_by_text": {"phone|DM|link": "needed"}, "none_matching": ["uncommitted", "commit"], "quote_max": 300}}

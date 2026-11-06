@@ -1,2 +1,1 @@
-{"offline": {"source": "block", "count": 2, "no_model_call": true, "decide_has_recommended": true},
- "live": {"source": "block", "count": 2, "no_model_call": true}}
+{"offline": {"source": "block", "count": 2, "no_model_call": true, "decide_has_recommended": true, "levels": {"blocking": 2}}, "live": {"source": "block", "count": 2, "no_model_call": true, "levels": {"blocking": 2}}}

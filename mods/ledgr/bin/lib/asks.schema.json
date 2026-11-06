@@ -8,14 +8,14 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["text", "kind", "quote", "options", "recommended", "blocking", "repeat_of"],
+        "required": ["text", "kind", "quote", "level", "options", "recommended", "repeat_of"],
         "properties": {
           "text": { "type": "string" },
           "kind": { "type": "string", "enum": ["decide", "confirm", "do", "provide", "review"] },
           "quote": { "type": "string" },
+          "level": { "type": "string", "enum": ["blocking", "needed", "optional"] },
           "options": { "type": "array", "items": { "type": "string" } },
           "recommended": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
-          "blocking": { "type": "boolean" },
           "repeat_of": { "anyOf": [{ "type": "string" }, { "type": "null" }] }
         }
       }

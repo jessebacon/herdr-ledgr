@@ -18,11 +18,16 @@ DEFAULT_CONFIG = {
         "cli_fallback": False,          # no anthropic key -> use the cli provider
         "max_chars": 60000,
         "timeout_s": 20,
+        "threshold": "needed",          # the mod's: asks at or above this level (optional < needed <
+                                        # blocking) are open rows and count on the chip; lower ones
+                                        # are kept as suggestions. Read again when the file changes
     },
     "surface": {"openPanelOnAsks": False},
     "btw": {"autoSend": False},
     "nav": {"autoSearch": False},
     "branch": {"maxDepth": 2},
+    "ui": {"foldAsksWhileWorking": False,     # the panel's: True = the asks lane folds while the agent works
+           "animations": True},               # the panel's and chip's: False = no motion at all
     "retention_days": 14,
 }
 

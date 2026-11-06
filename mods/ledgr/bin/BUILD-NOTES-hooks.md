@@ -51,7 +51,7 @@ bin/
 - Writes are temp file + rename. The session record is idempotent per event (a repeated `prompt_id` does not count a second turn); a per-session `flock` serialises the turn counter and fails open after 3 s.
 - Stdout is empty for every hook, except SessionStart when `config.instruct_block` is true (default false).
 - Per turn the spool gets `pending` (at once, from Stop part A), then `stop` carrying the message uuid once the transcript lookup finishes (retries at 0, 1, 2 and 4 s), then `asks`. There is no `settle` event.
-- Extraction: only a valid, non-empty `ledgr-asks` block skips the model; an empty or invalid block falls through to it. The prompt lists the session's open and recently dismissed asks (from the mod's `snapshot.json`); a re-raised ask comes back with `repeat_of`.
+- Extraction: only a valid, non-empty `ledgr-asks` block skips the model; an empty or invalid block falls through to it. Every ask carries a `level` (blocking, needed, optional; see "Severity" below); the extractor returns asks of every level, and the mod decides which count (`extract.threshold`). The prompt lists the session's open and recently dismissed asks (from the mod's `snapshot.json`); a re-raised ask comes back with `repeat_of`.
 - Every ask carries `hash` (sha1 of the whitespace-collapsed quote, else text, first 12 hex chars, the same rule as `store.js` `passageHash`), `origin`, `repeat_of` (the Request id `rq_...`) and `repeat_of_handle` (`A5`). Events carry the turn's `passage_hash`; `message_uuid` is optional.
 - No key: when a model call is needed, `asks` has `source: "error"`, `error: "no credential"` and `error_detail` naming the missing Keychain item. A valid non-empty block is still processed.
 
@@ -60,9 +60,11 @@ Config (`ledgr-data/config.json`, created by the first hook run):
 ```json
 { "v": 1, "instruct_block": false,
   "extract": { "mode": "block-first", "provider": "anthropic", "model": "claude-haiku-5-5", "base_url": null,
-               "audit_rate": 0, "cli_fallback": false, "max_chars": 60000, "timeout_s": 20 },
+               "audit_rate": 0, "cli_fallback": false, "max_chars": 60000, "timeout_s": 20,
+               "threshold": "needed" },
   "surface": { "openPanelOnAsks": false }, "btw": { "autoSend": false }, "nav": { "autoSearch": false },
-  "branch": { "maxDepth": 2 }, "retention_days": 14 }
+  "branch": { "maxDepth": 2 }, "ui": { "foldAsksWhileWorking": false, "animations": true },
+  "retention_days": 14 }
 ```
 
 Providers: `anthropic` (key: Keychain service `ledgr`, account `anthropic`, or `LEDGR_ANTHROPIC_KEY`); `openai-compatible` (set `extract.base_url` and `extract.model`; key optional, account `openai-compatible` or `LEDGR_OPENAI_COMPATIBLE_KEY`); `cli` (`claude -p`, no key). `cli_fallback: true` uses `cli` when the anthropic key is missing.
@@ -149,6 +151,76 @@ Offline runs point `LEDGR_KEYCHAIN_SERVICE` at a service that does not exist, so
   and a confluence prompt in the timing table (78 checks). `tests/test-store.sh` also parses the messages
   `confluence.js` composes with `ledgr_landing.detect`.
 - No settings change: UserPromptSubmit was already registered. Details: `../BUILD-NOTES-phase3.md`.
+
+## Severity (2026-11-05)
+
+- `lib/asks.schema.json`: `level` (enum `blocking`, `needed`, `optional`) is required, placed after
+  `quote`; `blocking` (boolean) is gone from the schema. `lib/ledgr_asks.py`: `LEVELS`, `level_of`;
+  a missing or null level is `needed` (a legacy `"blocking": true` is `blocking`), case and outer
+  space are ignored, any other value drops the ask with a reason in the optional `rejected` list.
+  Each valid ask now has `level`, and `blocking` = (level == blocking) for older readers.
+- `lib/parse_block.py`: returns `rejected`; a block whose every ask was rejected is invalid with
+  `no valid items (ask 1: unknown level 'critical'; …)`. `lib/ledgr_extract.py`: the block's and
+  the model's `rejected` go on the result (and so on the `asks` event) when there are any.
+- `lib/extract-system.txt`: the asks now include offers and suggestions (they were excluded); each
+  ask gets exactly one level, defined with one example each, a decision order (stopped or stalls
+  until the user acts: blocking; otherwise finished if ignored: optional, else needed; follow the
+  message when it says what blocks it), and the rule that polite or tentative wording never lowers
+  a level, with an example of an offer wrapping a blocker. `lib/asks-instruction.txt` (the opt-in
+  block instruction) carries `level` and a one-line definition of each.
+- `lib/ledgr_config.py`: `extract.threshold` "needed" and `ui` `{foldAsksWhileWorking: false,
+  animations: true}` (the mod's keys; the hooks only carry the defaults).
+- Fixtures: `mixed` (all three levels in one message), `politeblocker` (an offer, "If you're able to
+  share … I'd be happy to … No rush!", wrapping the credential the work waits on, beside a true
+  optional), `levels` (the block fast path: explicit blocking and optional, a missing level, an
+  unknown level rejected); `offer` now expects its two offers as optional (live), `tasklist` at least
+  two blocking, `block` its legacy `blocking: true` asks as blocking. The runner checks `levels`,
+  `level_min`, `levels_only`, `level_by_text`, `rejected_min`, and prints `[level/kind]` live.
+  `tests/test_parse_block.py`: 11 more checks (`tests/fixtures/blocks/levels.md`, `badlevel.md`).
+- Live, `python3 -I -B tests/run-extract-fixtures.py --live mixed` (2026-11-05 19:31, one call,
+  2192 tokens in, 487 out, $0.00046, 3.0 s): blocking/do "Grant the TeamsAppInstallation.ReadWriteForUser
+  application permission in the Teams Admin Center"; needed/review "Send a test ticket from your
+  machine and confirm the DM arrives with a working link"; needed/decide "Choose the default message
+  template, compact or detailed" (options compact, detailed; rec. detailed); optional/confirm
+  "Decide whether the agent should add a weekly digest of closed tickets later"; optional/do
+  "Consider rotating the old bot's client secret, since nothing uses it anymore". PASS.
+- Not run live: `politeblocker`, and `offer`, `tasklist`, `none`, `reask`, `long` against the new prompt.
+
+### Borderline asks (same evening)
+
+- Jesse's screenshot: a closing line, "Ready to commit when you've had a look", came back as a
+  needed/review ask whose quote was the whole 300-word message. `lib/extract-system.txt` now decides
+  in three steps: (1) a closing line that only offers to go on, waits for a go-ahead or invites a
+  look ("ready when you are", "let me know", "have a look", "say the word") is optional unless the
+  message states the agent cannot proceed without the answer; (2) stopped or stalled on something
+  only the user can give: blocking; (3) otherwise finished-if-ignored: optional, else needed, and a
+  review is needed only when the user must verify one specific thing (this file, this output, this
+  behaviour on their machine). quote: "the one or two sentences of the message that make the ask, at
+  most 300 characters, copied exactly. Never the whole message, and never the summary of work around
+  the ask." The prompt does not quote the fixture's sentence.
+- Fixtures: `closer` (a summary of finished work, then "Nothing is committed yet. Ready to commit
+  when you've had a look."; live: only optional, no quote over 120 characters) and `verify` (run
+  `npm test -- date-picker` on the Mac and confirm three snapshot tests; live: a needed review, quote
+  at most 300). The runner gained `quote_max` and prints each quote's length live.
+- Live, `--live closer` (one call, 2312 in, 100 out, $0.00028, 2.6 s): one ask, optional/review
+  "Review the ASKED OF YOU lane changes and decide whether to commit them", quote (65 characters)
+  "Nothing is committed yet. Ready to commit when you've had a look." PASS. `verify` not run live.
+
+### Status lines (2026-11-06)
+
+- Jesse's screenshot: "Two batches are now uncommitted in the repo" became a needed/review ask.
+  `lib/extract-system.txt` now says, above the level rules: "A statement of what is done, pending,
+  or uncommitted is not an ask. An ask exists only when the message asks the user to do or decide
+  something, explicitly or by saying the agent is waiting on them. Do not infer an ask from a status
+  line." `needed` is now "the message itself says the user must do it for the work to be complete,
+  and the agent carried on without it … Otherwise the ask is optional", and step 3 of the order
+  asks the same question.
+- Fixtures: `status` (a pure status message: deployed, two batches uncommitted, checks pass; live:
+  zero asks) and `statusask` (a status line, "Two commits are uncommitted", beside one real needed
+  ask, check the DM link on the phone before it ships; live: exactly one ask, needed, nothing
+  matching "uncommitted" or "commit"). The runner gained `none_matching`.
+- Live, `--live status` (one call, 2274 in, 9 out, $0.00023, 1.1 s): zero asks. PASS. `statusask`
+  not run live.
 
 ## Confirmed live (2026-11-05)
 

@@ -1,31 +1,60 @@
 You read one message that an AI coding agent has just written to its user, and list the asks in it:
-what the USER must act on or decide before the agent's work can continue or be called finished.
-Reply with JSON only, matching the schema.
+everything the USER is asked to act on or decide, including the offers and suggestions the agent
+makes. Reply with JSON only, matching the schema.
 
 An ask is one of:
 - decide: a decision the agent leaves to the user, with the options it offers and the one it recommends;
-- confirm: a confirmation the agent needs before it goes on ("Shall I delete X?", "OK to push?"), when
-  its progress waits on the answer;
-- provide: information only the user has (a value, a location, a name, a preference);
+- confirm: a yes or no the agent wants from the user ("Shall I delete X?", "OK to push?");
+- provide: information only the user has (a value, a credential, a location, a name, a preference);
 - do: an action outside the agent's reach (a portal step, a sign-in, an approval, contacting a person);
-- review: something the agent asks the user to check before it goes further.
+- review: something the agent asks the user to check, test or verify.
 Do not include:
-- offers and suggestions the user can simply ignore: "Want me to also ...?", "I can also ... if you
-  like", "Let me know if you want ...", "Happy to ...";
 - work the agent says it will do itself, summaries of finished work, and rhetorical questions;
-- generic closers such as "let me know if you have questions";
+- generic closers such as "let me know if you have questions" or "happy to help with anything else";
 - instructions for someone other than the user, unless the user must pass them on (then the ask is
   to pass them on).
-When in doubt, leave it out.
+When unsure whether something is asked of the user at all, leave it out.
+A statement of what is done, pending, or uncommitted is not an ask. An ask exists only when the
+message asks the user to do or decide something, explicitly or by saying the agent is waiting on
+them. Do not infer an ask from a status line.
+
+Every ask has exactly one level: how much the task depends on the user, never how the sentence sounds.
+- blocking: the agent stopped, or cannot complete the task, without this from the user: a decision it
+  will not make itself, a credential or secret, a permission or approval, information only the user
+  has. Example: "I can't publish the package until you add the NPM_TOKEN secret to the repository
+  settings." -> do, blocking.
+- needed: the message itself says the user must do it for the work to be complete, and the agent
+  carried on without it: verify something on their machine, confirm before a deploy, choose between
+  options the agent has already shipped. Example: "Both date formats are in the build; pick the one
+  you want as the default before we release." -> decide, needed. Otherwise the ask is optional.
+- optional: a suggestion, an offer or a nice-to-have; the task is finished even if the user ignores
+  it ("Want me to also ...?", "Consider doing X later", "You may want to ..."). Example: "Want me to
+  also add a changelog entry?" -> confirm, optional.
+Decide in this order:
+1. A closing line that only offers to go on, waits for a go-ahead or invites a look ("ready when you
+   are", "let me know", "have a look", "say the word") is optional, unless the message states that
+   the agent cannot proceed without that answer.
+2. Did the agent stop, or does the task stall, until the user gives or does something only the user
+   can (a decision, a credential, an approval, information)? blocking.
+3. Otherwise: does the message itself say the user must do it for the work to be complete? yes:
+   needed; no: optional. A review is needed only when the user must verify one specific thing (this
+   file, this output, this behaviour on their machine); a general invitation to look the work over
+   is optional.
+When the message itself says what it is blocked on ("I'm blocked on 1 and 2"), follow it.
+Polite or tentative wording never lowers a level. An offer that wraps something only the user can
+give, with the work waiting on it, is blocking: "Happy to finish the rollout as soon as you approve
+the app in the admin portal" -> do: approve the app in the admin portal, blocking. "No rush", "when
+you can" and "if you like" do not change that.
 
 For each ask:
 - text: one imperative sentence the user can act on without rereading the message, at most 140
-  characters, naming the thing concretely.
+  characters, naming the thing concretely. For an offer, the user's choice: "Decide whether the
+  agent should also add a changelog entry".
 - kind: decide, confirm, provide, do or review.
-- quote: the shortest verbatim span of the message, at most 300 characters, that states the ask.
-  Copy it exactly.
+- quote: the one or two sentences of the message that make the ask, at most 300 characters, copied
+  exactly. Never the whole message, and never the summary of work around the ask.
+- level: blocking, needed or optional, as above.
 - options and recommended: only for decide; recommended is null unless the message recommends one.
-- blocking: true only if the message says or clearly implies the agent is waiting on it.
 - repeat_of: when the ask is the same request as an item listed under OPEN ASKS or RECENTLY
   DISMISSED ASKS (even if worded differently), that item's id, for example "A5"; else null.
   Use only ids from those lists. A dismissed item that the message raises again is still listed,

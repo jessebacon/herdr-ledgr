@@ -15,6 +15,12 @@
 //   For scripted looks: fold-mine, fold-asks (fold or unfold a lane), collapse-all (every open row and box);
 //   pick:<handle>:<n> (click option n of an ask), copy-answer:<handle> (its Copy answer button),
 //   session:<terminal|sid prefix> (show that session, as the session menu does).
+//   Severity and motion: act:<handle>:<resolve|dismiss|reopen|promote>, below-threshold (alias
+//   suggestions: open or fold every "below threshold (N)" line), whole:<handle> (its whole message),
+//   menu:<handle>:<defer|more>, menu:threshold, menu:off (the row and lane menus, as a click opens them),
+//   threshold:<blocking|needed|optional> (the threshold menu's choice: writes extract.threshold),
+//   demo-ask:<blocking|needed|optional> and demo-answer:<handle> (demo only),
+//   render-stats (the render count, to ledgr-data/log/panel-renders-<copy>.json).
 import { View } from "gpui-kit";
 import { props, nextCommand } from "herdr";
 import { Panel } from "./panel.js";

@@ -54,10 +54,10 @@ export function goToAnchor(item, session, cx) {
   const app = agentOf(t)?.app ?? session?.agent ?? null;
   if (app === "claude-code" || app === "claude") {
     cx.spawn(async () => { await hc(["keys", t, "ctrl+o", "/"]).catch(() => null); });
-    return `Claude transcript search opened in ${t}: ⌘V, Enter (q to return). Copied: “${slice}”`;
+    return `Claude transcript search opened in pane ${t}: ⌘V, Enter (q to return). Copied: “${slice}”`;
   }
   run("terminal.search");
-  return `Find bar opened in ${t}: ⌘V to search. Copied: “${slice}”`;
+  return `Find bar opened in pane ${t}: ⌘V to search. Copied: “${slice}”`;
 }
 
 // Clipboard + focus, never typed (spec 5.5, 6.4 and the build brief).

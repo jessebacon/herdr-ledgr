@@ -1,0 +1,3 @@
+{"note": "a specific verification only the human can do: needed review (not optional, not blocking); the closer beside it is not needed",
+ "offline": {"source": "error", "error": "no credential"},
+ "live": {"source": "model", "count_min": 1, "kinds_include": ["review"], "level_by_text": {"npm test|snapshot": "needed"}, "quote_max": 300, "max_cost": 0.004}}

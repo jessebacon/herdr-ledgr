@@ -1,0 +1,5 @@
+{"note": "all three levels in one message: one blocking (grant the permission), two needed (test the DM, pick the template), two optional (digest offer, rotate the unused secret)",
+ "offline": {"source": "error", "error": "no credential"},
+ "live": {"source": "model", "count_min": 4, "level_min": {"blocking": 1, "needed": 2, "optional": 1},
+          "level_by_text": {"ReadWriteForUser|permission|grant": "blocking", "test ticket|DM arrives|test DM": "needed", "template": "needed", "digest": "optional"},
+          "max_cost": 0.004}}

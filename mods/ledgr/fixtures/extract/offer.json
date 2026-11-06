@@ -1,2 +1,1 @@
-{"offline": {"source": "error", "error": "no credential"},
- "live": {"source": "model", "count": 0}}
+{"offline": {"source": "error", "error": "no credential"}, "live": {"source": "model", "count_min": 1, "levels_only": ["optional"]}}

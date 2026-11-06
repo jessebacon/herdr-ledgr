@@ -12,11 +12,20 @@ export const DEFAULTS = {
   v: 1,
   instruct_block: false,
   extract: { mode: "block-first", provider: "anthropic", model: "claude-haiku-5-5", base_url: null,
-    audit_rate: 0, cli_fallback: false, max_chars: 60000, timeout_s: 20 },
+    audit_rate: 0, cli_fallback: false, max_chars: 60000, timeout_s: 20,
+    // The mod's: asks at or above this level (optional < needed < blocking) are open rows and count on
+    // the chip; lower ones are kept as "suggestions" (store.js isSuggestion). Applied again whenever
+    // config.json changes (writer.js watchConfig, panel.js watchStore).
+    threshold: "needed" },
   surface: { openPanelOnAsks: false },
   btw: { autoSend: false },
   nav: { autoSearch: false },
   branch: { maxDepth: 2 },
+  // The panel's own preferences. foldAsksWhileWorking: true brings back the Phase 1 behaviour (the
+  // ASKED OF YOU lane folds while the agent works and opens at the end of each turn); false (the
+  // default) leaves every fold to the person. animations: false turns off every ledgr motion (rows
+  // entering and leaving, highlights, the chip's pulse, ledgr's spinners spin no more).
+  ui: { foldAsksWhileWorking: false, animations: true },
   retention_days: 14,
 };
 

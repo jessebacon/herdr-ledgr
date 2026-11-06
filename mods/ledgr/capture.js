@@ -16,6 +16,7 @@ import { LIMITS, agentLabel, dataDir } from "./config.js";
 import { readMap, writeEvent } from "./spool.js";
 import { passageHash, newId } from "./store.js";
 import { btwText, isLive } from "./nav.js";
+import { paneWords } from "./words.js";
 
 const squash = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
 // Fullscreen Claude renders **bold** and `code` without their marks, so a copied passage lacks
@@ -217,7 +218,7 @@ export class Capture {
     const t = theme();
     const rec = this.target();
     const label = rec
-      ? `${rec.terminal ?? "?"} · ${rec.session_name || rec.repo || "unnamed"} · turn ${rec.turn ?? 0}${this.working(rec) ? " (working)" : ""}`
+      ? `${rec.session_name || rec.repo || "unnamed"} · ${paneWords(rec.terminal, "no pane")} · turn ${rec.turn ?? 0}${this.working(rec) ? " (working)" : ""}`
       : this.loaded ? "no session" : "…";
     const key = (k, what) => h_flex().gap(4).items_center()
       .child(div().px(5).rounded(4).border_1().border_color(t.border).text_size(10.5).text_color(t.muted).child(k))
@@ -257,6 +258,6 @@ export class Capture {
         .when(this.records.length > 1, (el) => el.child(div().id("cap-session").px(6).py(1).rounded(5).cursor_pointer()
           .text_size(11).text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
           .on_click((_e, cx) => { this.at = (this.at + 1) % this.records.length; this.validate(cx); cx.notify(); this.input.focus(); })
-          .child(`session: ${rec?.terminal ?? "?"} ↻ ${this.at + 1}/${this.records.length}`))));
+          .child(`session: ${rec?.session_name || rec?.repo || paneWords(rec?.terminal, "?")} ↻ ${this.at + 1}/${this.records.length}`))));
   }
 }

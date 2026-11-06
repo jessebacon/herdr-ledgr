@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 const dir = process.argv[2];
 if (!dir) { console.error("usage: test_store.mjs <module folder>"); process.exit(2); }
-const { Store, passageHash, norm } = await import(`${dir}/store.js`);
+const { Store, passageHash, norm, levelOf, isSuggestion, thresholdOf, LEVELS } = await import(`${dir}/store.js`);
 const B = await import(`${dir}/branch.js`);
 const CF = await import(`${dir}/confluence.js`);
 const fsm = await import("node:fs");
@@ -44,10 +44,13 @@ A.equal(st.chips(at + 1)[T].p, undefined, "asks clear pending");
 const byH = (h, sid = SID) => st.itemsOf(sid).find((i) => i.handle === h);
 A.equal(byH("A1").kind, "decide"); A.equal(byH("A1").recommended, "a"); A.equal(byH("A2").blocking, true);
 A.equal(byH("A1").anchor.uuid, null, "uuid optional (asks event had none)"); A.ok(byH("A1").anchor.hash);
-chips = st.chips(); A.equal(chips[T].st, "surfaced"); A.equal(chips[T].a, 2); A.equal(chips[T].ag, "claude");
+// A2 is blocking (the legacy `blocking: true`): the chip takes its own state while it is open.
+chips = st.chips(); A.equal(chips[T].st, "blocking"); A.equal(chips[T].b, 1); A.equal(chips[T].a, 2); A.equal(chips[T].ag, "claude");
+A.equal(byH("A2").level, "blocking", "legacy blocking: true reads as level blocking"); A.equal(byH("A1").level, "needed", "no level: needed");
 A.equal(st.apply(asks1).applied, false, "replay of the same event id ignored");
 apply({ ...asks1, id: "e-rerun" }); A.equal(st.itemsOf(SID).filter((i) => i.direction === "agent_to_human").length, 2, "same turn+hash dedup");
-st.markSeen(SID, at + 1); A.equal(st.chips()[T].st, "seen");
+st.markSeen(SID, at + 1); A.equal(st.chips()[T].st, "blocking", "seen does not hide an open blocking ask");
+A.equal(st.chips()[T].st === "blocking" && !st.d.sessions[SID].surfaced, true, "seen: surfaced cleared underneath");
 apply(ev("prompt", { turn: 2, prompt_id: "p2", local: false, prompt_head: "[A1] a please. [Q1] also", refs: ["A1", "Q1"] }));
 A.equal(byH("A1").status, "answered"); A.equal(byH("Q1").askedAtTurn, 2);
 apply(ev("prompt", { turn: 2, prompt_id: "px", local: true, prompt_head: "/btw hi", refs: [] }));
@@ -370,4 +373,97 @@ A.equal(st.byHandle(TR, "Q1").status, "resolved", "answers do not touch question
 st.apply(tev("asks", { turn: 6, source: "model", asks: [ask("Pick the cipher order", "decide", { options: ["a", "b"] })] }));
 A.equal(a1.status, "open", "re-asked later: open again (Phase 1 rule)");
 
-console.log(`OK: store, ${checks} checks (${phase1} phase 1, ${phase2} phase 2, ${checks - phase1 - phase2} phase 3), 0 failure(s)`);
+const phase3 = checks - phase1 - phase2;
+
+// ── Severity: level, extract.threshold, suggestions, promote, the blocking chip ─
+st = Store.fromText(null);
+const V = "dddddddd-5555-0000-0000-000000000001", VT = "t40";
+const vev = (type, p) => ({ v: 1, id: `v${++n}`, type, at: (at += 1000), terminal: VT, session_id: V, ...p });
+st.apply(vev("session_start", { agent: "claude-code", source: "startup", cwd: "/v", session_name: "sev", turn: 0 }));
+st.apply(vev("prompt", { turn: 1, prompt_id: "vp1", local: false, prompt_head: "go", refs: [] }));
+st.apply(vev("pending", { turn: 1 }));
+st.apply(vev("stop", { turn: 1, prompt_id: "vp1", text_path: null, text_head: "", passage_hash: "v1" }));
+A.deepEqual(LEVELS, ["optional", "needed", "blocking"]);
+A.equal(st.threshold, "needed", "default threshold");
+A.equal(thresholdOf({ extract: { threshold: "Optional " } }), "optional"); A.equal(thresholdOf({ extract: { threshold: "urgent" } }), "needed", "unknown threshold: default");
+A.equal(thresholdOf({}), "needed");
+// a message with all three levels
+st.apply(vev("asks", { turn: 1, source: "model", asks: [
+  ask("Add a digest later?", "confirm", { level: "optional" }),
+  ask("Test the DM on your machine", "review", { level: "needed" }),
+  ask("Grant the app permission", "do", { level: "blocking" }),
+  ask("Pick the template", "decide", { options: ["compact", "detailed"] }),   // no level: needed
+] }));
+const vh = (h) => st.byHandle(V, h);
+A.equal(vh("A1").level, "optional"); A.equal(vh("A2").level, "needed"); A.equal(vh("A3").level, "blocking"); A.equal(vh("A4").level, "needed");
+A.equal(vh("A3").blocking, true, "blocking follows the level"); A.equal(vh("A2").blocking, false);
+A.equal(isSuggestion(vh("A1"), st.threshold), true, "optional is a suggestion at threshold needed");
+A.equal(isSuggestion(vh("A2"), st.threshold), false);
+A.equal(st.counts(vh("A1")), false, "a suggestion does not count"); A.equal(st.counts(vh("A3")), true);
+let vc = st.chips()[VT];
+A.equal(vc.a, 3, "the chip counts needed and blocking, not the suggestion"); A.equal(vc.b, 1); A.equal(vc.st, "blocking");
+A.equal(vh("A1").status, "open", "a suggestion is stored as an open item");
+A.ok(st.snapshot().items.some((i) => i.id === vh("A1").id && i.level === "optional"), "suggestions reach the snapshot (re-raise matching) with their level");
+// threshold changes reclassify at once (the writer sets store.threshold from config.json)
+st.threshold = "optional"; A.equal(st.chips()[VT].a, 4, "threshold optional: every ask counts");
+st.threshold = "blocking"; vc = st.chips()[VT]; A.equal(vc.a, 1, "threshold blocking: only the blocking ask counts"); A.equal(vc.b, 1);
+A.equal(isSuggestion(vh("A2"), "blocking"), true, "needed is a suggestion at threshold blocking");
+st.threshold = "needed";
+// promote: one act, and the item counts whatever the threshold
+A.equal(st.act(vh("A1").id, "promote", null, at), true);
+A.equal(vh("A1").promoted, true); A.equal(isSuggestion(vh("A1"), "blocking"), false, "a promoted ask is never a suggestion");
+A.equal(st.chips()[VT].a, 4);
+A.equal(st.act(st.items().find((i) => i.direction === "human_to_agent")?.id ?? "none", "promote"), false, "only agent asks promote");
+st.apply(vev("act", { item: vh("A2").id, action: "promote" })); A.equal(vh("A2").promoted, true, "promote arrives as a spool act");
+// a re-run of the same turn keeps promoted and takes the new level
+st.apply(vev("asks", { turn: 1, source: "model", asks: [ask("Add a digest later?", "confirm", { level: "needed" })] }));
+A.equal(vh("A1").level, "needed"); A.equal(vh("A1").promoted, true); A.equal(vh("A5"), null, "same turn and passage: same item");
+// the blocking state yields to working and to collecting; resolving the blocker ends it
+st.apply(vev("prompt", { turn: 2, prompt_id: "vp2", local: false, prompt_head: "next", refs: [] }));
+A.notEqual(st.chips()[VT].st, "blocking", "agent working: not the blocking state");
+st.apply(vev("stop", { turn: 2, prompt_id: "vp2", text_path: null, text_head: "", passage_hash: "v2" }));
+A.equal(st.chips()[VT].st, "blocking", "idle again with the blocker open");
+st.act(vh("A3").id, "resolve"); vc = st.chips()[VT]; A.equal(vc.b, undefined, "no open blocking ask: no b"); A.notEqual(vc.st, "blocking");
+// suggestions alone neither surface the chip nor show it
+const W = "eeeeeeee-6666-0000-0000-000000000001", WT = "t41";
+const wev = (type, p) => ({ v: 1, id: `w${++n}`, type, at: (at += 1000), terminal: WT, session_id: W, ...p });
+st.apply(wev("session_start", { agent: "claude-code", source: "startup", cwd: "/w", session_name: "w", turn: 0 }));
+st.apply(wev("prompt", { turn: 1, prompt_id: "wp1", local: false, prompt_head: "go", refs: [] }));
+st.apply(wev("stop", { turn: 1, prompt_id: "wp1", text_path: null, text_head: "", passage_hash: "w1" }));
+st.apply(wev("asks", { turn: 1, source: "model", asks: [ask("Want me to also add a README section?", "confirm", { level: "optional" })] }));
+A.equal(st.d.sessions[W].surfaced, false, "a new suggestion alone does not surface");
+A.equal(st.chips()[WT], undefined, "only suggestions: no chip");
+st.apply(wev("asks", { turn: 1, source: "model", asks: [ask("Send the tenant id", "provide", { level: "blocking" })] }));
+A.equal(st.d.sessions[W].surfaced, true, "a counted ask surfaces"); A.equal(st.chips()[WT].st, "blocking");
+// legacy store items (no level) read as needed, or blocking when `blocking` is true
+A.equal(levelOf({ direction: "agent_to_human" }), "needed"); A.equal(levelOf({ direction: "agent_to_human", blocking: true }), "blocking");
+A.equal(levelOf({ direction: "agent_to_human", level: "bogus", blocking: false }), "needed");
+A.equal(isSuggestion({ direction: "human_to_agent", level: "optional" }), false, "parked questions are never suggestions");
+A.equal(Store.fromText(st.toText()).d.items[vh("A1").id].promoted, true, "promoted survives a save");
+// Resume session (a session whose terminal is gone): the panel's `resume`, the writer's result,
+// and the session's SessionStart in the new terminal re-mapping it.
+const R = "ffffffff-7777-0000-0000-000000000001";
+const rev_ = (type, p, term = "t50") => ({ v: 1, id: `r${++n}`, type, at: (at += 1000), terminal: term, session_id: R, ...p });
+st.apply(rev_("session_start", { agent: "claude-code", source: "startup", cwd: "/Users/x/My Repo.v2", session_name: "old", turn: 0 }));
+let ro = st.apply(rev_("resume", {}, null));
+A.deepEqual(ro.resume, [R], "resume asks the writer to launch"); A.equal(st.d.sessions[R].resume.state, "launching");
+A.deepEqual(st.apply(rev_("resume", {}, null)).resume, [], "one launch at a time");
+A.deepEqual(st.apply({ v: 1, id: `r${++n}`, type: "resume", at, terminal: null, session_id: "unknown-session" }).resume, [], "an unknown session is not created");
+A.ok(st.resumeLaunched(R, { terminal: "t51" })); A.equal(st.d.sessions[R].resume.state, "launched"); A.equal(st.d.sessions[R].resume.terminal, "t51");
+st.apply(rev_("session_start", { agent: "claude-code", source: "resume", cwd: "/Users/x/My Repo.v2", session_name: "old", turn: 3 }, "t51"));
+A.equal(st.d.sessions[R].resume.state, "resumed"); A.equal(st.d.sessions[R].terminal, "t51", "re-mapped to the new terminal");
+A.equal(st.sessionForTerminal("t51"), R);
+A.ok(st.resumeLaunched(R, { terminal: "t51" })); A.equal(st.d.sessions[R].resume.state, "resumed", "a late hc reply does not undo resumed");
+st.d.sessions[R].resume = { at: at - 120000, state: "launched" };
+A.deepEqual(st.apply(rev_("resume", {}, null)).resume, [R], "a launch older than a minute can be tried again");
+st.resumeLaunched(R, { error: "transcript gone (/x.jsonl)" }); A.equal(st.d.sessions[R].resume.state, "failed"); A.match(st.d.sessions[R].resume.error, /transcript gone/);
+const ra = B.resumeArgs({ sessionId: R, cwd: "/Users/x/My Repo.v2" }, "/opt/claude");
+A.deepEqual(ra.slice(0, 5), ["run", "--bg", "--json", "--no-parent", "--no-notify"]);
+A.deepEqual(ra.slice(-4), ["--", "/opt/claude", "--resume", R], "claude --resume <sid>, no preamble, no fork");
+A.ok(!ra.includes("--parent") && !ra.includes("--fork-session"));
+A.equal(ra[ra.indexOf("--cwd") + 1], "/Users/x/My Repo.v2");
+A.equal(B.transcriptPathOf({ sessionId: R, cwd: "/Users/x/My Repo.v2" }, "/Users/x"), `/Users/x/.claude/projects/-Users-x-My-Repo-v2/${R}.jsonl`);
+A.equal(B.transcriptPathOf({ sessionId: R, transcriptPath: "/t/r.jsonl" }, "/Users/x"), "/t/r.jsonl", "the recorded path wins");
+const sev = checks - phase1 - phase2 - phase3;
+
+console.log(`OK: store, ${checks} checks (${phase1} phase 1, ${phase2} phase 2, ${phase3} phase 3, ${sev} severity and resume), 0 failure(s)`);

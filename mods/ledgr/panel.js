@@ -16,18 +16,27 @@
 // is typed: the person pastes, and the trunk's UserPromptSubmit hook reports the landing. After it
 // lands, Close branch (two clicks) posts `close_branch` and the writer ends the branch terminal.
 // "Copy answers" stages the answer sheet with its `ledgr answers <session>` marker line.
+// Severity: asks below extract.threshold (config.json) sit in a folded "suggestions (N)" line at the
+// bottom of their turn group, uncounted, each with Promote; blocking asks sort first with ◆ and a tag.
+// Motion (ui.animations): only on state transitions, found by comparing the classes of the store's
+// items before and after a change (observe): a row entering its lane fades and slides in under a
+// highlight that decays over about a second; a row leaving (resolved, dismissed, deferred) fades,
+// and collapses when its height is known; an answered ask glows in `done` and folds its details;
+// a new suggestion lights its fold line. All of it native (`transition`): no timer redraws, and an
+// idle panel does not render (ledgr.render-stats counts renders).
 import { div, svg } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView } from "gpui-base";
-import { theme, props, shared, setShared, focused, layout, run, watchFolder, readTextFile, openOverlay, agents, terminals, panes, exec } from "herdr";
+import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, Popup } from "gpui-base";
+import { theme, props, shared, setShared, focused, layout, run, watchFolder, readTextFile, writeTextFile, openOverlay, agents, terminals, panes, exec, home } from "herdr";
 import * as fs from "fs/promises";
 import { randomUUID } from "crypto";
 import { FORCE_DEMO, DEFAULTS, loadConfig, dataDir, turnPath, agentLabel, storePath } from "./config.js";
-import { Store, isAgentAsk, isHuman, isClosed } from "./store.js";
+import { Store, isAgentAsk, isHuman, isClosed, levelOf, isSuggestion, isBlocking, thresholdOf, LEVELS } from "./store.js";
 import { writeEvent } from "./spool.js";
 import { Writer, writerClaim, engineDrift } from "./writer.js";
 import { goToAnchor, stageText, busy, btwText } from "./nav.js";
 import { demoData, FIXTURE_TURNS, DEMO_SESSION } from "./fixtures.js";
-import { manifest, manifestLines, liveStatus, maxDepthOf, preamble, branchName } from "./branch.js";
+import { manifest, manifestLines, liveStatus, maxDepthOf, preamble, branchName, transcriptPathOf } from "./branch.js";
+import { itemWords as H, paneWords as P, trunkWords, originWords, branchWords, sessionWords } from "./words.js";
 import { confluenceMessage, answersSheet, conclusionRequest, extractConclusion, forkTurnOf, wrapperWords, leadIn, answersLeadIn } from "./confluence.js";
 
 const ICON = (n) => `mods/workspace-chrome/${n}.svg`;
@@ -39,6 +48,10 @@ const squash = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
 const plain = (s) => squash(String(s ?? "").replace(/[`*_#>]+/g, ""));
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const HOUR = 3600e3;
+// extract.threshold as the ASKED OF YOU control names it.
+const TH_WORDS = { blocking: "blocking only", needed: "blocking + needed", optional: "everything" };
+const DONE_TIP = "Done: you did or decided it";
+const NOT_NEEDED_TIP = "Not needed: close it; the agent may raise it again";
 const BR_WORD = { working: "working", blocked: "needs you", done: "done", idle: "idle", starting: "starting", launching: "launching…",
   launched: "starting", running: "running", closed: "closed", ended: "ended", failed: "launch failed", refused: "refused",
   nostart: "did not start (see its terminal's error toast)", concluded: "concluded", rejoined: "rejoined" };
@@ -106,8 +119,15 @@ export class Panel {
     this.whole = new Set();
     this.unfolded = new Set();
     this.folded = new Set();
+    this.sugOpen = new Set();      // turn groups whose "suggestions (N)" line is open
     this.folds = { older: false, deferred: false, closed: false };
+    // Lane folds are the person's alone: changed only by a click (or the fold-* commands), kept
+    // across reloads. ui.foldAsksWhileWorking brings back the Phase 1 auto-fold (asksOpen).
     this.collapsed = { asks: false, mine: false };
+    try {
+      const saved = JSON.parse(localStorage.getItem("lanes") || "{}");
+      for (const k of ["asks", "mine"]) if (typeof saved?.[k] === "boolean") this.collapsed[k] = saved[k];
+    } catch { /* defaults */ }
     this.confirm = null;           // { itemId, placement, isolate }: the open Branch confirmation
     this.brOpen = new Set();       // expanded branch rows
     this.preOpen = new Set();      // branch rows showing their preamble
@@ -115,6 +135,10 @@ export class Panel {
     this.conclude = null;          // { branchId, input, text, source, turn, prefill, edited }: the open Conclude editor
     this.closeAsk = null;          // branch id awaiting a second click on Close branch
     this.gitOk = new Map();        // cwd -> is a git checkout (the worktree toggle)
+    this.txCheck = new Map();      // session id -> {ok, at}: does its transcript exist (Resume session)
+    this.dd = null;                // the open dropdown's key (menuButton): one at a time
+    this.ddShut = null;            // {key, at}: closed by a press outside (that press may be its own trigger)
+    this.ddFocus = cx.focus_handle();
     this.menu = false;
     this.hover = null;
     this.inputs = new Map();
@@ -124,6 +148,17 @@ export class Panel {
     this.last = null;
     this.wasShown = false;
     this.checkedAt = 0;
+    // Motion state (observe): `fx` id -> {kind: enter|answered|sug, at, k, phase, fold}; `ghosts`
+    // id -> {item (as it was), at, h, phase} for rows that just left a lane; `rowH` id -> {h, at,
+    // exp}, a row's height from the pointer passing over it (so a row the person closes can collapse).
+    this.fx = new Map();
+    this.ghosts = new Map();
+    this.rowH = new Map();
+    this.prevCls = null;           // id -> {c, status, sid, turn} as last observed; null: record only
+    this.rev = 0;                  // bumped when the shown store changes (reload, local act, demo act)
+    this.revAt = 0;
+    this.obsVer = undefined;
+    this.renders = 0;
     try { this.pinned = localStorage.getItem("pinned") || null; } catch { this.pinned = null; }
     // A focus request older than this copy is not a request to it.
     this.focusAt = Number(shared("ledgr.focus")?.at) || 0;
@@ -143,7 +178,14 @@ export class Panel {
     this.watchStore(cx);
     this.checkWriter(cx);
     const drift = await engineDrift();
-    if (drift.length) this.flash = `mods/my-tabs/ledgr/ differs from mods/ledgr/ (${drift.join(", ")}): copy those files over so both writers run the same code.`;
+    if (drift.length) {
+      const warn = this.flash = `mods/my-tabs/ledgr/ differs from mods/ledgr/ (${drift.join(", ")}): copy those files over so both writers run the same code.`;
+      // install.sh syncs mods/ledgr (which reloads this copy) a moment before it copies the engine
+      // into my-tabs: look once more before keeping the warning.
+      cx.timer.after(5000, (cx) => cx.spawn(async (cx) => {
+        if (this.flash === warn && !(await engineDrift()).length) { this.flash = ""; cx.notify(); }
+      }));
+    }
     cx.notify();
   }
 
@@ -157,8 +199,12 @@ export class Panel {
     this.liveText = text;
     this.live = st;
     this.overlayLocal();
+    this.bump();
     return true;
   }
+
+  // The shown store changed: the next render compares item classes (observe).
+  bump() { this.rev++; this.revAt = Date.now(); }
 
   // Acts and drafts this panel posted that store.json does not show yet, applied on top.
   overlayLocal() {
@@ -179,6 +225,7 @@ export class Panel {
         const ts = this.live.d.sessions[a.sid];
         if (ts) this.live.on_conclude({ branch_id: a.branchId, text: a.text, message: a.message, source: a.source }, ts, a.at);
       } else if (a.action === "close_branch") { const b = this.live.d.branches[a.branchId]; if (b) b.closeRequestedAt = a.at; }
+      else if (a.action === "resume") { const x = this.live.d.sessions[a.sid]; if (x && x.resume?.state !== "resumed") x.resume = { at: a.at, state: "launching" }; }
       else this.live.act(a.item, a.action, a.arg, a.at);
     }
     for (const [id, v] of this.drafts) {
@@ -186,6 +233,7 @@ export class Panel {
       if (!it) { this.drafts.delete(id); continue; }
       if (it.draft === v.text && v.sent) this.drafts.delete(id); else it.draft = v.text;
     }
+    if (this.localActs.length) this.bump();
   }
 
   watchStore(cx) {
@@ -196,8 +244,17 @@ export class Panel {
       try {
         for (;;) {
           const paths = await watchFolder(root);
+          const all = paths.some((p) => String(p).replace(/\/+$/, "") === root);
+          // config.json edited by hand: the ui.* and extract.threshold choices apply at once.
+          if (all || paths.some((p) => String(p).split("/").pop() === "config.json")) {
+            this.cfg = await loadConfig();
+            if (this.fallback()) this.writer.applyConfig(this.cfg);
+            this.prevCls = null;         // a new threshold moves rows between lanes: not a motion
+            this.obsVer = undefined;
+            cx.notify();
+          }
           if (this.fallback()) continue;
-          if (paths.some((p) => String(p).replace(/\/+$/, "") === root || String(p).split("/").pop() === "store.json")) {
+          if (all || paths.some((p) => String(p).split("/").pop() === "store.json")) {
             if (await this.reload()) cx.notify();
           }
         }
@@ -246,7 +303,7 @@ export class Panel {
 
   // ── commands (`herdr-app do ledgr.<command>`, shown copies only) ────
   command(c, cx) {
-    if (c === "demo") { if (this.demo && !FORCE_DEMO) { this.demo = false; this.demoStore = null; this.expanded.clear(); this.flash = ""; this.conclude = null; this.confirm = null; } else this.enterDemo(); }
+    if (c === "demo") { if (this.demo && !FORCE_DEMO) { this.demo = false; this.demoStore = null; this.expanded.clear(); this.flash = ""; this.conclude = null; this.confirm = null; this.prevCls = null; } else this.enterDemo(); }
     else if (c === "capture") run("mod.open", { name: "ledgr" });
     else if (c === "rescan") { if (this.fallback()) this.writer.tick(cx); else cx.spawn(async (cx) => { await this.reload(); cx.notify(); }); }
     else if (c === "check-writer") this.checkWriter(cx);
@@ -306,7 +363,7 @@ export class Panel {
       if (s) { this.menu = false; this.override = { sid: s.sessionId, terminal: focused()?.terminal ?? null }; } else this.flash = `No session ${k}.`;
     }
     // For scripted looks at the lower lane: fold or unfold a lane, close every open row and box.
-    else if (c === "fold-mine") this.collapsed.mine = !this.collapsed.mine;
+    else if (c === "fold-mine") this.setCollapsed("mine", !this.collapsed.mine);
     // `pick:<handle>:<n>` clicks option n (from 0) of that ask; `copy-answer:<handle>` its Copy answer.
     else if (c.startsWith("pick:") || c.startsWith("copy-answer:")) {
       const st = this.viewStore(), sid = this.current(st), s = sid ? st.d.sessions[sid] : null;
@@ -316,13 +373,64 @@ export class Panel {
       else if (c.startsWith("pick:")) { const o = (it.options ?? [])[Number(n)]; if (o === undefined) this.flash = `${h} has no option ${n}.`; else this.setDraft(it, o, cx); }
       else this.copyAnswer(it, s, cx);
     }
-    else if (c === "fold-asks") { const st = this.viewStore(), sid = this.current(st), s = sid ? st.d.sessions[sid] : null; if (s) this.asksManual = { sid, stopAt: s.lastStopAt ?? 0, open: !this.asksOpen(s) }; }
-    else if (c === "collapse-all") { this.expanded.clear(); this.brOpen.clear(); this.preOpen.clear(); this.confirm = null; this.conclude = null; }
+    else if (c === "fold-asks") { const st = this.viewStore(), sid = this.current(st), s = sid ? st.d.sessions[sid] : null; if (s) this.setAsksOpen(s, !this.asksOpen(s)); }
+    else if (c === "collapse-all") { this.expanded.clear(); this.whole.clear(); this.brOpen.clear(); this.preOpen.clear(); this.confirm = null; this.conclude = null; this.dd = null; }
+    // For scripted checks of the severity and motion paths, the same code as the clicks:
+    // act:<handle>:<resolve|dismiss|reopen|promote> on the shown session; suggestions (every
+    // "suggestions (N)" line of the shown session, open or fold); demo only: demo-ask:<level>
+    // (a new ask on the newest turn), demo-answer:<handle> (as if its answer sheet landed).
+    else if (c.startsWith("act:")) {
+      const [, h, action] = c.split(":");
+      const st = this.viewStore(), sid = this.current(st), it = sid ? st.byHandle(sid, h) : null;
+      if (!it || !["resolve", "dismiss", "reopen", "promote"].includes(action)) this.flash = `No ${h} in this session, or not one of resolve, dismiss, reopen, promote.`;
+      else this.act(it.id, action, null, cx);
+    }
+    // whole:<handle> opens (or closes) that item's whole message; menu:<handle>:<defer|more>,
+    // menu:threshold and menu:off open the row's menus as a click does.
+    else if (c.startsWith("whole:") || c.startsWith("menu:")) {
+      const [kind, h, which] = c.split(":");
+      const st = this.viewStore(), sid = this.current(st), it = sid && h !== "threshold" && h !== "off" ? st.byHandle(sid, h) : null;
+      if (kind === "menu" && (h === "off" || h === "threshold")) this.dd = h === "off" ? null : "threshold";
+      else if (!it) this.flash = `No ${h} in this session.`;
+      else if (kind === "whole") { this.expandItem(it, cx); if (this.whole.has(it.id)) this.whole.delete(it.id); else this.whole.add(it.id); }
+      else { this.expandItem(it, cx); this.dd = `${which === "defer" ? "defer" : "more"}-${it.id}`; }
+    }
+    // threshold:<blocking|needed|optional>: the lane head's menu choice (writes config.json).
+    else if (c.startsWith("threshold:")) { const lv = c.slice("threshold:".length); if (LEVELS.includes(lv)) this.setThreshold(lv, cx); else this.flash = `No threshold ${lv}.`; }
+    else if (c === "suggestions" || c === "below-threshold") {
+      const st = this.viewStore(), sid = this.current(st);
+      const ks = [...new Set((sid ? st.itemsOf(sid) : []).filter((it) => isSuggestion(it, st.threshold)).map((it) => `${sid}:${it.anchor?.turn}`))];
+      const open = ks.some((k) => !this.sugOpen.has(k));
+      for (const k of ks) { if (open) this.sugOpen.add(k); else this.sugOpen.delete(k); }
+    }
+    else if (this.demo && c.startsWith("demo-ask:")) {
+      const st = this.demoStore, s = st.d.sessions[DEMO_SESSION], level = c.slice("demo-ask:".length);
+      const turn = Math.max(...st.itemsOf(DEMO_SESSION).filter(isAgentAsk).map((it) => it.anchor?.turn ?? 0));
+      const n = s.nextHandle.A;
+      const text = { blocking: `Send the PRODAPP admin password (demo ask ${n})`, optional: `Decide whether the agent should also tidy the old bindings (demo ask ${n})` }[level] ?? `Confirm the reboot window for PRODAPP (demo ask ${n})`;
+      st.apply({ v: 1, id: `demo-${n}`, type: "asks", at: Date.now(), terminal: s.terminal, session_id: DEMO_SESSION, turn, source: "model",
+        asks: [{ text, kind: level === "blocking" ? "provide" : "confirm", level: ["blocking", "needed", "optional"].includes(level) ? level : "needed", options: [], recommended: null, quote: null }] });
+      this.bump();
+    }
+    else if (this.demo && c.startsWith("demo-answer:")) {
+      const st = this.demoStore, it = st.byHandle(DEMO_SESSION, c.slice("demo-answer:".length));
+      if (it && isAgentAsk(it) && !isClosed(it)) { it.answer = squash(it.draft) || "yes"; it.answeredBy = "sheet"; st.setStatus(it, "answered"); this.bump(); }
+    }
+    // Writes ledgr-data/log/panel-renders-<copy>.json: how many times this copy rendered, and its motion
+    // state (an idle panel shows the same count twice, give or take the command's own render).
+    else if (c === "render-stats") {
+      const out = { at: Date.now(), renders: this.renders, fx: this.fx.size, ghosts: this.ghosts.size, animations: this.animOn(), shown: this.isShown(),
+        transcripts: Object.fromEntries([...this.txCheck].map(([k, v]) => [k.slice(0, 24), v])) };
+      // One file per copy (several shown copies can answer the same command).
+      out.copy = this.panelId.slice(0, 8);
+      cx.spawn(async () => { await fs.mkdir(`${dataDir()}/log`, { recursive: true }).catch(() => {}); await fs.writeFile(`${dataDir()}/log/panel-renders-${out.copy}.json`, JSON.stringify(out) + "\n").catch(() => {}); });
+    }
     else if (c === "expand-branches") { const st = this.viewStore(); for (const b of Object.values(st.d.branches)) this.brOpen.add(b.id); }
   }
 
   enterDemo() {
     this.demo = true;
+    this.prevCls = null;
     this.demoStore = new Store(demoData());
     this.override = null;
     this.flash = "Demo data: nothing here is saved or sent.";
@@ -378,7 +486,7 @@ export class Panel {
   // ── acts ─────────────────────────────────────────────────────────────
   act(id, action, arg, cx) {
     const st = this.viewStore();
-    if (this.demo) { if (st.act(id, action, arg)) cx.notify(); return; }
+    if (this.demo) { if (st.act(id, action, arg)) { this.bump(); cx.notify(); } return; }
     const it = st.item(id);
     if (!it) return;
     this.post("act", { session_id: it.anchor?.sessionId, item: id, action, arg: arg ?? null }, { item: id, action, arg }, cx);
@@ -461,16 +569,16 @@ export class Panel {
   stageAnswers(s, turn, group, cx) {
     const items = group.filter((it) => this.answerOf(it));
     const msg = answersSheet(s.sessionId, turn, items);
-    if (!msg) { this.flash = group.length === 1 ? `${group[0].handle} has no answer yet: type one or pick an option.` : `No answers typed or picked for turn ${turn}.`; cx.notify(); return; }
+    if (!msg) { this.flash = group.length === 1 ? `${H(group[0])} has no answer yet: type one or pick an option.` : `No answers typed or picked for turn ${turn}.`; cx.notify(); return; }
     if (this.demo) cx.write_to_clipboard(msg);
     else stageText(msg, s.terminal, cx);
-    const hs = items.map((it) => it.handle);
-    const what = hs.length === 1 ? `Answer for ${hs[0]}` : `${hs.length} answers (${hs.join(", ")})`;
+    const hs = items.map((it) => it.handle), ws = items.map(H);   // hs: the lead-in's short forms
+    const what = ws.length === 1 ? `Answer for ${ws[0]}` : `${ws.length} answers (${ws.join(", ")})`;
     const word = this.trunkWord(s);
     const how = `type “${answersLeadIn(hs)}”, then ⌘V, Enter`;
     this.flash = this.demo
       ? `(demo) ${what} copied to the clipboard; in a session you would ${how}.`
-      : `${what} copied and ${s.terminal ?? "the pane"} focused${word === "working" ? " (working: wait for idle)" : word === "gone" ? " (not live)" : ""}: ${how}. ${hs.length === 1 ? `${hs[0]} shows` : "They show"} answered once that prompt is sent.`;
+      : `${what} copied and ${P(s.terminal, "the pane")} focused${word === "working" ? " (working: wait for idle)" : word === "gone" ? " (not live)" : ""}: ${how}. ${ws.length === 1 ? `${ws[0]} shows` : "They show"} answered once that prompt is sent.`;
     cx.notify();
   }
 
@@ -490,7 +598,7 @@ export class Panel {
     const text = btw ? btwText(it.text, it.anchor?.quote) : `[${it.handle}] ${it.text}`;
     if (this.demo) cx.write_to_clipboard(text); else stageText(text, s.terminal, cx);
     if (btw) this.act(it.id, "btw", null, cx);
-    this.flash = `${this.demo ? "(demo) " : ""}Copied ${btw ? "/btw" : "question"} for ${s.terminal}: ⌘V, Enter.`;
+    this.flash = `${this.demo ? "(demo) " : ""}Copied ${btw ? "/btw" : "question"} for ${P(s.terminal, "the session")}: ⌘V, Enter.`;
     cx.notify();
   }
 
@@ -543,7 +651,7 @@ export class Panel {
     this.post("branch", { session_id: s.sessionId, item: it.id, branch_id: branchId, placement: c.placement, isolate: c.isolate === true },
       { action: "branch", sid: s.sessionId, item: it.id, branchId, name, manifest: m, placement: c.placement }, cx);
     this.brOpen.add(branchId);
-    this.flash = `Branch ${name} asked for: the writer starts it ${c.isolate ? "in a new worktree and space" : c.placement === "split" ? "beside the trunk" : "as a sub-agent of the trunk (peek it from the agents list)"}.`;
+    this.flash = `The ${branchWords(it)} (${name}) is asked for: the writer starts it ${c.isolate ? "in a new worktree and space" : c.placement === "split" ? "beside the trunk" : "as a sub-agent of the trunk (peek it from the agents list)"}.`;
     cx.notify();
   }
 
@@ -553,6 +661,44 @@ export class Panel {
     if (!t || this.demo) { this.flash = this.demo ? "(demo) Would focus the branch's pane." : "The branch has no terminal yet."; cx.notify(); return; }
     if (panes().some((p) => p.terminal === t)) run("pane.focus", { terminal: t });
     else run("terminal.peek", { terminal: t });
+  }
+
+  // ── Resume session ───────────────────────────────────────────────────
+  // The session's terminal is gone: not among terminals() (live) or agents(), or the identity map
+  // now gives it to another session. Demo sessions never are.
+  terminalGone(st, s) {
+    if (this.demo || !s || String(s.sessionId).startsWith("herdr:")) return false;
+    const t = s.terminal;
+    if (!t) return true;
+    const owner = st.d.terminals[t]?.sessionId;
+    if (owner && owner !== s.sessionId) return true;
+    return !this.parentLive(s) && !agents().some((a) => a.address === t);
+  }
+
+  // Does the session's transcript still exist? true | false | undefined (being checked). Checked once,
+  // again after 30 s at the next render; the answer arrives with one render. Called while rendering a
+  // row (which has no cx of its own): it uses the render's, kept in this.rcx.
+  transcriptOk(s) {
+    const cx = this.rcx;
+    if (this.demo) return true;
+    const c = this.txCheck.get(s.sessionId);
+    if (c && (c.ok === undefined || Date.now() - c.at < 30000)) return c.ok;
+    if (!cx) return c?.ok;
+    this.txCheck.set(s.sessionId, { ok: c?.ok, at: Date.now() });
+    cx.timer.after(0, (cx) => cx.spawn(async (cx) => {
+      const ok = Boolean(await fs.exists(transcriptPathOf(s, home())).catch(() => false));
+      this.txCheck.set(s.sessionId, { ok, at: Date.now() });
+      cx.notify();
+    }));
+    return c?.ok;
+  }
+
+  // One `resume` spool event; the writer runs claude --resume in a new pane (writer.js resumeSession).
+  resume(s, cx) {
+    if (this.demo) { this.flash = "(demo) Would start claude --resume in a new pane."; cx.notify(); return; }
+    this.post("resume", { session_id: s.sessionId }, { action: "resume", sid: s.sessionId }, cx);
+    this.flash = `Resuming ${sessionWords(s)}: claude --resume in a new pane beside the focused one. Its rows follow the new pane once Claude starts there.`;
+    cx.notify();
   }
 
   forget(s, cx) {
@@ -589,12 +735,12 @@ export class Panel {
   // The trunk's status plus how to paste: type a one-line lead-in first (Claude Code presents a bare
   // paste as text that may hold instructions the person did not write), then ⌘V, Enter.
   trunkLine(ts, it) {
-    const w = this.trunkWord(ts), t = ts?.terminal ?? "?";
+    const w = this.trunkWord(ts), t = trunkWords(ts?.terminal).replace(/^t/, "T");
     const how = `type a one-line lead-in such as “${leadIn(it)}”, then ⌘V, Enter`;
-    if (w === "gone") return `Trunk ${t} is not live: the message stays on the clipboard; when it is back, ${how}.`;
-    if (w === "working") return `Trunk ${t} is working: wait until it is idle (a paste now joins the running turn), then ${how}.`;
-    if (w === "blocked") return `Trunk ${t} is waiting on its own prompt: answer that first, then ${how}.`;
-    return `Trunk ${t} is ${w}: ${how}.`;
+    if (w === "gone") return `${t} is not live: the message stays on the clipboard; when it is back, ${how}.`;
+    if (w === "working") return `${t} is working: wait until it is idle (a paste now joins the running turn), then ${how}.`;
+    if (w === "blocked") return `${t} is waiting on its own prompt: answer that first, then ${how}.`;
+    return `${t} is ${w}: ${how}.`;
   }
 
   // Conclude is live on a started branch whose question is not closed, until the confluence lands.
@@ -664,11 +810,11 @@ export class Panel {
     const msg = confluenceMessage({ branch: br, item: it, text });
     const word = this.trunkWord(ts);
     this.conclude = null;
-    if (this.demo) { cx.write_to_clipboard(msg); this.flash = `(demo) Confluence for ${it.handle} copied; nothing is saved.`; cx.notify(); return; }
+    if (this.demo) { cx.write_to_clipboard(msg); this.flash = `(demo) Confluence for ${H(it)} copied; nothing is saved.`; cx.notify(); return; }
     stageText(msg, ts.terminal, cx);
     this.post("conclude", { session_id: ts.sessionId, branch_id: br.id, item: it.id, text, message: msg, source: k?.source ?? "edited", source_turn: k?.turn ?? null },
       { action: "conclude", sid: ts.sessionId, branchId: br.id, text, message: msg, source: k?.source ?? "edited" }, cx);
-    this.flash = `Confluence for ${it.handle} copied and ${ts.terminal ?? "the trunk"} focused${word === "working" ? " (working: wait for idle)" : word === "gone" ? " (not live)" : ""}: type “${leadIn(it)}”, then ⌘V, Enter. ${it.handle} resolves when that prompt is sent.`;
+    this.flash = `Confluence for ${H(it)} copied and ${trunkWords(ts.terminal)} focused${word === "working" ? " (working: wait for idle)" : word === "gone" ? " (not live)" : ""}: type “${leadIn(it)}”, then ⌘V, Enter. ${H(it)} resolves when that prompt is sent.`;
     cx.notify();
   }
 
@@ -676,7 +822,7 @@ export class Panel {
     const ts = st.d.sessions[br.parentSessionId], msg = br.conclusion?.message;
     if (!msg) { this.flash = "No staged confluence for this branch."; cx.notify(); return; }
     if (this.demo) cx.write_to_clipboard(msg); else stageText(msg, ts?.terminal, cx);
-    this.flash = `${this.demo ? "(demo) " : ""}Confluence copied again for ${ts?.terminal ?? "the trunk"}: type “${leadIn(st.item(br.requestId))}”, then ⌘V, Enter.`;
+    this.flash = `${this.demo ? "(demo) " : ""}Confluence copied again for ${trunkWords(ts?.terminal)}: type “${leadIn(st.item(br.requestId))}”, then ⌘V, Enter.`;
     cx.notify();
   }
 
@@ -686,7 +832,7 @@ export class Panel {
     const text = conclusionRequest(it);
     cx.write_to_clipboard(text);
     if (!this.demo) this.focusBranch(br, cx);
-    this.flash = `${this.demo ? "(demo) " : ""}Request copied for ${br.name}: ⌘V, Enter in its pane${busy(br.terminal) ? " once it is idle" : ""}; Conclude again when it answers.`;
+    this.flash = `${this.demo ? "(demo) " : ""}Request copied for the ${branchWords(it)} (${br.name}): ⌘V, Enter in its pane${busy(br.terminal) ? " once it is idle" : ""}; Conclude again when it answers.`;
     cx.notify();
   }
 
@@ -694,12 +840,108 @@ export class Panel {
     this.closeAsk = null;
     if (this.demo) { this.flash = "(demo) Would end the branch terminal (hc kill, hc rm) and keep its record."; cx.notify(); return; }
     this.post("close_branch", { session_id: br.parentSessionId, branch_id: br.id }, { action: "close_branch", branchId: br.id }, cx);
-    this.flash = `Closing ${br.name}: the writer ends ${br.terminal ?? "its terminal"}; the record and its conclusion stay.`;
+    this.flash = `Closing the ${branchWords(this.viewStore().item(br.requestId))} (${br.name}): the writer ends ${P(br.terminal, "its terminal")}; the record and its conclusion stay.`;
     cx.notify();
+  }
+
+  // ── motion (ui.animations) ───────────────────────────────────────────
+  animOn() { return this.cfg.ui?.animations !== false; }
+
+  // Where an item is drawn: in its lane, as a suggestion, answered, or out of the lanes. Staleness
+  // (older than a day) moves rows by the clock, not by a state change: it never animates.
+  classOf(st, it, now) {
+    if (isClosed(it)) return "closed";
+    if (it.status === "deferred") return "deferred";
+    if (it.status === "open" && now - (it.updatedAt ?? 0) > DAY) return "stale";
+    if (isAgentAsk(it) && isSuggestion(it, st.threshold)) return "sug";
+    if (it.status === "answered") return "answered";
+    return "lane";
+  }
+
+  // Called from render only when the shown store changed (this.rev, or the fallback writer's text).
+  // Compares every item's class with the last observation; a change is a transition, and only a
+  // transition starts motion. The first look, a store read while the panel was hidden (not fresh),
+  // demo on or off and a config change record without moving anything.
+  observe(st, shown, fallback, cx) {
+    const now = Date.now();
+    const cls = new Map();
+    for (const it of st.items()) cls.set(it.id, { c: this.classOf(st, it, now), status: it.status, sid: it.anchor?.sessionId, turn: it.anchor?.turn });
+    const prev = this.prevCls;
+    this.prevCls = cls;
+    this.pruneFx(now);
+    if (!prev || !shown || !this.animOn() || !(fallback || now - this.revAt < 1500)) return;
+    let k = 0, phase = false;
+    const ends = new Set();       // when a render is needed after the motion: a ghost goes, a row folds
+    for (const [id, n] of cls) {
+      const p = prev.get(id);
+      if (p && p.c === n.c) continue;
+      if (n.c === "stale" || p?.c === "stale") continue;
+      if (n.c === "lane" && (!p || p.c === "sug" || p.c === "closed" || p.c === "deferred")) {
+        if (k < 8) { this.fx.set(id, { kind: "enter", at: now, k: k++, phase: 0 }); phase = true; }
+      } else if (n.c === "answered" && p?.c === "lane") {
+        const fold = this.expanded.has(id);
+        this.fx.set(id, { kind: "answered", at: now, k: 0, phase: 0, fold });
+        phase = true;
+        if (fold) ends.add(200);
+      } else if (n.c === "sug" && !p) {
+        this.fx.set(`sug:${n.sid}:${n.turn}`, { kind: "sug", at: now, k: 0, phase: 0 });
+        phase = true;
+      } else if ((n.c === "closed" || n.c === "deferred") && (p?.c === "lane" || p?.c === "answered")) {
+        const it = st.item(id), r = this.rowH.get(id);
+        // Collapse from the height the pointer last measured, if it is fresh and the row has not
+        // been opened or closed since; otherwise fade only.
+        const h = r && now - r.at < 15000 && r.exp === this.expanded.has(id) ? r.h : null;
+        this.ghosts.set(id, { item: { ...it, status: p.status, __ghost: true }, at: now, h, phase: 0 });
+        phase = true;
+        ends.add(h ? 380 : 200);
+      }
+    }
+    // The second frame sets the targets the transitions run to (they are attached in the first).
+    if (phase) cx.timer.after(16, (cx) => { for (const f of [...this.fx.values(), ...this.ghosts.values()]) f.phase = 1; cx.notify(); });
+    // One render when a motion is over: ghosts go (the list closes up), answered rows fold. The
+    // highlights need none: they end at opacity 0, and their entries lapse after 1.5 s.
+    for (const ms of ends) cx.timer.after(ms + 20, (cx) => { this.pruneFx(); cx.notify(); });
+  }
+
+  pruneFx(now = Date.now()) {
+    for (const [id, g] of this.ghosts) if (now - g.at >= (g.h ? 380 : 200)) this.ghosts.delete(id);
+    for (const [id, f] of this.fx) {
+      if (f.fold && now - f.at >= 200) { this.expanded.delete(id); f.fold = false; }
+      if (now - f.at >= 1500) this.fx.delete(id);
+    }
+    if (this.rowH.size > 300) this.rowH.clear();
+  }
+
+  fxOf(id) {
+    const f = this.fx.get(id);
+    return f && Date.now() - f.at < 1500 ? f : null;
+  }
+
+  // A tint over a row (first child, under its content) that holds briefly and decays over ~0.9 s.
+  glow(id, color, f, radius) {
+    const hold = f.kind === "enter" ? 220 + f.k * 45 : 120;
+    return div().id(id).absolute().top(0).left(0).size_full().rounded(radius).bg(color)
+      .opacity(f.phase ? 0 : 1).transition("opacity", { duration: 900, delay: hold, easing: "ease-out" });
+  }
+
+  // A row that just left its lane, drawn as it was: it fades, then (height known) collapses.
+  ghostRow(t, st, s, it) {
+    const g = this.ghosts.get(it.id);
+    return div().id(`ghost-${it.id}`).flex_none().overflow_hidden()
+      .opacity(g?.phase ? 0 : 1).transition("opacity", { duration: 160, easing: "ease-out" })
+      .when(g?.h != null, (el) => el.h(g.phase ? 0 : g.h).transition("height", { duration: 220, delay: 110, easing: "ease-in-out" }))
+      .child(this.row(t, st, s, it, false, true));
+  }
+
+  ghostItems(sid) {
+    const now = Date.now();
+    return [...this.ghosts.values()].filter((g) => g.item.anchor?.sessionId === sid && now - g.at < 400).map((g) => g.item);
   }
 
   // ── render ───────────────────────────────────────────────────────────
   render(cx) {
+    this.renders++;
+    this.rcx = cx;
     const t = theme();
     // A fallback writer steps down when a my-tabs writer claims the role.
     if (this.writer && this.writer.started && !this.writer.holds() && !this.writer.retired) {
@@ -713,6 +955,10 @@ export class Panel {
     if (shown && !this.wasShown && !this.demo && !FORCE_DEMO && Date.now() - this.checkedAt > 60000) cx.timer.after(0, (cx) => this.checkWriter(cx));
     this.wasShown = shown;
     const st = this.viewStore();
+    st.threshold = thresholdOf(this.cfg);   // the writer applies the same value to the chips
+    // Motion starts only here, and only when the store changed since the last look.
+    const ver = this.fallback() ? this.writer.storeText : `${this.demo ? "d" : "r"}${this.rev}`;
+    if (ver !== this.obsVer) { this.obsVer = ver; this.observe(st, shown, this.fallback(), cx); }
     const sid = this.current(st);
     const s = sid ? st.d.sessions[sid] : null;
     if (s && !this.demo && s.surfaced && shown && this.seenSent.get(sid) !== (s.lastStopAt ?? 0)) {
@@ -732,12 +978,74 @@ export class Panel {
         div().flex_none().px(12).py(6).border_t(1).border_color(t.border).text_size(11).text_color(t.muted).child(note)));
   }
 
+  // A small menu under a trigger: gpui-base's Popup, as the shipped linear mod opens its pickers.
+  // One open at a time (this.dd); a choice, a press outside or Esc closes it. Items are
+  // [id, label, fn, {tip, disabled, danger, hint}]; o.small draws a quiet trigger for a lane head.
+  menuButton(t, key, label, items, o = {}) {
+    const open = this.dd === key;
+    const trigger = div().id(`ddt-${key}`).flex_none().flex().items_center().rounded(o.small ? 5 : 6).cursor_pointer()
+      .when(o.small, (el) => el.h(18).px(5).text_size(10.5).text_color(open ? t.foreground : t.dim).hover((x) => x.bg(t.hover).text_color(t.foreground)))
+      .when(!o.small, (el) => el.h(22).px(7).border_1().border_color(open ? t.accent : t.border).bg(t.background).text_size(11).text_color(t.foreground).hover((x) => x.opacity(0.85)))
+      .when(Boolean(o.tip), (el) => el.tooltip(o.tip))
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        const justShut = this.ddShut?.key === key && Date.now() - this.ddShut.at < 300;
+        this.dd = open || justShut ? null : key;
+        this.ddShut = null;
+        if (this.dd) cx.timer.after(30, () => { try { this.ddFocus.focus(); } catch { /* no keyboard: clicks still work */ } });
+        cx.notify();
+      })
+      .child(label);
+    const list = v_flex().id(`ddl-${key}`).min_w(o.width ?? 190).p(4).gap(1).rounded(8).border_1().border_color(t.border).bg(t.popover ?? t.surface).shadow_md()
+      .text_color(t.foreground)
+      .track_focus(this.ddFocus)
+      .on_key_down((e, cx) => { if (e.key === "escape") { this.dd = null; cx.stop_propagation(); cx.notify(); } })
+      .on_mouse_down_out((_e, cx) => { if (this.dd === key) { this.dd = null; this.ddShut = { key, at: Date.now() }; cx.notify(); } })
+      .children(items.filter(Boolean).map(([id, text, fn, io = {}]) => h_flex().id(`ddi-${key}-${id}`).h(26).px(8).gap(8).items_center().rounded(5).text_size(11.5)
+        .text_color(io.disabled ? t.dim : io.danger ? t.blocked : t.foreground)
+        .when(Boolean(io.tip), (el) => el.tooltip(io.tip))
+        .when(!io.disabled, (el) => el.cursor_pointer().hover((x) => x.bg(t.hover))
+          .on_click((e, cx) => { cx.stop_propagation(); this.dd = null; fn(e, cx); cx.notify(); }))
+        .child(div().flex_1().min_w(0).child(text))
+        .when(Boolean(io.hint), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(io.hint)))));
+    return Popup.new(`ddp-${key}`, trigger).anchor(o.anchor ?? "top_left").when(open, (el) => el.content(list));
+  }
+
+  // The ASKED OF YOU threshold: written to ledgr-data/config.json (extract.threshold), which the
+  // writer watches (chips) and this panel re-reads. Not a motion: rows just move. The demo keeps it
+  // in memory.
+  setThreshold(level, cx) {
+    if (!LEVELS.includes(level)) return;
+    this.cfg = { ...this.cfg, extract: { ...(this.cfg.extract ?? {}), threshold: level } };
+    this.prevCls = null;
+    this.obsVer = undefined;
+    if (this.demo) { this.flash = `(demo) Threshold: ${TH_WORDS[level]}; not saved.`; cx.notify(); return; }
+    cx.spawn(async (cx) => {
+      const path = `${dataDir()}/config.json`;
+      try {
+        const cur = await readTextFile(path).catch(() => null);
+        let d;
+        if (cur) { try { d = JSON.parse(cur); } catch { throw new Error("config.json is not valid JSON: fix it by hand first"); } }
+        else { d = JSON.parse(JSON.stringify(DEFAULTS)); }
+        if (!d || typeof d !== "object" || Array.isArray(d)) throw new Error("config.json is not a JSON object");
+        d.extract = { ...(d.extract && typeof d.extract === "object" ? d.extract : {}), threshold: level };
+        await writeTextFile(path, JSON.stringify(d, null, 2) + "\n", cur ?? null);
+        this.flash = `Threshold: ${TH_WORDS[level]} (extract.threshold "${level}" in ledgr-data/config.json).`;
+      } catch (e) {
+        this.flash = `Threshold not saved: ${String(e?.message ?? e)}`;
+        this.cfg = await loadConfig();
+      }
+      cx.notify();
+    });
+    cx.notify();
+  }
+
   pill(t, text, color) {
     return div().flex_none().px(5).py(0.5).rounded(4).border_1().border_color(t.border).text_size(10).text_color(color ?? t.muted).child(text);
   }
 
   header(t, st, s) {
-    const name = s ? `${s.terminal ?? "?"} · ${s.sessionName || s.repo || "unnamed"}` : "no session";
+    const name = s ? sessionWords(s) : "no session";
     const pinned = Boolean(this.pinned && s && this.pinned === s.sessionId);
     return h_flex().h(42).flex_none().px(10).gap(6).items_center().border_b(1).border_color(t.border)
       .child(div().flex_none().font_semibold().text_size(13).child("ledgr"))
@@ -748,6 +1056,7 @@ export class Panel {
           .tooltip(`Branch of ${st.d.sessions[s.parentSessionId]?.sessionName || String(s.parentSessionId).slice(0, 8)}${s.forkTurn !== undefined && s.forkTurn !== null ? `, forked at its turn ${s.forkTurn}` : ""}`)
           .child(svg(ICON("git-branch")).size(10).text_color(t.accent)).child(div().text_size(10).text_color(t.accent).child(`branch · depth ${s.depth ?? 1}`))))
         .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(name))
+        .when(Boolean(s?.terminal), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(P(s.terminal))))
         .child(svg(ICON(this.menu ? "chevron-down" : "chevron-right")).size(11).flex_none().text_color(t.dim)))
       .when(Boolean(s), (el) => el.child(div().id("lg-pin").size(22).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer()
         .tooltip(pinned ? "Unpin: follow the focused agent" : "Pin this session")
@@ -775,7 +1084,7 @@ export class Panel {
     const live = roots.filter((s) => s.state !== "ended").flatMap((s) => flat(s, 0));
     const ended = roots.filter((s) => s.state === "ended").flatMap((s) => flat(s, 0));
     const row = ([s, depth]) => {
-      const open = st.itemsOf(s.sessionId).filter((it) => it.status === "open").length;
+      const open = st.itemsOf(s.sessionId).filter((it) => st.counts(it)).length;
       const gone = !this.demo && !this.parentLive(s);
       const asking = this.forgetAsk === s.sessionId;
       return h_flex().id(`lg-s-${s.sessionId}`).h(26).pr(8).pl(8 + depth * 14).gap(6).items_center().rounded(6).cursor_pointer()
@@ -788,8 +1097,8 @@ export class Panel {
         })
         .when(depth > 0, (el) => el.child(svg(ICON("git-branch")).size(11).flex_none().text_color(t.accent)))
         .child(this.pill(t, agentLabel(s.agent)))
-        .child(div().flex_none().w(28).text_size(11).text_color(t.dim).child(s.terminal ?? ""))
-        .child(div().flex_1().min_w(0).truncate().text_size(12).child(s.sessionName || s.repo || s.sessionId.slice(0, 8)))
+        .child(div().flex_1().min_w(0).truncate().text_size(12).child(sessionWords(s)))
+        .when(Boolean(s.terminal), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(P(s.terminal))))
         .child(div().flex_none().text_size(11).text_color(open ? t.accent : t.dim).child(open ? `${open} open` : gone ? "gone" : s.state))
         .when(gone && !asking, (el) => el.child(div().id(`lg-f-${s.sessionId}`).flex_none().px(5).rounded(4).text_size(10.5).text_color(t.dim)
           .hover((x) => x.bg(t.hover).text_color(t.foreground)).tooltip("Forget this session, its items and its branches")
@@ -817,23 +1126,48 @@ export class Panel {
       .child(line("⌘J park a question · ⌘⇧J this panel · herdr-app do ledgr.demo shows sample data"));
   }
 
-  laneHead(t, key, title, count, open, onToggle, note) {
+  // `note`: extraction running (spinner). `status`: a quiet word in the header, never a fold
+  // (the asks lane says "agent working" while the turn runs).
+  // `extra`: a control drawn before the count (the asks lane's threshold menu).
+  laneHead(t, key, title, count, open, onToggle, note, status, extra) {
     return h_flex().id(`lane-${key}`).flex_none().h(24).px(4).mt(4).gap(6).items_center().cursor_pointer()
       .on_click((_e, cx) => { onToggle(!open); cx.notify(); })
       .child(svg(ICON(open ? "chevron-down" : "chevron-right")).size(11).flex_none().text_color(t.dim))
       .child(div().flex_1().text_size(10.5).font_semibold().text_color(t.dim).child(title))
       .when(Boolean(note), (el) => el.child(h_flex().flex_none().gap(4).items_center()
-        .child(svg(ICON("spinner")).size(11).text_color(t.working).spin(900))
+        .child(svg(ICON("spinner")).size(11).text_color(t.working).when(this.animOn(), (x) => x.spin(900)))
         .child(div().text_size(10.5).text_color(t.working).child(note))))
+      .when(!note && Boolean(status), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.working).opacity(0.75).child(status)))
+      .when(Boolean(extra), (el) => el.child(extra))
       .child(div().flex_none().text_size(11).text_color(count ? t.accent : t.dim).child(`${count} open`));
   }
 
-  // The asks lane is folded while the agent works and opens at the end of each turn; a click
-  // holds the person's choice until the next stop.
+  // The threshold control on the ASKED OF YOU head: which levels are open rows that count on the chip.
+  thresholdMenu(t, st) {
+    const th = st.threshold;
+    const item = (lv) => [lv, TH_WORDS[lv], (_e, cx) => this.setThreshold(lv, cx), { hint: lv === th ? "✓" : "" }];
+    return this.menuButton(t, "threshold", `${TH_WORDS[th]} ▾`, [item("blocking"), item("needed"), item("optional")],
+      { small: true, anchor: "top_right", width: 170, tip: "Which asks are open rows and count on the chip; the rest wait below the threshold (saved to ledgr-data/config.json)" });
+  }
+
+  // The asks lane's fold belongs to the person: only a click (or ledgr.fold-asks) changes it, and it
+  // is kept across reloads. ui.foldAsksWhileWorking: true restores the Phase 1 rule (folded while
+  // the agent works, open at each stop; a click holds until the next stop).
   asksOpen(s) {
+    if (this.cfg.ui?.foldAsksWhileWorking !== true) return !this.collapsed.asks;
     const m = this.asksManual;
     if (m && m.sid === s.sessionId && m.stopAt === (s.lastStopAt ?? 0)) return m.open;
     return s.state !== "working";
+  }
+
+  setAsksOpen(s, open) {
+    if (this.cfg.ui?.foldAsksWhileWorking === true) this.asksManual = { sid: s.sessionId, stopAt: s.lastStopAt ?? 0, open };
+    else this.setCollapsed("asks", !open);
+  }
+
+  setCollapsed(key, folded) {
+    this.collapsed[key] = Boolean(folded);
+    try { localStorage.setItem("lanes", JSON.stringify(this.collapsed)); } catch { /* memory only */ }
   }
 
   body(t, st, s) {
@@ -843,13 +1177,17 @@ export class Panel {
     const active = (it) => (it.status === "open" || it.status === "answered" || it.status === "rejoin_pending") && !stale(it);
     const asks = items.filter((it) => isAgentAsk(it) && active(it));
     const mine = items.filter((it) => isHuman(it) && active(it));
+    // Rows that just left a lane are drawn in place for their fade (ghostRow), never counted.
+    const gh = this.ghostItems(s.sessionId);
+    const draw = (it, child = false) => (it.__ghost ? this.ghostRow(t, st, s, it) : this.row(t, st, s, it, child));
+    const real = (list) => list.filter((it) => !it.__ghost);
     const out = [];
 
     out.push(this.laneHead(t, "mine", "YOUR QUESTIONS", mine.filter((it) => it.status === "open").length,
-      !this.collapsed.mine, (open) => { this.collapsed.mine = !open; }));
+      !this.collapsed.mine, (open) => this.setCollapsed("mine", !open)));
     if (!this.collapsed.mine) {
-      const sorted = [...mine].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
-      for (const it of sorted) out.push(this.row(t, st, s, it));
+      const sorted = [...mine, ...gh.filter(isHuman)].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+      for (const it of sorted) out.push(draw(it));
       if (!sorted.length) out.push(div().px(6).py(3).text_size(11.5).text_color(t.dim).child("No parked questions. ⌘J parks one, even mid-stream."));
       const brs = st.branchesOf(s.sessionId).filter((b) => this.branchVisible(b));
       if (brs.length) {
@@ -865,41 +1203,54 @@ export class Panel {
     out.push(div().h(1).mx(4).my(6).bg(t.border));
     const pend = st.pendingTurn(s.sessionId);
     const asksOpen = this.asksOpen(s);
-    out.push(this.laneHead(t, "asks", "ASKED OF YOU", asks.filter((it) => it.status === "open").length, asksOpen,
-      (open) => { this.asksManual = { sid: s.sessionId, stopAt: s.lastStopAt ?? 0, open }; },
-      pend !== null ? `extracting turn ${pend}` : null));
+    out.push(this.laneHead(t, "asks", "ASKED OF YOU", asks.filter((it) => st.counts(it)).length, asksOpen,
+      (open) => this.setAsksOpen(s, open),
+      pend !== null ? `extracting turn ${pend}` : null, s.state === "working" ? "agent working" : null, this.thresholdMenu(t, st)));
     if (asksOpen) {
       const turnsRec = st.d.turns[s.sessionId] ?? {};
       const errTurns = Object.entries(turnsRec).filter(([n, r]) => r?.asks?.source === "error" && Number(n) >= s.turn - 10).map(([n]) => Number(n));
-      const turns = [...new Set([...asks.map((it) => it.anchor.turn), ...errTurns])].sort((a, b) => b - a);
+      const asksAll = [...asks, ...gh.filter(isAgentAsk)];
+      const turns = [...new Set([...asksAll.map((it) => it.anchor.turn), ...errTurns])].sort((a, b) => b - a);
       const newest = turns[0];
+      const th = st.threshold;
       for (const turn of turns) {
-        const g = asks.filter((it) => it.anchor.turn === turn).sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+        const all = asksAll.filter((it) => it.anchor.turn === turn);
+        // Blocking asks first, then the message's order; asks below the threshold fold at the bottom.
+        const g = all.filter((it) => !isSuggestion(it, th))
+          .sort((a, b) => (isBlocking(b) ? 1 : 0) - (isBlocking(a) ? 1 : 0) || (a.seq ?? 0) - (b.seq ?? 0));
+        const sug = all.filter((it) => isSuggestion(it, th)).sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
         const k = `${s.sessionId}:${turn}`;
         const open = this.unfolded.has(k) || (turn === newest && !this.folded.has(k));
-        const nOpen = g.filter((it) => it.status === "open").length;
+        const nOpen = real(g).filter((it) => it.status === "open").length;
+        const nBlock = real(g).filter((it) => it.status === "open" && isBlocking(it)).length;
+        const nAll = real(g).length, nSug = real(sug).length;
         const ti = st.turnInfo(s.sessionId, turn);
-        if (!g.length) { if (ti?.asks?.source === "error") out.push(this.errorLine(t, s, turn, ti)); continue; }
+        if (!all.length) { if (ti?.asks?.source === "error") out.push(this.errorLine(t, s, turn, ti)); continue; }
+        const label = [
+          nAll ? `${nAll} ask${nAll === 1 ? "" : "s"}${open ? "" : `, ${nOpen} open${nBlock ? `, ${nBlock} blocking` : ""}`}` : null,
+          nSug && (!open || !nAll) ? `${nSug} below threshold` : null,
+        ].filter(Boolean).join(" · ");
         out.push(h_flex().id(`grp-${turn}`).flex_none().h(24).px(6).gap(6).items_center().rounded(5).cursor_pointer().hover((x) => x.bg(t.hover))
           .on_click((_e, cx) => {
             if (open) { this.unfolded.delete(k); this.folded.add(k); } else { this.folded.delete(k); this.unfolded.add(k); }
             cx.notify();
           })
-          .child(div().flex_1().text_size(11).text_color(t.muted).child(`turn ${turn} · ${g.length} ask${g.length === 1 ? "" : "s"}${open ? "" : `, ${nOpen} open`}`))
+          .child(div().flex_1().text_size(11).text_color(t.muted).child(`turn ${turn} · ${label}`))
           .child(svg(ICON(open ? "chevron-down" : "chevron-right")).size(10).flex_none().text_color(t.dim)));
         if (ti?.asks?.source === "error") out.push(this.errorLine(t, s, turn, ti));
         if (!open) continue;
         for (const it of g) {
-          out.push(this.row(t, st, s, it));
+          out.push(draw(it));
           for (const c of items.filter((c) => c.parentId === it.id && isHuman(c) && !isClosed(c))) out.push(this.row(t, st, s, c, true));
         }
-        if (g.some((it) => !isClosed(it))) {
-          const n = g.filter((it) => !isClosed(it) && this.answerOf(it)).length;
+        if (real(g).some((it) => !isClosed(it)) || real(sug).some((it) => this.answerOf(it))) {
+          const n = real([...g, ...sug]).filter((it) => !isClosed(it) && this.answerOf(it)).length;
           out.push(h_flex().flex_none().pl(6 + IND).pr(6).py(3).gap(8).items_center()
-            .child(this.btn(t, `copy-${turn}`, `Copy ${n} answer${n === 1 ? "" : "s"}${s.terminal ? ` for ${s.terminal}` : ""}`, (_e, cx) => this.copyAnswers(s, turn, cx),
-              { primary: n > 0, disabled: n === 0, tip: n ? `The answer sheet for turn ${turn}: clipboard + focus ${s.terminal ?? "the pane"}` : "Type an answer or pick an option on an ask first" }))
+            .child(this.btn(t, `copy-${turn}`, `Copy ${n} answer${n === 1 ? "" : "s"}${s.terminal ? ` for ${P(s.terminal)}` : ""}`, (_e, cx) => this.copyAnswers(s, turn, cx),
+              { primary: n > 0, disabled: n === 0, tip: n ? `The answer sheet for turn ${turn}: clipboard + focus ${P(s.terminal, "the pane")}` : "Type an answer or pick an option on an ask first" }))
             .child(div().flex_1().min_w(0).text_size(10.5).text_color(t.dim).child(n ? "clipboard + focus the pane; nothing is typed" : "type an answer or pick an option first")));
         }
+        if (sug.length) out.push(...this.suggestions(t, st, s, turn, sug));
       }
       if (!turns.length) out.push(div().px(6).py(3).text_size(11.5).text_color(t.dim).child("Nothing asked of you in this session."));
     }
@@ -915,6 +1266,24 @@ export class Panel {
       out.push(div().px(4).py(2).text_size(10.5).font_semibold().text_color(t.dim).child(`${title} (${list.length})`));
       for (const it of list) out.push(this.row(t, st, s, it));
     }
+    return out;
+  }
+
+  // Asks below the threshold: one folded line at the bottom of the turn group, "below threshold (N)";
+  // open, each row offers Promote (one click: an open row that counts). Folded again on a click, per turn.
+  suggestions(t, st, s, turn, sug) {
+    const k = `${s.sessionId}:${turn}`;
+    const open = this.sugOpen.has(k);
+    const th = st.threshold;
+    const f = this.fxOf(`sug:${k}`);   // a suggestion just arrived: the line lights up once
+    const n = sug.filter((it) => !it.__ghost).length;
+    const out = [h_flex().id(`sug-${turn}`).flex_none().h(24).px(6).gap(6).items_center().rounded(5).relative().cursor_pointer().hover((x) => x.bg(t.hover))
+      .tooltip(`Asks below the threshold (now ${TH_WORDS[th]}, set on the ASKED OF YOU head): kept, not counted on the chip`)
+      .on_click((_e, cx) => { if (open) this.sugOpen.delete(k); else this.sugOpen.add(k); cx.notify(); })
+      .when(Boolean(f), (el) => el.child(this.glow(`sug-glow-${turn}`, t.accent + "26", f, 5)))
+      .child(svg(ICON(open ? "chevron-down" : "chevron-right")).size(10).flex_none().text_color(t.dim))
+      .child(div().flex_1().text_size(11).text_color(t.dim).child(`below threshold (${n})`))];
+    if (open) for (const it of sug) out.push(it.__ghost ? this.ghostRow(t, st, s, it) : this.row(t, st, s, it));
     return out;
   }
 
@@ -944,9 +1313,12 @@ export class Panel {
       .child(fold("older", "older than a day")).child(fold("deferred", "deferred")).child(fold("closed", "closed"));
   }
 
-  glyph(t, it) {
+  glyph(t, it, sug = false) {
     let g = { open: ["●", t.accent], answered: ["◐", t.accent], resolved: ["✓", t.done], dismissed: ["✕", t.dim], deferred: ["◷", t.muted], rejoin_pending: ["↩", t.accent] }[it.status] ?? ["·", t.dim];
     if (isHuman(it) && it.status === "open" && it.anchor && !it.anchor.settled) g = ["○", t.dim];
+    // An open blocking ask: its own shape and colour (the agent stopped on it). A suggestion: hollow.
+    else if (it.status === "open" && isBlocking(it) && !sug) g = ["◆", t.blocked];
+    else if (it.status === "open" && sug) g = ["○", t.dim];
     return div().w(12).flex_none().text_size(11).text_color(g[1]).child(g[0]);
   }
 
@@ -961,8 +1333,10 @@ export class Panel {
       .child(label);
   }
 
-  row(t, st, s, it, child = false) {
-    const exp = this.expanded.has(it.id);
+  // `inert`: drawn for a ghost (a row that just left its lane): compact, nothing clickable.
+  row(t, st, s, it, child = false, inert = false) {
+    const exp = !inert && this.expanded.has(it.id);
+    const f = inert ? null : this.fxOf(it.id);
     const closed = isClosed(it);
     const agent = isAgentAsk(it);
     const dimmed = agent && it.origin === "extract_model" && this.cfg.extract?.mode === "always-model";
@@ -971,28 +1345,32 @@ export class Panel {
     const text = it.text || (it.kind === "bookmark" ? `bookmark: “${q.slice(0, 120)}”` : "");
     const badges = [];
     const brOf = isHuman(it) ? st.branchesFor(it.id).find((b) => b.status !== "refused" && b.status !== "failed") ?? null : null;
-    if (agent && it.blocking) badges.push(["blocking", t.blocked]);
+    const sug = agent && isSuggestion(it, st.threshold);
+    const level = agent ? levelOf(it) : null;
+    if (agent && level === "blocking") badges.push(["blocking", t.blocked]);
+    else if (agent && (sug || level !== "needed")) badges.push([level, t.dim]);
+    if (agent && it.promoted && !sug) badges.push(["promoted", t.muted]);
     if (agent && it.repeatOf) badges.push(["raised again", t.accent]);
     if (it.origin === "btw" || it.btwStagedAt) badges.push(["/btw", t.muted]);
-    if (isHuman(it) && it.askedAtTurn) badges.push([`sent t${it.askedAtTurn}`, t.muted]);
+    if (isHuman(it) && it.askedAtTurn) badges.push([`sent at turn ${it.askedAtTurn}`, t.muted]);
     const sub = [];
     if (isHuman(it)) {
       if (it.status === "open" && it.anchor && !it.anchor.settled) sub.push(`parked during turn ${it.anchor.turn}; anchors at end of turn`);
       else {
-        const bits = [`t${it.anchor?.turn ?? "?"}`];
-        if (parent && !child) bits.push(`re ${parent.handle}`);
+        const bits = [`turn ${it.anchor?.turn ?? "?"}`];
+        if (parent && !child) bits.push(`re ${H(parent)}`);
         if (q && it.kind !== "bookmark") bits.push(`“${q.slice(0, 48)}${q.length > 48 ? "…" : ""}”`);
         if (it.anchor?.interrupted) bits.push("turn interrupted");
-        if (it.anchor?.reanchoredFrom !== undefined) bits.push(`re-anchored from t${it.anchor.reanchoredFrom}`);
+        if (it.anchor?.reanchoredFrom !== undefined) bits.push(`re-anchored from turn ${it.anchor.reanchoredFrom}`);
         sub.push(bits.join(" · "));
       }
     }
     if (agent && it.status === "answered" && it.answer) sub.push(`→ ${squash(it.answer).slice(0, 140)}`);
     if (it.status === "rejoin_pending") {
       const rb = st.d.branches[it.rejoin?.branchId];
-      sub.push(`confluence from ${rb?.name ?? "its branch"} on the clipboard: resolves when it is sent in ${s?.terminal ?? "the trunk"}`);
+      sub.push(`the confluence from its branch${rb?.name ? ` (${rb.name})` : ""} is on the clipboard: resolves when it is sent in ${trunkWords(s?.terminal)}`);
     }
-    if (it.status === "resolved" && it.resolvedBy === "branch") sub.push(`resolved by branch ${st.d.branches[it.resolution?.branchId]?.name ?? ""} at turn ${it.resolvedTurn ?? "?"}`);
+    if (it.status === "resolved" && it.resolvedBy === "branch") { const rn = st.d.branches[it.resolution?.branchId]?.name; sub.push(`resolved by its branch${rn ? ` (${rn})` : ""} at turn ${it.resolvedTurn ?? "?"}`); }
     if (it.note) sub.push(it.note);
     if (it.status === "deferred") sub.push(it.deferUntil === "next_session" ? "deferred to next session" : typeof it.deferUntil === "number" ? `deferred until ${new Date(it.deferUntil).toLocaleString()}` : "deferred");
 
@@ -1000,38 +1378,54 @@ export class Panel {
     // width and wraps in full. No height cap anywhere in a row: a capped, overflow-hidden text box
     // cut its second line and let the options below draw against it.
     const head = v_flex().id(`rowh-${it.id}`).gap(2).cursor_pointer()
-      .on_click((_e, cx) => this.toggle(it, cx))
+      .when(!inert, (el) => el.on_click((_e, cx) => this.toggle(it, cx)))
       .child(h_flex().flex_wrap().gap(6).items_center()
-        .child(this.glyph(t, it))
-        .child(div().flex_none().font_semibold().text_size(11.5).text_color(t.muted).child(it.handle ?? "?"))
+        .child(this.glyph(t, it, sug))
+        .child(div().flex_none().font_semibold().text_size(11.5).text_color(t.muted).child(H(it)))
         .child(div().flex_none().text_size(10.5).text_color(t.dim).child(it.kind ?? ""))
         .children(badges.map(([b, c]) => div().flex_none().px(5).rounded(4).bg(c + "22").text_size(10).text_color(c).child(b)))
         .when(Boolean(brOf), (el) => el.child(h_flex().id(`brb-${it.id}`).flex_none().gap(3).px(5).rounded(4).items_center().bg(t.accent + "22")
-          .tooltip(`Branched: ${brOf.name} (${BR_WORD[this.branchLive(brOf)] ?? brOf.status})`)
-          .child(svg(ICON("git-branch")).size(10).flex_none().text_color(t.accent)).child(div().text_size(10).text_color(t.accent).child(brOf.name)))))
+          .tooltip(`Branched: its branch ${brOf.name} is ${BR_WORD[this.branchLive(brOf)] ?? brOf.status}`)
+          .child(svg(ICON("git-branch")).size(10).flex_none().text_color(t.accent)).child(div().text_size(10).text_color(t.accent).child("branched"))))
+        // A suggestion's one-click way out of the fold.
+        .when(sug && !closed && !inert, (el) => el.child(div().id(`promote-${it.id}`).flex_none().px(5).rounded(4).border_1().border_color(t.border)
+          .text_size(10).text_color(t.muted).cursor_pointer().hover((x) => x.bg(t.hover).text_color(t.foreground))
+          .tooltip("Make it an open ask: it leaves the below-threshold line and counts on the chip")
+          .on_click((_e, cx) => { cx.stop_propagation(); this.act(it.id, "promote", null, cx); }).child("promote"))))
       .when(Boolean(text), (el) => el.child(div().pl(IND).text_size(12.5)
-        .text_color(closed ? t.dim : dimmed ? t.muted : t.foreground).when(it.status === "dismissed", (x) => x.line_through()).child(text)));
+        .text_color(closed ? t.dim : dimmed || sug ? t.muted : t.foreground).when(it.status === "dismissed", (x) => x.line_through()).child(text)));
 
-    return v_flex().id(`row-${it.id}`).flex_none().rounded(7).px(6).py(6).gap(5).when(child, (el) => el.ml(IND).border_l(1.5).border_color(t.input))
+    // Motion: entering, the row fades in from 6 px above (staggered when several arrive) under a
+    // highlight (blocked colour for a blocking ask, else accent); answered, a `done` highlight, and
+    // an open row folds its details (fading first). The pointer passing over records the row's
+    // height, so a row closed by a click can collapse from it (observe, ghostRow).
+    const glowColor = f?.kind === "answered" ? t.done + "2e" : isBlocking(it) ? t.blocked + "2e" : t.accent + "26";
+    const ease = (ms) => ({ duration: ms, delay: (f?.k ?? 0) * 45, easing: "ease-out" });
+    return v_flex().id(`row-${it.id}`).flex_none().relative().rounded(7).px(6).py(6).gap(5).when(child, (el) => el.ml(IND).border_l(1.5).border_color(t.input))
       .when(exp, (el) => el.bg(t.raised)).hover((x) => x.bg(exp ? t.raised : t.hover))
+      .when(!inert && this.animOn(), (el) => el.on_mouse_move((e) => { const h = e?.bounds?.height; if (h > 0) this.rowH.set(it.id, { h, at: Date.now(), exp }); }))
+      .when(f?.kind === "enter", (el) => el.opacity(f.phase ? 1 : 0).top(f.phase ? 0 : -6).transition("opacity", ease(200)).transition("top", ease(260)))
+      .when(Boolean(f), (el) => el.child(this.glow(`glow-${it.id}`, glowColor, f, 7)))
       .child(head)
       // Options: a wrapped set of buttons under the text; a long one shrinks to the row and wraps.
       .when(agent && it.kind === "decide" && (it.options ?? []).length > 0, (el) => el.child(
         h_flex().flex_wrap().gap(6).pl(IND).children(it.options.map((o, i) => {
           const chosen = (it.draft ?? "").trim() === o;
           return div().id(`opt-${it.id}-${i}`).min_w(0).px(8).py(2).rounded(6).border_1().border_color(chosen ? t.accent : t.border)
-            .text_size(11.5).text_color(chosen ? t.accent : t.muted).when(!closed, (d) => d.cursor_pointer().hover((x) => x.bg(t.hover))
+            .text_size(11.5).text_color(chosen ? t.accent : t.muted).when(!closed && !inert, (d) => d.cursor_pointer().hover((x) => x.bg(t.hover))
               .on_click((_e, cx) => { cx.stop_propagation(); this.setDraft(it, o, cx); }))
             .child(o === it.recommended ? `${o} (rec.)` : o);
         }))))
       .children(sub.map((line) => div().pl(IND).text_size(11).text_color(t.dim).child(line)))
-      .when(exp, (el) => el.child(this.details(t, st, s, it)));
+      .when(exp, (el) => el.child(this.details(t, st, s, it)
+        .when(Boolean(f?.fold), (d) => d.opacity(f.phase ? 0 : 1).transition("opacity", { duration: 160, easing: "ease-out" }))));
   }
 
   passageView(t, it, text, whole) {
     const { before, hit, after } = passageParts(text, it.anchor?.quote, whole);
     const md = (k, body) => TextView.markdown(`ps-${k}-${it.id}`, body);
-    return v_flex().id(`ps-box-${it.id}`).max_h(whole ? 4000 : 260).overflow_y_scrollbar().rounded(6).border_1().border_color(t.border).bg(t.background).px(8).py(6).gap(4).text_size(12)
+    // No height cap: the panel's own list scrolls (a capped box inside it neither scrolled nor showed a bar).
+    return v_flex().id(`ps-box-${it.id}`).rounded(6).border_1().border_color(t.border).bg(t.background).px(8).py(6).gap(4).text_size(12)
       .when(Boolean(before), (el) => el.child(div().text_color(t.muted).child(md("b", before))))
       .when(Boolean(hit), (el) => el.child(div().pl(7).py(2).border_l(2).border_color(t.accent).bg(t.accent + "14").rounded(3).child(md("h", hit))))
       .when(Boolean(after), (el) => el.child(div().text_color(t.muted).child(md("a", after))));
@@ -1042,61 +1436,83 @@ export class Panel {
     const closed = isClosed(it);
     const k = `${it.anchor?.sessionId}:${it.anchor?.turn}`;
     const text = this.passages.get(k);
+    // Only the quote shows by default; the anchoring message waits behind "show whole message" and
+    // opens at its full height (the panel's list scrolls), the quote's paragraph highlighted.
     const whole = this.whole.has(it.id);
-    const passage = text === undefined
-      ? div().text_size(11).text_color(t.dim).child("Loading passage…")
-      : text === null
-        ? div().text_size(11).text_color(t.dim).child(`Passage not saved for turn ${it.anchor?.turn} (ledgr-data/turns/…/${it.anchor?.turn}.md).`)
-        : v_flex().gap(3)
-          .child(this.passageView(t, it, text, whole))
-          .child(div().id(`whole-${it.id}`).text_size(10.5).text_color(t.accent).cursor_pointer()
-            .on_click((_e, cx) => { whole ? this.whole.delete(it.id) : this.whole.add(it.id); cx.notify(); })
-            .child(whole ? "show less" : "show whole message"));
+    const toggle = div().id(`whole-${it.id}`).text_size(10.5).text_color(t.accent).cursor_pointer()
+      .on_click((_e, cx) => { whole ? this.whole.delete(it.id) : this.whole.add(it.id); cx.notify(); })
+      .child(whole ? "hide whole message" : "show whole message");
+    const passage = !whole ? toggle
+      : text === undefined
+        ? v_flex().gap(3).child(div().text_size(11).text_color(t.dim).child("Loading passage…")).child(toggle)
+        : text === null
+          ? v_flex().gap(3).child(div().text_size(11).text_color(t.dim).child(`Passage not saved for turn ${it.anchor?.turn} (ledgr-data/turns/…/${it.anchor?.turn}.md).`)).child(toggle)
+          : v_flex().gap(3).child(this.passageView(t, it, text, true)).child(toggle);
+    const quote = it.anchor?.quote ? squash(it.anchor.quote) : "";
     const input = this.inputs.get(it.id);
     const tBusy = !this.demo && busy(s.terminal);
-    const a = [];
+    // Few buttons: Done, Defer ▾ (tomorrow, in a week, next session), the row's own primary action
+    // (Promote, Branch…, Copy confluence again) and ⋯ for the rest (Not needed, Ask about this, the
+    // question's copy actions, Go to anchor or Resume session).
+    const a = [], more = [];
     const b = (id, label, fn, o) => a.push(this.btn(t, `${id}-${it.id}`, label, fn, o));
+    const m = (id, label, fn, o) => more.push([id, label, fn, o]);
     const pend = it.status === "rejoin_pending";
     const pendBr = pend ? st.d.branches[it.rejoin?.branchId] ?? null : null;
     if (closed || it.status === "deferred") b("reopen", "Reopen", (_e, cx) => this.act(it.id, "reopen", null, cx));
-    if (pend) {
-      if (pendBr?.conclusion?.message) b("again", "Copy confluence again", (_e, cx) => this.copyConfluence(st, pendBr, cx), { primary: true });
-      b("calloff", "Call off", (_e, cx) => this.act(it.id, "reopen", null, cx), { tip: "Back to open; the branch keeps your edited conclusion for the next Conclude" });
-    }
-    if (!closed) {
-      b("resolve", "Resolve", (_e, cx) => this.act(it.id, "resolve", null, cx));
-      if (it.status !== "deferred" && !pend) {
-        b("defer1", "Defer: tomorrow", (_e, cx) => this.act(it.id, "defer", Date.now() + DAY, cx));
-        b("defer2", "Defer: next session", (_e, cx) => this.act(it.id, "defer", "next_session", cx));
-      }
-      if (!pend) b("dismiss", "Dismiss", (_e, cx) => this.act(it.id, "dismiss", null, cx));
-    }
-    if (agent && !closed) b("ask", "Ask about this", (_e, cx) => this.askAbout(it, s, cx));
-    if (isHuman(it) && !closed && !pend && it.text) {
-      b("prompt", "Copy for prompt", (_e, cx) => this.stageQuestion(it, s, false, cx), { tip: `[${it.handle}] in a prompt marks it sent` });
-      b("btw", "Stage /btw", (_e, cx) => this.stageQuestion(it, s, true, cx));
-    }
+    if (pend && pendBr?.conclusion?.message) b("again", "Copy confluence again", (_e, cx) => this.copyConfluence(st, pendBr, cx), { primary: true });
+    if (!closed) b("done", "Done", (_e, cx) => this.act(it.id, "resolve", null, cx), { tip: DONE_TIP });
+    if (!closed && it.status !== "deferred" && !pend) a.push(this.menuButton(t, `defer-${it.id}`, "Defer ▾", [
+      ["tomorrow", "Tomorrow", (_e, cx) => this.act(it.id, "defer", Date.now() + DAY, cx)],
+      ["week", "In a week", (_e, cx) => this.act(it.id, "defer", Date.now() + 7 * DAY, cx)],
+      ["next", "Next session", (_e, cx) => this.act(it.id, "defer", "next_session", cx), { tip: "Opens again when a session starts in the same folder" }],
+    ], { width: 150 }));
+    if (agent && !closed && isSuggestion(it, st.threshold)) b("promote", "Promote", (_e, cx) => this.act(it.id, "promote", null, cx), { tip: "Make it an open ask that counts on the chip" });
     if (isHuman(it) && !closed && !pend) {
       const ok = this.branchable(s);
       const again = st.branchesFor(it.id).some((x) => x.status !== "refused" && x.status !== "failed");
       b("branch", again ? "Branch again…" : "Branch…", (_e, cx) => this.openConfirm(it, s, cx),
         { disabled: !ok, tip: ok ? "Fork this session into a new Claude session to settle this question" : "Branching needs a Claude Code session with the ledgr hooks" });
     }
-    b("go", "Go to anchor", (_e, cx) => this.goTo(it, s, cx), { disabled: tBusy, tip: tBusy ? "The agent is working: keys would land in its prompt" : "Focus the pane and open its search" });
-    return v_flex().pl(IND).pt(4).gap(8)
-      .when(Boolean(it.anchor?.quote) && it.kind !== "bookmark", (el) => el.child(div().text_size(11.5).italic().text_color(t.muted).child(`“${squash(it.anchor.quote)}”`)))
+    if (!closed && !pend) m("dismiss", "Not needed", (_e, cx) => this.act(it.id, "dismiss", null, cx), { tip: NOT_NEEDED_TIP });
+    if (pend) m("calloff", "Call off the confluence", (_e, cx) => this.act(it.id, "reopen", null, cx), { tip: "Back to open; the branch keeps your edited conclusion for the next Conclude" });
+    if (agent && !closed) m("ask", "Ask about this", (_e, cx) => this.askAbout(it, s, cx));
+    if (isHuman(it) && !closed && !pend && it.text) {
+      m("prompt", "Copy for prompt", (_e, cx) => this.stageQuestion(it, s, false, cx), { tip: `Copies “[${it.handle}] …”: that tag in a prompt marks ${H(it)} sent` });
+      m("btw", "Stage /btw", (_e, cx) => this.stageQuestion(it, s, true, cx));
+    }
+    // Go to anchor needs the session's terminal; when it is gone, a Claude session can be resumed in a
+    // new pane instead (the saved passage above stays either way).
+    const gone = this.terminalGone(st, s);
+    const rs = s.resume;
+    const resuming = Boolean(rs && (rs.state === "launching" || rs.state === "launched") && Date.now() - (rs.at ?? 0) < 60000);
+    if (!gone) m("go", "Go to anchor", (_e, cx) => this.goTo(it, s, cx), { disabled: tBusy, tip: tBusy ? "The agent is working: keys would land in its prompt" : "Focus the pane and open its search" });
+    else if (!this.branchable(s)) m("go", "Go to anchor", () => {}, { disabled: true, tip: `Its terminal${s.terminal ? ` (${P(s.terminal)})` : ""} is gone, and only a Claude Code session can be resumed. The saved passage is above.` });
+    else {
+      const tx = this.transcriptOk(s);
+      if (tx === false) m("resume", "Transcript gone", () => {}, { disabled: true, tip: `No transcript at ${transcriptPathOf(s, home())}: nothing to resume. The saved passage is above.` });
+      else m("resume", resuming ? "Resuming…" : "Resume session…", (_e, cx) => this.resume(s, cx),
+        { disabled: resuming || tx !== true, tip: tx === undefined ? "Checking the transcript…" : `Its terminal${s.terminal ? ` (${P(s.terminal)})` : ""} is gone: start claude --resume ${String(s.sessionId).slice(0, 8)} in ${s.cwd || "its folder"}, in a new pane` });
+    }
+    if (more.length) a.push(this.menuButton(t, `more-${it.id}`, "⋯", more, { anchor: "top_right", tip: "More actions" }));
+    return v_flex().id(`det-${it.id}`).pl(IND).pt(4).gap(8)
+      // The quote, capped: an over-long one (a whole message taken as the ask) ends in "…".
+      .when(Boolean(quote) && it.kind !== "bookmark", (el) => el.child(div().text_size(11.5).italic().text_color(t.muted)
+        .child(`“${quote.length > 300 ? `${quote.slice(0, 280).trimEnd()}…` : quote}”`)))
       .child(passage)
       .when(agent && !closed && Boolean(input), (el) => el.child(v_flex().gap(4)
         .child(h_flex().gap(6).items_center()
           .child(h_flex().flex_1().min_w(0).h(28).px(8).items_center().rounded(7).border_1().border_color(t.input).bg(t.background)
             .child(Input.new(input).flex_1().h_full().text_size(12).text_color(t.foreground)))
           .child(this.btn(t, `copy1-${it.id}`, "Copy answer", (_e, cx) => this.copyAnswer(it, s, cx),
-            { primary: Boolean(this.answerOf(it)), disabled: !this.answerOf(it), tip: this.answerOf(it) ? `${it.handle}'s answer alone: clipboard + focus ${s.terminal ?? "the pane"}` : "Type an answer or pick an option first" })))
+            { primary: Boolean(this.answerOf(it)), disabled: !this.answerOf(it), tip: this.answerOf(it) ? `${H(it)}'s answer alone: clipboard + focus ${P(s.terminal, "the pane")}` : "Type an answer or pick an option first" })))
         .child(div().text_size(10.5).text_color(t.dim).child("Drafts reach the agent via Copy answer(s); Resolve only records it here."))))
       .child(h_flex().flex_wrap().gap(6).children(a))
+      .when(gone && rs?.state === "failed", (el) => el.child(div().text_size(10.5).text_color(t.blocked).child(`Resume did not start: ${rs.error ?? "unknown error"}`)))
+      .when(gone && rs?.state === "launched" && Boolean(rs.note), (el) => el.child(div().text_size(10.5).text_color(t.dim).child(`Resumed in ${P(rs.terminal)}: ${rs.note}`)))
       .when(this.confirm?.itemId === it.id && isHuman(it) && !closed, (el) => el.child(this.confirmBox(t, st, s, it)))
-      .child(div().text_size(10).text_color(t.dim).child(
-        `${it.handle} · ${it.origin ?? ""} · turn ${it.anchor?.turn ?? "?"}${it.anchor?.hash ? ` · #${it.anchor.hash}` : ""}`));
+      .child(div().id(`foot-${it.id}`).text_size(10).text_color(t.dim).when(Boolean(it.anchor?.hash), (el) => el.tooltip(`passage #${it.anchor.hash}`))
+        .child([H(it), originWords(it.origin), agent ? levelOf(it) : null, `turn ${it.anchor?.turn ?? "?"}`].filter(Boolean).join(" · ")));
   }
 
   // ── branch rendering (Phase 2) ───────────────────────────────────────
@@ -1122,7 +1538,7 @@ export class Panel {
     return v_flex().id(`brc-${it.id}`).gap(8).p(8).rounded(7).border_1().border_color(m.refused ? t.blocked : t.accent).bg(t.background)
       .child(h_flex().gap(6).items_center()
         .child(svg(ICON("git-branch")).size(12).flex_none().text_color(m.refused ? t.blocked : t.accent))
-        .child(div().flex_1().min_w(0).font_semibold().text_size(12).child(`Branch ${it.handle}: what the branch will know`)))
+        .child(div().flex_1().min_w(0).font_semibold().text_size(12).child(`Branch ${H(it)}: what the branch will know`)))
       .child(this.manifestView(t, m))
       .child(h_flex().flex_wrap().gap(6).items_center()
         .child(seg(`brc-split-${it.id}`, m.parentDepth ? "beside its parent" : "beside the trunk", !c.isolate && c.placement === "split", () => { c.placement = "split"; c.isolate = false; },
@@ -1175,7 +1591,7 @@ export class Panel {
     const when = (ms) => (ms ? new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : null);
     const facts = [
       child ? `session ${child.sessionId.slice(0, 8)}${child.turn ? ` · its turn ${child.turn}` : ""}` : br.childSid ? `session ${br.childSid.slice(0, 8)} (planned)` : null,
-      br.terminal ? `terminal ${br.terminal}` : null,
+      br.terminal ? P(br.terminal) : null,
       br.placement === "split" ? "pane beside the trunk" : br.placement === "agent" ? "sub-agent" : null,
       br.isolate ? "own worktree" : null,
       when(br.startedAt ?? br.launchedAt ?? br.createdAt) ? `started ${when(br.startedAt ?? br.launchedAt ?? br.createdAt)}` : null,
@@ -1185,13 +1601,14 @@ export class Panel {
       .on_click((_e, cx) => { if (open) this.brOpen.delete(br.id); else this.brOpen.add(br.id); cx.notify(); })
       .child(h_flex().gap(6).items_center()
         .child(div().w(12).flex_none().flex().items_center()
-          .child(spin ? svg(ICON("spinner")).size(11).text_color(t.working).spin(900) : svg(ICON("git-branch")).size(11).text_color(color)))
-        .child(div().flex_1().min_w(0).font_semibold().text_size(11.5).text_color(t.foreground).child(br.name ?? br.id.slice(0, 11)))
+          .child(spin ? svg(ICON("spinner")).size(11).text_color(t.working).when(this.animOn(), (x) => x.spin(900)) : svg(ICON("git-branch")).size(11).text_color(color)))
+        .child(div().flex_none().font_semibold().text_size(11.5).text_color(t.foreground).child(branchWords(it)))
+        .child(div().flex_1().min_w(0).truncate().text_size(10.5).text_color(t.dim).child(br.name ?? br.id.slice(0, 11)))
         .when(kids.length > 0, (el) => el.child(div().flex_none().px(5).rounded(4).bg(t.accent + "22").text_size(10).text_color(t.accent)
           .child(`${kids.length} open`)))
         .child(svg(ICON(open ? "chevron-down" : "chevron-right")).size(10).flex_none().text_color(t.dim)))
       .child(div().pl(IND).text_size(11).text_color(t.muted)
-        .child(`${it?.handle ?? "?"} · depth ${br.depth ?? "?"} · ${BR_WORD[live] ?? live ?? "?"}${br.status === "rejoined" && live !== "rejoined" ? ` · rejoined t${br.rejoinedTurn ?? "?"}` : br.status === "concluded" && live !== "concluded" ? " · concluded" : ""}`));
+        .child(`depth ${br.depth ?? "?"} · ${BR_WORD[live] ?? live ?? "?"}${br.status === "rejoined" && live !== "rejoined" ? ` · rejoined at turn ${br.rejoinedTurn ?? "?"}` : br.status === "concluded" && live !== "concluded" ? " · concluded" : ""}`));
     const focusOk = Boolean(br.terminal) && !["closed", "ended", "failed", "refused", "nostart"].includes(live);
     const canC = this.canConclude(st, br);
     return v_flex().id(`br-${br.id}`).flex_none().rounded(7).px(6).py(6).gap(5).ml(4).border_l(1.5).border_color(t.input)
@@ -1214,25 +1631,34 @@ export class Panel {
         .when(this.conclude?.branchId === br.id, (x) => x.child(this.concludeBox(t, st, s, br)))
         .when(this.preOpen.has(br.id) && Boolean(br.preamble), (x) => x.child(div().rounded(5).border_1().border_color(t.border).bg(t.background).px(7).py(4)
           .text_size(11).text_color(t.muted).child(TextView.markdown(`brp-${br.id}`, br.preamble))))
-        .child(h_flex().flex_wrap().gap(6)
-          .child(this.btn(t, `brf-${br.id}`, "Focus", (_e, cx) => this.focusBranch(br, cx),
-            { disabled: !focusOk, tip: focusOk ? "Focus the branch's pane (a peek when it has none)" : "The branch has no live terminal" }))
-          .when(canC && this.conclude?.branchId !== br.id, (x) => x.child(this.btn(t, `brk-${br.id}`, br.status === "concluded" ? "Edit conclusion…" : "Conclude…",
-            (_e, cx) => this.openConclude(st, br, cx), { primary: br.status !== "concluded" && Boolean(concl), tip: "Edit what goes back to the trunk, then stage it on the clipboard" })))
-          .when(!canC && br.status !== "rejoined", (x) => x.child(this.btn(t, `brk-${br.id}`, "Conclude…", () => {}, { disabled: true,
-            tip: it && isClosed(it) ? `${it.handle} is ${it.status}: nothing to carry back` : "The branch has not started" })))
-          .when(br.status === "concluded" && Boolean(br.conclusion?.message), (x) => x.child(this.btn(t, `brc2-${br.id}`, "Copy again",
-            (_e, cx) => this.copyConfluence(st, br, cx), { tip: "The staged message to the clipboard again, and focus the trunk" })))
-          .when(canC && !concl && !staged && focusOk && this.conclude?.branchId !== br.id, (x) => x.child(this.btn(t, `bra-${br.id}`, "Ask for a conclusion",
-            (_e, cx) => this.askForConclusion(st, br, cx), { tip: "Stage a short request for a ledgr-conclusion block in the branch's pane" })))
-          .when(br.status === "rejoined" && !br.closedAt && this.closeAsk !== br.id && live !== "closed", (x) => x.child(this.btn(t, `brx-${br.id}`, "Close branch",
-            (_e, cx) => { this.closeAsk = br.id; cx.notify(); }, { tip: "End the branch's terminal; its record and conclusion stay" })))
-          .when(this.closeAsk === br.id, (x) => x
-            .child(div().id(`brxy-${br.id}`).flex_none().h(22).px(7).flex().items_center().rounded(6).bg(t.blocked + "26").text_size(11).text_color(t.blocked).cursor_pointer()
-              .on_click((_e, cx) => { cx.stop_propagation(); this.closeBranch(br, cx); }).child(`End ${br.terminal ?? br.name}`))
-            .child(this.btn(t, `brxn-${br.id}`, "Keep", (_e, cx) => { this.closeAsk = null; cx.notify(); })))
-          .when(Boolean(br.preamble), (x) => x.child(this.btn(t, `brp-b-${br.id}`, this.preOpen.has(br.id) ? "Hide preamble" : "Preamble",
-            (_e, cx) => { if (this.preOpen.has(br.id)) this.preOpen.delete(br.id); else this.preOpen.add(br.id); cx.notify(); }))))));
+        .child(this.branchActions(t, st, s, br, { canC, concl, staged, focusOk, live, it }))));
+  }
+
+  // A branch row's buttons, reduced like an item's: the one primary step (Conclude… / Edit
+  // conclusion…, or Close branch after rejoin, with its End / Keep) and ⋯ for Focus, Copy again,
+  // Ask for a conclusion and the preamble.
+  branchActions(t, st, s, br, { canC, concl, staged, focusOk, live, it }) {
+    const more = [];
+    more.push(["focus", "Focus the branch", (_e, cx) => this.focusBranch(br, cx),
+      { disabled: !focusOk, tip: focusOk ? "Focus the branch's pane (a peek when it has none)" : "The branch has no live terminal" }]);
+    if (br.status === "concluded" && br.conclusion?.message) more.push(["again", "Copy the confluence again", (_e, cx) => this.copyConfluence(st, br, cx),
+      { tip: "The staged message to the clipboard again, and focus the trunk" }]);
+    if (canC && !concl && !staged && focusOk && this.conclude?.branchId !== br.id) more.push(["ask", "Ask for a conclusion", (_e, cx) => this.askForConclusion(st, br, cx),
+      { tip: "Stage a short request for a ledgr-conclusion block in the branch's pane" }]);
+    if (!canC && br.status !== "rejoined") more.push(["conclude", "Conclude…", () => {}, { disabled: true,
+      tip: it && isClosed(it) ? `${H(it)} is ${it.status}: nothing to carry back` : "The branch has not started" }]);
+    if (br.preamble) more.push(["pre", this.preOpen.has(br.id) ? "Hide the preamble" : "Show the preamble",
+      (_e, cx) => { if (this.preOpen.has(br.id)) this.preOpen.delete(br.id); else this.preOpen.add(br.id); cx.notify(); }]);
+    return h_flex().flex_wrap().gap(6)
+      .when(canC && this.conclude?.branchId !== br.id, (x) => x.child(this.btn(t, `brk-${br.id}`, br.status === "concluded" ? "Edit conclusion…" : "Conclude…",
+        (_e, cx) => this.openConclude(st, br, cx), { primary: br.status !== "concluded" && Boolean(concl), tip: "Edit what goes back to the trunk, then stage it on the clipboard" })))
+      .when(br.status === "rejoined" && !br.closedAt && this.closeAsk !== br.id && live !== "closed", (x) => x.child(this.btn(t, `brx-${br.id}`, "Close branch",
+        (_e, cx) => { this.closeAsk = br.id; cx.notify(); }, { tip: "End the branch's terminal; its record and conclusion stay" })))
+      .when(this.closeAsk === br.id, (x) => x
+        .child(div().id(`brxy-${br.id}`).flex_none().h(22).px(7).flex().items_center().rounded(6).bg(t.blocked + "26").text_size(11).text_color(t.blocked).cursor_pointer()
+          .on_click((_e, cx) => { cx.stop_propagation(); this.closeBranch(br, cx); }).child(`End ${P(br.terminal, br.name)}`))
+        .child(this.btn(t, `brxn-${br.id}`, "Keep", (_e, cx) => { this.closeAsk = null; cx.notify(); })))
+      .child(this.menuButton(t, `brmore-${br.id}`, "⋯", more, { anchor: "top_right", tip: "More actions" }));
   }
 
   // Text with line breaks, one div per line (a div does not break at "\n").
@@ -1247,12 +1673,12 @@ export class Panel {
     const when = (ms) => (ms ? new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "");
     return v_flex().gap(3)
       .child(div().text_size(10.5).font_semibold().text_color(rejoined ? t.done : t.accent).child(rejoined
-        ? `REJOINED · landed in ${s.terminal ?? "the trunk"} at turn ${br.rejoinedTurn ?? "?"} (${when(br.rejoinedAt)})`
+        ? `REJOINED · landed in ${trunkWords(s.terminal)} at turn ${br.rejoinedTurn ?? "?"} (${when(br.rejoinedAt)})`
         : `CONFLUENCE STAGED ${when(br.concludedAt)} · waiting for the paste`))
       .child(div().rounded(5).border_1().border_color(rejoined ? t.done : t.accent).bg(t.background).px(7).py(4).text_size(11.5).children(this.lines(br.conclusion?.text ?? "(no conclusion text recorded)")))
       .when(!rejoined, (x) => x.child(div().text_size(10.5).text_color(this.trunkWord(s) === "working" ? t.working : t.dim).child(this.trunkLine(s, it))))
       .when(rejoined, (x) => x.child(div().text_size(10.5).text_color(t.dim).child(
-        `${it?.handle ?? "The question"} resolved by this branch · line in ledgr-data/sessions/${String(s.sessionId).slice(0, 8)}…/decisions.md${br.closedAt ? ` · terminal closed ${when(br.closedAt)}` : ""}`)))
+        `${it ? H(it) : "The question"} resolved by this branch · line in ledgr-data/sessions/${String(s.sessionId).slice(0, 8)}…/decisions.md${br.closedAt ? ` · terminal closed ${when(br.closedAt)}` : ""}`)))
       .when(Boolean(br.closeError), (x) => x.child(div().text_size(10.5).text_color(t.blocked).child(`Close failed: ${br.closeError}`)));
   }
 
@@ -1273,7 +1699,7 @@ export class Panel {
     return v_flex().id(`brk-box-${br.id}`).gap(8).p(8).rounded(7).border_1().border_color(t.accent).bg(t.background)
       .child(h_flex().gap(6).items_center()
         .child(svg(ICON("git-branch")).size(12).flex_none().text_color(t.accent))
-        .child(div().flex_1().min_w(0).font_semibold().text_size(12).child(`Conclude ${br.name}: what goes back to ${s.terminal ?? "the trunk"}`)))
+        .child(div().flex_1().min_w(0).font_semibold().text_size(12).child(`Conclude the ${branchWords(it)}: what goes back to ${trunkWords(s.terminal)}`)))
       .child(div().text_size(10.5).text_color(t.dim).child(src))
       .child(v_flex().rounded(7).border_1().border_color(t.input).bg(t.background).px(6).py(4)
         .child(Textarea.new(k.input).w_full().text_size(12).text_color(t.foreground)))

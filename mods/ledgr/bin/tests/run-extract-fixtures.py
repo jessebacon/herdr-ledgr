@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Extraction fixtures (spec 9.4): mods/ledgr/fixtures/extract/<name>.md with expectations in
-<name>.json ("offline" and "live" sections). Runs adapters/claude/extract.sh --dry-run per fixture
+<name>.json ("offline" and "live" sections). Level checks (severity, 2026-11-05): "levels" (exact
+count per level), "level_min" (at least), "levels_only" (no other level), "level_by_text" ({"a|b":
+level}: an ask whose text or quote contains a or b, case-insensitive, has that level), "rejected_min";
+"quote_max" (no quote longer than that many characters); "none_matching" (no ask whose text or quote
+contains any of these, case-insensitive). Runs adapters/claude/extract.sh --dry-run per fixture
 with a throwaway LEDGR_DATA (default config).
 
   python3 -I -B tests/run-extract-fixtures.py                 offline: the real key is never read
@@ -65,6 +69,33 @@ def check(res, exp):
         errs.append(f"only {sum(1 for a in asks if a.get('quote'))} quotes verified")
     if "repeat_of" in exp and sorted(a.get("repeat_of") for a in asks if a.get("repeat_of")) != sorted(exp["repeat_of"]):
         errs.append(f"repeat_of {[a.get('repeat_of') for a in asks]} != {exp['repeat_of']}")
+    by_level = {}
+    for a in asks:
+        by_level[a.get("level")] = by_level.get(a.get("level"), 0) + 1
+    if "levels" in exp and any(by_level.get(k, 0) != v for k, v in exp["levels"].items()):
+        errs.append(f"levels {by_level} != {exp['levels']}")
+    for k, v in (exp.get("level_min") or {}).items():
+        if by_level.get(k, 0) < v:
+            errs.append(f"{by_level.get(k, 0)} {k} < {v} ({by_level})")
+    if "levels_only" in exp and any(k not in exp["levels_only"] for k in by_level):
+        errs.append(f"levels {by_level} outside {exp['levels_only']}")
+    for pat, want in (exp.get("level_by_text") or {}).items():
+        alts = [x.lower() for x in pat.split("|")]
+        hits = [a for a in asks if any(x in (a.get("text") or "").lower() or x in (a.get("quote") or "").lower() for x in alts)]
+        if not hits:
+            errs.append(f"no ask matching {pat!r}")
+        elif not any(a.get("level") == want for a in hits):
+            errs.append(f"{pat!r}: {[(a['text'], a.get('level')) for a in hits]} not {want}")
+    for pat in exp.get("none_matching") or []:
+        hits = [a["text"] for a in asks if pat.lower() in (a.get("text") or "").lower() or pat.lower() in (a.get("quote") or "").lower()]
+        if hits:
+            errs.append(f"an ask matches {pat!r}: {hits}")
+    if "quote_max" in exp and any(len(a.get("quote") or "") > exp["quote_max"] for a in asks):
+        errs.append(f"a quote over {exp['quote_max']} characters: {[len(a.get('quote') or '') for a in asks]}")
+    if "rejected_min" in exp and len(res.get("rejected") or []) < exp["rejected_min"]:
+        errs.append(f"rejected {res.get('rejected')} has fewer than {exp['rejected_min']}")
+    if any(a.get("level") not in ("blocking", "needed", "optional") for a in asks):
+        errs.append("an ask without a valid level")
     cost = ((res.get("usage") or {}).get("cost_usd_est"))
     if "max_cost" in exp and (cost is None or cost > exp["max_cost"]):
         errs.append(f"cost {cost} not under {exp['max_cost']}")
@@ -111,9 +142,9 @@ def main(argv):
             print(f"     - {e}")
         if live:
             for a in res.get("asks") or []:
-                print(f"     [{a['kind']}] {a['text']}" + (f"  options={a['options']} rec={a['recommended']!r}" if a["options"] else "")
-                      + (f"  blocking" if a["blocking"] else "") + (f"  repeat_of={a['repeat_of_handle']}" if a.get("repeat_of") else "")
-                      + ("" if a.get("quote") else "  (quote dropped)"))
+                print(f"     [{a.get('level')}/{a['kind']}] {a['text']}" + (f"  options={a['options']} rec={a['recommended']!r}" if a["options"] else "")
+                      + (f"  repeat_of={a['repeat_of_handle']}" if a.get("repeat_of") else "")
+                      + (f"  quote({len(a['quote'])}): “{a['quote'][:90]}{'…' if len(a['quote']) > 90 else ''}”" if a.get("quote") else "  (quote dropped)"))
         fails += bool(errs)
     import shutil
     shutil.rmtree(tmp, ignore_errors=True)

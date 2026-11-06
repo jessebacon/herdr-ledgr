@@ -20,6 +20,13 @@
 // to ledgr-data/sessions/<sid>/decisions.md (out.decisions). `answers_landed` (the answer sheet's
 // marker) marks the listed asks answered. `close_branch` (panel, after rejoin) asks the writer to end
 // the branch terminal (out.close); the record stays. See confluence.js for the message formats.
+//
+// Severity (2026-11-05): every agent ask has a `level`, blocking > needed > optional (bin/lib/
+// ledgr_asks.py; legacy items without one read as needed, or blocking when `blocking` is true).
+// `extract.threshold` (config.json, default needed; the writer sets `store.threshold`) splits them:
+// at or above it an ask is an open row and counts on the chip; below it the ask is a "suggestion",
+// kept, shown folded under its turn and not counted, until the person promotes it (act "promote",
+// `promoted: true`). An open blocking ask gives the chip its own state, "blocking".
 import { createHash, randomUUID } from "crypto";
 import { LIMITS, agentLabel } from "./config.js";
 import { DEFAULT_MAX_DEPTH, manifest, preamble, branchName, branchLabel, depthOf } from "./branch.js";
@@ -30,11 +37,26 @@ const OPEN_STATES = new Set(["open", "answered", "deferred", "rejoin_pending"]);
 const AGENT = "agent_to_human", HUMAN = "human_to_agent";
 const ASK_KINDS = new Set(["decide", "confirm", "do", "provide", "review"]);
 const Q_KINDS = new Set(["question", "note", "bookmark"]);
-const OWN_EVENTS = new Set(["act", "retry", "branch", "forget", "conclude", "close_branch"]);
+const OWN_EVENTS = new Set(["act", "retry", "branch", "forget", "conclude", "close_branch", "resume"]);
 
 export const isAgentAsk = (it) => it?.direction === AGENT;
 export const isHuman = (it) => it?.direction === HUMAN;
 export const isClosed = (it) => it?.status === "resolved" || it?.status === "dismissed";
+
+// Severity, lowest first (the same names as bin/lib/ledgr_asks.py LEVELS).
+export const LEVELS = ["optional", "needed", "blocking"];
+export const DEFAULT_THRESHOLD = "needed";
+export const levelRank = (lv) => LEVELS.indexOf(lv);
+export const levelOf = (it) => (LEVELS.includes(it?.level) ? it.level : it?.blocking === true ? "blocking" : "needed");
+// config.json extract.threshold, checked: anything but the three names means the default.
+export const thresholdOf = (cfg) => {
+  const v = String(cfg?.extract?.threshold ?? "").trim().toLowerCase();
+  return LEVELS.includes(v) ? v : DEFAULT_THRESHOLD;
+};
+// An agent ask below the threshold that the person has not promoted: kept, folded, not counted.
+export const isSuggestion = (it, threshold = DEFAULT_THRESHOLD) =>
+  isAgentAsk(it) && it.promoted !== true && levelRank(levelOf(it)) < levelRank(LEVELS.includes(threshold) ? threshold : DEFAULT_THRESHOLD);
+export const isBlocking = (it) => isAgentAsk(it) && levelOf(it) === "blocking";
 
 // Spec 3.4 norm(): strip markdown and list numbering, lower-case, collapse whitespace,
 // drop trailing punctuation, first 160 characters.
@@ -76,7 +98,12 @@ export class Store {
     this.d = d;
     // branch.maxDepth from config.json; the writer sets it before applying `branch` events.
     this.maxDepth = DEFAULT_MAX_DEPTH;
+    // extract.threshold from config.json (thresholdOf); the writer sets it and re-reads it on change.
+    this.threshold = DEFAULT_THRESHOLD;
   }
+
+  // An open item that counts: on the chip, for "surfaced", in the lanes' "N open" (not a suggestion).
+  counts(it) { return it?.status === "open" && !isSuggestion(it, this.threshold); }
 
   // From store.json text. Throws on text that is not a store (the caller keeps it aside).
   static fromText(text) {
@@ -148,7 +175,7 @@ export class Store {
   // re-run, launch the branches to start, decisions the lines to append to a trunk's decisions.md,
   // close the branch terminals to end (all async, done by the writer).
   apply(ev) {
-    const out = { applied: false, settle: [], retry: [], launch: [], decisions: [], close: [] };
+    const out = { applied: false, settle: [], retry: [], launch: [], decisions: [], close: [], resume: [] };
     if (!ev || typeof ev !== "object" || !ev.type) return out;
     if (ev.id && this.d.ingested.includes(ev.id)) return out;
     const sid = str(ev.session_id) ?? str(ev.session) ?? str(ev.request?.anchor?.sessionId);
@@ -184,6 +211,8 @@ export class Store {
   }
 
   on_session_start(ev, s, at) {
+    // A Resume session launch landed: the hook ran in the new terminal (apply() has mapped it).
+    if (s.resume && s.resume.state !== "resumed" && ev.terminal) s.resume = { ...s.resume, state: "resumed", terminal: ev.terminal, resumedAt: at };
     s.sessionName = ev.session_name ?? s.sessionName;
     s.cwd = ev.cwd ?? s.cwd;
     s.repo = ev.repo ?? s.repo;
@@ -250,7 +279,7 @@ export class Store {
       }
     }
     out.settle.push({ sid: s.sessionId, turn, textPath: ti.textPath });
-    if (this.itemsOf(s.sessionId).some((it) => it.status === "open" && num(it.updatedAt) > num(s.seenAt))) s.surfaced = true;
+    if (this.itemsOf(s.sessionId).some((it) => this.counts(it) && num(it.updatedAt) > num(s.seenAt))) s.surfaced = true;
   }
 
   on_asks(ev, s, at) {
@@ -273,10 +302,12 @@ export class Store {
       const hash = str(a.hash) ?? (quote ? passageHash(quote) : passageHash(text));
       const key = `${s.sessionId}|a|${norm(text)}`;
       const options = Array.isArray(a.options) ? a.options.filter((o) => typeof o === "string").slice(0, 8) : [];
+      // The hooks' validator always sends a level; an older event has only `blocking`.
+      const level = LEVELS.includes(a.level) ? a.level : a.blocking === true ? "blocking" : "needed";
       const fields = {
-        text, kind: ASK_KINDS.has(a.kind) ? a.kind : "do", options,
+        text, kind: ASK_KINDS.has(a.kind) ? a.kind : "do", level, options,
         recommended: options.includes(a.recommended) ? a.recommended : null,
-        blocking: a.blocking === true,
+        blocking: level === "blocking",
       };
       const anchor = { sessionId: s.sessionId, turn, promptId: ev.prompt_id ?? null, uuid, apiMessageId: ev.api_message_id ?? null,
         quote, quoteSource: ev.source === "block" ? "block" : "model", hash, settled: true };
@@ -302,7 +333,7 @@ export class Store {
         if (prior.status === "answered") {
           prior.lastSeenTurn = turn; prior.note = `asked again at turn ${turn}`; prior.anchor = { ...prior.anchor, ...anchor };
           this.setStatus(prior, "open", at);
-          created++;
+          if (this.counts(prior)) created++;
           return;
         }
         // resolved or dismissed: the agent raised it again — a new item pointing at the old one.
@@ -315,7 +346,7 @@ export class Store {
         repeatOf: again ? again.id : rid ?? undefined,
         origin, terminal: ev.terminal ?? s.terminal ?? undefined, createdTurn: turn, createdAt: at, updatedAt: at, seq: i,
       };
-      created++;
+      if (this.counts(this.d.items[id])) created++;   // a new suggestion alone does not surface the chip
     });
     if (created && s.state !== "working") s.surfaced = true;
   }
@@ -586,6 +617,25 @@ export class Store {
     return true;
   }
 
+  // {type: "resume", session_id}: the panel's Resume session (the session's terminal is gone). The
+  // writer starts `claude --resume <sid>` in a new pane (out.resume, branch.js resumeArgs); the
+  // session's SessionStart hook then maps the new terminal. One launch at a time per session.
+  on_resume(_ev, s, at, out) {
+    if (s.resume && (s.resume.state === "launching" || s.resume.state === "launched") && at - num(s.resume.at) < 60000) return;
+    s.resume = { at, state: "launching" };
+    out.resume.push(s.sessionId);
+  }
+
+  // The writer's result for resume: { terminal, note } or { error }.
+  resumeLaunched(sid, { terminal = null, error = null, note = null, at = Date.now() } = {}) {
+    const s = this.d.sessions[sid];
+    if (!s || !s.resume) return false;
+    if (s.resume.state === "resumed") return true;      // the hook beat hc's reply
+    s.resume = { ...s.resume, state: error ? "failed" : "launched", terminal, launchedAt: at,
+      ...(error ? { error: String(error).slice(0, 300) } : {}), ...(note ? { note: String(note).slice(0, 200) } : {}) };
+    return true;
+  }
+
   on_capture(ev, s, at) {
     const r = ev.request;
     if (!r || typeof r !== "object" || !r.id || this.d.items[r.id]) return;
@@ -637,6 +687,9 @@ export class Store {
     else if (action === "defer") { this.setStatus(it, "deferred", at); it.deferUntil = arg ?? "next_session"; }
     else if (action === "draft") { it.draft = String(arg ?? "").slice(0, LIMITS.text); it.updatedAt = at; }
     else if (action === "btw") { it.btwStagedAt = at; it.updatedAt = at; }
+    // A suggestion (below extract.threshold) becomes an open row that counts; it stays so whatever
+    // the threshold later is. Only agent asks have a level.
+    else if (action === "promote") { if (!isAgentAsk(it)) return false; it.promoted = true; it.promotedAt = at; it.updatedAt = at; }
     else return false;
     return true;
   }
@@ -665,7 +718,7 @@ export class Store {
     if (!s || s.state !== "working") return false;
     s.state = "idle";
     for (const it of this.itemsOf(sid)) if (isHuman(it) && it.anchor && !it.anchor.settled) { it.anchor.settled = true; it.anchor.interrupted = true; it.updatedAt = now; }
-    if (this.itemsOf(sid).some((it) => it.status === "open" && num(it.updatedAt) > num(s.seenAt))) s.surfaced = true;
+    if (this.itemsOf(sid).some((it) => this.counts(it) && num(it.updatedAt) > num(s.seenAt))) s.surfaced = true;
     return true;
   }
 
@@ -681,27 +734,30 @@ export class Store {
     if ((status === "idle" || status === "done") && s.state === "working") {
       s.state = "idle"; s.lastStopAt = now;
       for (const it of this.itemsOf(sid)) if (isHuman(it) && it.anchor && !it.anchor.settled) { it.anchor.turn = s.turn; it.anchor.settled = true; it.updatedAt = now; }
-      if (this.itemsOf(sid).some((it) => it.status === "open" && num(it.updatedAt) > num(s.seenAt))) s.surfaced = true;
+      if (this.itemsOf(sid).some((it) => this.counts(it) && num(it.updatedAt) > num(s.seenAt))) s.surfaced = true;
       return true;
     }
     return false;
   }
 
   // ── derived ──────────────────────────────────────────────────────────
-  // shared("ledgr.chips"): { [terminal]: { s, q, a, st, t, ag } } (spec 3.2, 6.5).
+  // shared("ledgr.chips"): { [terminal]: { s, q, a, st, t, ag, [b], [p] } } (spec 3.2, 6.5).
+  // `a` counts open asks at or above extract.threshold (suggestions do not count); `b` the open
+  // blocking ones among them. `st`: "collecting" (working, questions parked this turn), else
+  // "blocking" (an open blocking ask, agent not working), else "surfaced" or "seen".
   // `p`: the turn whose asks are being extracted (a pending event under 30 s old).
   chips(now = Date.now()) {
     const out = {};
     for (const [t, m] of Object.entries(this.d.terminals)) {
       const s = this.d.sessions[m.sessionId];
       if (!s || s.state === "ended") continue;
-      const mine = this.itemsOf(s.sessionId).filter((it) => it.status === "open");
-      const q = mine.filter(isHuman).length, a = mine.filter(isAgentAsk).length;
+      const mine = this.itemsOf(s.sessionId).filter((it) => this.counts(it));
+      const q = mine.filter(isHuman).length, a = mine.filter(isAgentAsk).length, b = mine.filter(isBlocking).length;
       const p = this.pendingTurn(s.sessionId, now);
       if (!q && !a && p === null) continue;
       const parked = mine.filter((it) => isHuman(it) && num(it.createdAt) >= num(s.promptAt)).length;
-      const st = s.state === "working" && parked ? "collecting" : s.surfaced ? "surfaced" : "seen";
-      out[t] = { s: s.sessionId, q, a, st, t: s.turn, ag: agentLabel(m.agent ?? s.agent), ...(p !== null ? { p } : {}) };
+      const st = s.state === "working" && parked ? "collecting" : b && s.state !== "working" ? "blocking" : s.surfaced ? "surfaced" : "seen";
+      out[t] = { s: s.sessionId, q, a, st, t: s.turn, ag: agentLabel(m.agent ?? s.agent), ...(b ? { b } : {}), ...(p !== null ? { p } : {}) };
     }
     return out;
   }

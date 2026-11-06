@@ -6,7 +6,8 @@
 // branch of Q2 that rejoined (its confluence landed at turn 12, Q2 resolved by it, terminal closed).
 // Layout cases (nothing may clip at 280-360 px): a long decide with a long recommended option (A10),
 // a 600-character ask (A11), a single unbroken 120-character token (A12), a parked question with a
-// long URL (Q8).
+// long URL (Q8). Severity: A6 blocking (sorted first, ◆, the chip's blocking state), A13 and A14
+// optional (the folded "suggestions (2)" line of turn 17, each with promote).
 // Drawn when props().demo, FORCE_DEMO (config.js) or `herdr-app do ledgr.demo`. Never saved,
 // never published to shared(), never written to ledgr-data.
 import { passageHash } from "./store.js";
@@ -24,7 +25,9 @@ const T17 = `I checked the scan output against the registry on PRODAPP.
 1. Pick the TLS cipher order for PRODAPP. I recommend Mozilla intermediate; CIS L1 is stricter but drops two suites the old Crystal runtime still uses.
 2. Run the Qualys rescan after the reboot tonight. I am waiting on that result before I close the ticket.
 3. OK to remove RC4 from the registry? It is a one-line change and reversible.
-4. Review the IIS bindings list I wrote to \`reports/iis-bindings.md\` and tell me if any site is missing.`;
+4. Review the IIS bindings list I wrote to \`reports/iis-bindings.md\` and tell me if any site is missing.
+
+Want me to also script the registry export for next time? And you may want to move the Crystal reports off PRODAPP at some point.`;
 
 const T12 = `The release branch \`release/5.4\` is two weeks stale and has no open PRs.
 
@@ -41,7 +44,16 @@ answer: The flag is real, not stale: port 8443 is served by the Crystal runtime,
 changes: drop "the scan is stale" from the ticket; add the 8443 binding to the TLS change list
 \`\`\``;
 
-export const FIXTURE_TURNS = { [`${SID}:17`]: T17, [`${SID}:12`]: T12, [`${SID}:14`]: T14, [`${SIDB}:1`]: TB1 };
+// The second session's turn 4: a 1,500-word message (show whole message opens it at full height; the
+// panel's list must reach its last line), with the ask in its last paragraph.
+const LONG_PARA = "I went through the release notes for every merged pull request since the last tag, grouped them by area, and checked each entry against its pull request description and the linked Linear issue, so that nothing in the notes promises more than the code does and every breaking change names the setting it affects.";
+const T4_CODEX = [
+  ...Array.from({ length: 27 }, (_, i) => `${i + 1}. ${LONG_PARA}`),
+  "Choose the release-notes tone: terse or narrative. I recommend terse, since most readers skim the list.",
+  "LAST LINE OF THE 1,500-WORD MESSAGE: the notes end here.",
+].join("\n\n");
+
+export const FIXTURE_TURNS = { [`${SID}:17`]: T17, [`${SID}:12`]: T12, [`${SID}:14`]: T14, [`${SIDB}:1`]: TB1, [`${SID2}:4`]: T4_CODEX };
 
 export function demoData(now = Date.now()) {
   const min = 60e3, day = 86400e3;
@@ -67,7 +79,7 @@ export function demoData(now = Date.now()) {
   const a5 = ask({ handle: "A5", turn: 17, kind: "decide", text: "Pick the TLS cipher order for PRODAPP",
     options: ["Mozilla intermediate", "CIS L1"], recommended: "Mozilla intermediate", seq: 0,
     quote: "Pick the TLS cipher order for PRODAPP. I recommend Mozilla intermediate", draft: "Mozilla intermediate, as you recommended.", ago: 3 });
-  ask({ handle: "A6", turn: 17, kind: "do", text: "Run the Qualys rescan after the reboot tonight", blocking: true, seq: 1,
+  ask({ handle: "A6", turn: 17, kind: "do", text: "Run the Qualys rescan after the reboot tonight", level: "blocking", blocking: true, seq: 1,
     quote: "Run the Qualys rescan after the reboot tonight. I am waiting on that result", ago: 3 });
   ask({ handle: "A7", turn: 17, kind: "confirm", text: "OK to remove RC4 from the registry?", status: "answered", answer: "Yes, remove RC4.", seq: 2,
     quote: "OK to remove RC4 from the registry?", ago: 3 });
@@ -81,6 +93,12 @@ export function demoData(now = Date.now()) {
     text: "Review the change plan before tonight's window. Step one disables TLS 1.0 and 1.1 in SChannel for the server and client roles and removes RC4 128/128 from the cipher list. Step two sets the cipher order to Mozilla intermediate under Cryptography\\Configuration\\Local\\SSL. Step three rebinds port 8443 to the new certificate so the Crystal runtime stops terminating TLS itself. Step four reboots PRODAPP and re-runs the Qualys scan. If a step fails, the rollback is the exported hive in E:\\Backups\\tls-2026-11-05.reg and the old binding, which I left in place but disabled. Tell me if any step should wait." });
   ask({ handle: "A12", turn: 17, kind: "confirm", seq: 7, ago: 3,
     text: "Confirm the new certificate's thumbprint: 9F86D081884C7D659A2FEAA0C55AD015A3BF4F1B2B0B822CD15D6C15B0F00A084E07408562BEDB8B60CE05C1DECFE3AD16B72230967DE01F640B7E47" });
+  ask({ handle: "A13", turn: 17, kind: "confirm", level: "optional", seq: 8, ago: 3, origin: "extract_model",
+    text: "Decide whether the agent should also script the registry export for next time",
+    quote: "Want me to also script the registry export for next time?" });
+  ask({ handle: "A14", turn: 17, kind: "do", level: "optional", seq: 9, ago: 3, origin: "extract_model",
+    text: "Consider moving the Crystal reports off PRODAPP later",
+    quote: "you may want to move the Crystal reports off PRODAPP at some point" });
   ask({ handle: "A3", turn: 12, kind: "provide", text: "Send the PRODAPP service account name", seq: 1,
     quote: "please send me the PRODAPP service account name", ago: 2 * 24 * 60 + 30 });
   ask({ handle: "A2", turn: 12, kind: "decide", text: "Decide whether to keep the stale release branch", status: "resolved", resolvedAt: now - 3 * 60 * min, resolvedTurn: 13,
@@ -100,13 +118,14 @@ export function demoData(now = Date.now()) {
   const q2 = q({ handle: "Q2", turn: 11, kind: "question", text: "Is the old cert still bound anywhere?", status: "resolved", resolvedAt: now - 5 * 60 * min, ago: 400,
     resolvedTurn: 12, resolvedBy: "branch", resolution: { branchId: "br_demo_q2_a41b", turn: 12, at: now - 5 * 60 * min } });
   q({ handle: "Q1", sid: SID2, turn: 4, kind: "question", text: "Which changelog format does the release use?", ago: 30 });
-  ask({ handle: "A1", sid: SID2, turn: 4, kind: "decide", text: "Choose the release-notes tone", options: ["terse", "narrative"], recommended: "terse", ago: 30 });
+  ask({ handle: "A1", sid: SID2, turn: 4, kind: "decide", text: "Choose the release-notes tone", options: ["terse", "narrative"], recommended: "terse", ago: 30,
+    quote: "Choose the release-notes tone: terse or narrative." });
   ask({ handle: "A1", sid: SIDB, turn: 1, kind: "confirm", text: "Should I add the 8443 binding to the TLS change list?", ago: 20,
     quote: "add the 8443 binding to the TLS change list" });
   items[q3].branch = { branchId: "br_demo_q3_7c1e" };
   items[q2].branch = { branchId: "br_demo_q2_a41b" };
 
-  const sess = (sid, o) => ({ sessionId: sid, turnSource: "hooks", nextHandle: { A: 13, Q: 9 }, startedAt: now - day, updatedAt: now - 60e3, seenAt: now - 30 * min, promptAt: now - 2 * min, surfaced: false, ...o });
+  const sess = (sid, o) => ({ sessionId: sid, turnSource: "hooks", nextHandle: { A: 15, Q: 9 }, startedAt: now - day, updatedAt: now - 60e3, seenAt: now - 30 * min, promptAt: now - 2 * min, surfaced: false, ...o });
   return {
     v: 1,
     items,

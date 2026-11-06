@@ -2,7 +2,11 @@
 provider. Provider structured-output modes are never trusted: whatever a provider returns goes
 through validate() before it reaches the spool.
 
-Each valid ask: {text, kind, options, recommended, blocking, quote, repeat_of, repeat_of_handle, hash, origin}
+Each valid ask: {text, kind, level, options, recommended, blocking, quote, repeat_of, repeat_of_handle, hash, origin}
+  level = how much the work depends on it: "blocking" (the agent stopped or cannot finish without it),
+  "needed" (the person must act for the task to be truly done; the agent went on), "optional" (an
+  offer or a suggestion). No level: "needed" ("blocking" when a legacy block says "blocking": true).
+  Any other value rejects the ask. blocking = (level == "blocking"), kept for older readers.
   hash = sha1 of the whitespace-collapsed passage (quote, else text), first 12 hex chars.
   repeat_of = the Request id ("rq_...") of an open or recently dismissed item the ask repeats,
   repeat_of_handle = its handle ("A5"); both null unless the model named a listed handle.
@@ -14,6 +18,8 @@ import re
 from ledgr_core import LIB, passage_hash, squash
 
 KINDS = {"decide", "confirm", "do", "provide", "review"}
+LEVELS = ("optional", "needed", "blocking")      # lowest to highest; extract.threshold uses the same names
+DEFAULT_LEVEL = "needed"
 MAX_ASKS = 20
 MAX_TEXT = 400
 MAX_QUOTE = 600
@@ -34,15 +40,34 @@ def container(data):
     return items
 
 
-def validate(items, prose, origin, known=None):
-    """Normalise raw ask objects. Drops items without a non-empty string `text`; a quote is kept
-    only if it is a whitespace-normalised substring of `prose`. `known` maps the handles shown to
-    the model to {"id", "status"}; a repeat_of outside it is dropped (never trust an invented id)."""
+def level_of(it):
+    """The ask's level, or None when it names one that does not exist (the ask is then rejected).
+    Missing or null: "needed", or "blocking" for a legacy `"blocking": true`. Case and surrounding
+    space are ignored ("Blocking " is blocking); anything else ("urgent", 2, "") is unknown."""
+    lv = it.get("level")
+    if lv is None:
+        return "blocking" if it.get("blocking") is True else DEFAULT_LEVEL
+    if isinstance(lv, str) and lv.strip().lower() in LEVELS:
+        return lv.strip().lower()
+    return None
+
+
+def validate(items, prose, origin, known=None, rejected=None):
+    """Normalise raw ask objects. Drops items without a non-empty string `text`, and items whose
+    `level` is not blocking, needed or optional (a reason per drop goes to `rejected`, a list, when
+    given); a quote is kept only if it is a whitespace-normalised substring of `prose`. `known` maps
+    the handles shown to the model to {"id", "status"}; a repeat_of outside it is dropped (never
+    trust an invented id)."""
     known = known or {}
     norm_prose = squash(prose)
     out = []
-    for it in items[:MAX_ASKS]:
+    for i, it in enumerate(items[:MAX_ASKS]):
         if not isinstance(it, dict) or not isinstance(it.get("text"), str) or not it["text"].strip():
+            continue
+        level = level_of(it)
+        if level is None:
+            if rejected is not None:
+                rejected.append(f"ask {i + 1}: unknown level {it.get('level')!r}")
             continue
         text = squash(it["text"])[:MAX_TEXT]
         opts = [squash(o) for o in (it.get("options") or []) if isinstance(o, str) and o.strip()][:MAX_OPTIONS] \
@@ -58,9 +83,10 @@ def validate(items, prose, origin, known=None):
         out.append({
             "text": text,
             "kind": it.get("kind") if it.get("kind") in KINDS else "do",
+            "level": level,
             "options": opts,
             "recommended": rec if rec in opts else None,
-            "blocking": it.get("blocking") is True,
+            "blocking": level == "blocking",
             "quote": q,
             "repeat_of": (known[rep].get("id") or rep) if rep else None,
             "repeat_of_handle": rep,

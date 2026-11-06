@@ -1,0 +1,3 @@
+{"note": "block fast path with levels: explicit blocking and optional, one without a level (needed), one unknown level (rejected)",
+ "offline": {"source": "block", "count": 3, "no_model_call": true, "levels": {"blocking": 1, "needed": 1, "optional": 1}, "rejected_min": 1},
+ "live": {"source": "block", "count": 3, "no_model_call": true, "levels": {"blocking": 1, "needed": 1, "optional": 1}}}

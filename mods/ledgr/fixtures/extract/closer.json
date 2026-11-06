@@ -1,0 +1,3 @@
+{"note": "a go-ahead closer after a summary of finished work: optional at most, never needed or blocking, and its quote is the closing sentence, not the message",
+ "offline": {"source": "error", "error": "no credential"},
+ "live": {"source": "model", "levels_only": ["optional"], "quote_max": 120, "max_cost": 0.004}}

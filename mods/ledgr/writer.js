@@ -13,17 +13,21 @@
 //   - Phase 3: appends one line per landed confluence to ledgr-data/sessions/<trunk sid>/decisions.md
 //     (appendDecision), and ends a rejoined branch's terminal on the panel's Close branch
 //     (closeBranch: hc kill, then hc rm; the Branch record stays).
+//   - Resume session: for a session whose terminal is gone, `claude --resume <sid>` in a new pane
+//     (resumeSession, branch.js resumeArgs); the session's SessionStart hook re-maps it.
+//   - re-reads ledgr-data/config.json whenever it changes (watchConfig): extract.threshold (which
+//     asks count on the chips) and branch.maxDepth apply without a restart.
 //
 // SOURCE OF TRUTH: mods/ledgr/{config,store,spool,writer,branch,confluence}.js. mods/my-tabs/ledgr/ holds byte-
 // identical copies, because Herdr refuses imports that resolve outside a mod's own folder
 // (symlinks included). The panel compares the two sets and says so when they differ.
 import * as fs from "fs/promises";
 import { randomUUID } from "crypto";
-import { shared, setShared, readTextFile, writeTextFile, watchFolder, agents, terminals, panes, layout, run, exec, hc, openOverlay, appHome } from "herdr";
+import { shared, setShared, readTextFile, writeTextFile, watchFolder, agents, terminals, panes, layout, run, exec, hc, openOverlay, appHome, home } from "herdr";
 import { DEFAULTS, loadConfig, dataDir, spoolDir, turnPath, storePath, binDir, agentLabel } from "./config.js";
-import { Store, isHuman } from "./store.js";
+import { Store, isHuman, thresholdOf } from "./store.js";
 import { SpoolReader, readMap, writeAtomic } from "./spool.js";
-import { maxDepthOf, hcRunArgs, claudeArgv } from "./branch.js";
+import { maxDepthOf, hcRunArgs, claudeArgv, resumeArgs, transcriptPathOf } from "./branch.js";
 
 export const ENGINE_FILES = ["config.js", "store.js", "spool.js", "writer.js", "branch.js", "confluence.js"];
 const DAY = 86400e3;
@@ -89,7 +93,7 @@ export class Writer {
     }
     if (!this.holds()) return;            // someone else claimed while we loaded
     this.started = true;
-    this.live.maxDepth = maxDepthOf(this.cfg);
+    this.applyConfig(this.cfg);
     // A launch cut short by a restart: say so (a late branch_started still marks it running).
     for (const b of Object.values(this.live.d.branches)) {
       if (b.status === "launching" && Date.now() - (b.createdAt ?? 0) > 60000) this.live.branchLaunched(b.id, { error: "the writer restarted before the launch finished" });
@@ -100,8 +104,46 @@ export class Writer {
     this.publish();
     this.scheduleSnapshot(cx);
     if (this.reader.missing) this.waitForSpool(cx); else this.watch(cx);
+    this.watchConfig(cx);
     await this.housekeep();
     cx.notify();
+  }
+
+  // The config values the store applies itself (branch.maxDepth, extract.threshold), and the one
+  // the chips need: shared("ledgr.ui") = {animations} (my-pane cannot read ledgr-data itself).
+  applyConfig(cfg) {
+    this.cfg = cfg;
+    this.live.maxDepth = maxDepthOf(cfg);
+    this.live.threshold = thresholdOf(cfg);
+    const ui = { animations: cfg?.ui?.animations !== false };
+    if (this.holds() && JSON.stringify(shared("ledgr.ui") ?? null) !== JSON.stringify(ui)) setShared("ledgr.ui", ui);
+  }
+
+  // config.json edited (by hand, or by the hooks creating it): read it again and republish the
+  // chips, so a new extract.threshold counts at once. Wakes on every change under ledgr-data/
+  // (the watch is recursive), reads only when config.json is among them.
+  watchConfig(cx) {
+    if (this.watchingConfig) return;
+    this.watchingConfig = true;
+    cx.spawn(async (cx) => {
+      const root = dataDir().replace(/\/+$/, "");
+      let quick = 0, lastAt = 0;
+      try {
+        while (!this.retired) {
+          const paths = await watchFolder(root);
+          const now = Date.now();
+          quick = now - lastAt < 50 ? quick + 1 : 0;
+          lastAt = now;
+          if (quick > 20) { quick = 0; await cx.sleep(1000); }
+          if (!this.amWriter()) continue;
+          if (!paths.some((p) => String(p).replace(/\/+$/, "") === root || String(p).split("/").pop() === "config.json")) continue;
+          const before = this.live.threshold;
+          this.applyConfig(await loadConfig());
+          if (this.live.threshold !== before) { this.publish(); cx.notify(); }
+        }
+      } catch (e) { this.note = `config watch stopped: ${String(e?.message ?? e)}`; }
+      finally { this.watchingConfig = false; }
+    });
   }
 
   // Writes store.json if it changed: writeTextFile replaces an existing file atomically and only
@@ -167,12 +209,11 @@ export class Writer {
 
   async applyBatch(batch, cx) {
     if (!this.amWriter()) return false;
-    const settles = [], retries = [], launches = [], decisions = [], closes = [];
+    const settles = [], retries = [], launches = [], decisions = [], closes = [], resumes = [];
     let newAsks = false, pending = false;
-    // branch.maxDepth is read when a branch is asked for, so a config edit counts at once.
+    // branch.maxDepth is read again when a branch is asked for (watchConfig also follows the file).
     if (batch.some(({ ev }) => ev?.type === "branch")) {
-      this.cfg = await loadConfig();
-      this.live.maxDepth = maxDepthOf(this.cfg);
+      this.applyConfig(await loadConfig());
       if (!this.amWriter()) return false;
     }
     for (const { ev } of batch) {
@@ -182,6 +223,7 @@ export class Writer {
       launches.push(...(r.launch ?? []));
       decisions.push(...(r.decisions ?? []));
       closes.push(...(r.close ?? []));
+      resumes.push(...(r.resume ?? []));
       if (ev?.type === "asks" && Array.isArray(ev.asks) && ev.asks.length) newAsks = true;
       if (ev?.type === "pending") pending = true;
     }
@@ -197,6 +239,7 @@ export class Writer {
     for (const r of retries) this.runRetry(r, cx);
     for (const id of launches) this.launchBranch(id, cx);
     for (const id of closes) this.closeBranch(id, cx);
+    for (const sid of resumes) this.resumeSession(sid, cx);
     if (newAsks && this.cfg.surface?.openPanelOnAsks && !this.panelShown()) {
       run("layout.select", { stack: "panel-body", child: "ledgr" });
       run("layout.show", { id: "panel" });
@@ -354,6 +397,46 @@ export class Writer {
     });
   }
 
+  // Resume session: the transcript must still exist; then `hc run` (no parent) in the session's folder,
+  // a pane right of the focused one (terminal.keep), focus. The record says what happened; the
+  // session's own SessionStart hook moves it to the new terminal.
+  resumeSession(sid, cx) {
+    cx.spawn(async (cx) => {
+      const s = this.live.d.sessions[sid];
+      if (!s || s.resume?.state !== "launching") return;
+      let error = null, terminal = null, note = null;
+      try {
+        const tp = transcriptPathOf(s, home());
+        if (!(await fs.exists(tp).catch(() => false))) throw new Error(`transcript gone (${tp})`);
+        const r = await hc(resumeArgs(s, await this.claudePath()));
+        let j = null;
+        try { j = JSON.parse(String(r.stdout ?? "").trim().split("\n").pop() || "null"); } catch { /* not JSON */ }
+        if (r.code !== 0 || !j?.address) throw new Error(String(r.stderr || r.stdout || `hc run exited ${r.code}`).trim().slice(0, 300));
+        terminal = j.address;
+        note = await this.givePane(terminal, cx);
+      } catch (e) { error = String(e?.message ?? e); }
+      if (!this.amWriter()) return;
+      this.live.resumeLaunched(sid, { terminal, error, note });
+      this.commit(cx);
+    });
+  }
+
+  // A new pane-less terminal gets a pane right of the focused pane, then the focus (the same waits
+  // as placeBeside). Returns a note, or null.
+  async givePane(t, cx) {
+    for (let i = 0; i < 50 && !terminals().some((x) => x.address === t); i++) await cx.sleep(100);
+    if (!terminals().some((x) => x.address === t)) return "the app did not see the new terminal in 5 s: peek it from the agents list";
+    run("terminal.keep", { terminal: t, place: "right" });
+    for (let i = 0; i < 30 && !panes().some((p) => p.terminal === t); i++) await cx.sleep(100);
+    if (!panes().some((p) => p.terminal === t)) {
+      run("terminal.keep", { terminal: t });   // no place: a tab of its own
+      for (let i = 0; i < 30 && !panes().some((p) => p.terminal === t); i++) await cx.sleep(100);
+    }
+    if (!panes().some((p) => p.terminal === t)) return "terminal.keep gave no pane within 6 s: peek it from the agents list";
+    run("pane.focus", { terminal: t });
+    return null;
+  }
+
   // The claude program for a launch: its absolute path in the person's environment, else "claude".
   async claudePath() {
     if (this.claudeBin) return this.claudeBin;
@@ -418,6 +501,10 @@ export class Writer {
       await this.reader.drain(cx);
       if (!this.watching && this.reader.missing === false) this.watch(cx);
       const changed = this.live.wake();
+      // The safety net for watchConfig (a watch that stopped): config.json once a minute.
+      const before = this.live.threshold;
+      this.applyConfig(await loadConfig());
+      if (this.live.threshold !== before) this.publish();
       await this.housekeep();
       if (changed) this.commit(cx); else this.publish();
     });
