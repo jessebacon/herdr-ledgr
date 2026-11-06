@@ -26,6 +26,11 @@ its loop the same way. Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311. Earlier not
    question `rejoin_pending` (glyph ↩, sub-line "confluence from br-q1-c51e on the clipboard: resolves
    when it is sent in t1w"). Nothing is typed, and `hc send` is never used.
 
+   Later (2026-11-06): the button is now **Paste into trunk** and goes one step further. Once Herdr
+   reports the trunk's terminal focused, it pastes the message into the prompt with `terminal.paste`
+   and never presses Enter; the person adds a word and sends it (`ui.pasteIntoPrompt`, default on;
+   off, it is still clipboard plus focus). `BUILD-NOTES-mod.md` section 16.
+
    ```
    ledgr confluence br_09ba0ba7-6b14-4c0d-ac9e-8ff1a41cc51e rq_83aa6f80-6a4b-4f89-ab29-60dd84cddd24
    Parked question Q1, from turn 1: Which word did you reply with, and is it a complete sentence?
@@ -83,6 +88,9 @@ its loop the same way. Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311. Earlier not
    When it is submitted, the hook emits `answers_landed` and the writer marks those asks `answered`
    (`answer`, `answeredTurn`, `answeredBy: "sheet"`). A sheet naming another session is ignored; closed
    asks stay closed.
+
+   Later (2026-11-06): **Paste answers** and **Paste answer** paste the sheet into the session's
+   prompt the same way (`BUILD-NOTES-mod.md` section 16).
 
 ## 2. Data and events
 

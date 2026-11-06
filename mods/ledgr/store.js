@@ -27,6 +27,13 @@
 // at or above it an ask is an open row and counts on the chip; below it the ask is a "suggestion",
 // kept, shown folded under its turn and not counted, until the person promotes it (act "promote",
 // `promoted: true`). An open blocking ask gives the chip its own state, "blocking".
+//
+// Who closed an ask (2026-11-06): `resolvedBy` "branch" (a confluence landed), "agent" (the agent's
+// resolve_asks, bin/mcp: an `act` event with `actor: "agent"` and the ask's `handle`), "answer" (the
+// person answered it, by an [A3] ref or the answer sheet, and the agent's next reply did not raise it
+// again: settled at that turn's asks event, settleAnswered); none: the person closed it. The chip's
+// blocking state no longer yields to working: an open blocking ask is "blocking" while the agent works
+// too (`w: 1` marks a working session), so a prompt or a permission wait never hides it.
 import { createHash, randomUUID } from "crypto";
 import { LIMITS, agentLabel } from "./config.js";
 import { DEFAULT_MAX_DEPTH, manifest, preamble, branchName, branchLabel, depthOf } from "./branch.js";
@@ -57,6 +64,11 @@ export const thresholdOf = (cfg) => {
 export const isSuggestion = (it, threshold = DEFAULT_THRESHOLD) =>
   isAgentAsk(it) && it.promoted !== true && levelRank(levelOf(it)) < levelRank(LEVELS.includes(threshold) ? threshold : DEFAULT_THRESHOLD);
 export const isBlocking = (it) => isAgentAsk(it) && levelOf(it) === "blocking";
+// A turn group of the asks lane (panel.js): open when the person opened it; else when it is the newest
+// group or holds an open blocking ask (`blocking`, a count), unless the person folded it. Folds are the
+// person's: a click always wins over both defaults.
+export const groupOpen = ({ newest = false, blocking = 0, unfolded = false, folded = false } = {}) =>
+  Boolean(unfolded || ((newest || blocking > 0) && !folded));
 
 // Spec 3.4 norm(): strip markdown and list numbering, lower-case, collapse whitespace,
 // drop trailing punctuation, first 160 characters.
@@ -257,6 +269,7 @@ export class Store {
       if (isHuman(it)) { it.askedAtTurn = turn; it.updatedAt = at; }
       else if (it.status === "open" || it.status === "deferred") {
         it.answer = head.slice(0, LIMITS.text);
+        it.answeredTurn = turn;   // settleAnswered: this turn's reply decides whether the answer took
         this.setStatus(it, "answered", at);
       }
     }
@@ -306,6 +319,8 @@ export class Store {
     // message uuid) has none and settles the turn like a block's.
     const midTurn = ev.source === "tool" && num(ev.tool_call, 0) > 0;
     if (!midTurn && s.pending && num(s.pending.turn) <= turn) delete s.pending;
+    // A reply too short to extract ("skip") raised nothing: answered asks settle. An error says nothing.
+    if (ev.source === "skip" && !midTurn) this.settleAnswered(s, turn, new Set(), at);
     if (ev.source === "skip" || ev.source === "error" || !Array.isArray(ev.asks)) return;
     const tool = ev.source === "tool";
     const origin = tool ? "tool" : ev.source === "block" ? "extract_block" : "extract_model";
@@ -320,6 +335,7 @@ export class Store {
       }
     }
     let created = 0;
+    const raised = new Set();   // items this turn's asks named again (settleAnswered leaves them)
     ev.asks.forEach((a, i) => {
       const text = squash(a?.text).slice(0, LIMITS.text);
       if (!text) return;
@@ -349,6 +365,7 @@ export class Store {
       const same = mine.find((it) => num(it.anchor?.turn) === turn && norm(it.text) === norm(text)
         && (it.anchor?.hash === hash || (tool && it.origin === "tool")));
       if (same) {
+        raised.add(same.id);
         Object.assign(same, fields); same.updatedAt = at;
         if (tool) {
           same.anchor = { ...same.anchor, ...anchor, uuid: uuid ?? same.anchor?.uuid ?? null, promptId: anchor.promptId ?? same.anchor?.promptId ?? null };
@@ -367,6 +384,7 @@ export class Store {
       if (!repeat && rh) repeat = this.byHandle(s.sessionId, rh);
       const prior = repeat ?? byKey;
       if (prior && isAgentAsk(prior)) {
+        raised.add(prior.id);
         if (prior.status === "open" || prior.status === "deferred") {
           prior.lastSeenTurn = turn; prior.anchor = { ...prior.anchor, ...anchor }; Object.assign(prior, fields); prior.updatedAt = at;
           return;
@@ -390,7 +408,26 @@ export class Store {
       if (!hasOpts) Object.assign(this.d.items[id], { options: [], recommended: null });
       if (this.counts(this.d.items[id])) created++;   // a new suggestion alone does not surface the chip
     });
+    // After the re-raise rules (a re-raised answered ask has reopened in place): the rest settle.
+    if (!midTurn) this.settleAnswered(s, turn, raised, at);
     if (created && s.state !== "working" && !midTurn) s.surfaced = true;
+  }
+
+  // Answered, then settled: an agent ask the person answered (an [A3] ref in a prompt, or the answer
+  // sheet) at this turn or an earlier one, that this turn's asks did not raise again, is done: resolved,
+  // `resolvedBy: "answer"` ("answered by you"). Runs on the turn's own asks event (the Stop settle; never
+  // a mid-turn declaration), after the re-raise rules. An ask answered after this turn (a prompt that
+  // beat a slow extraction, or a re-run of an older turn) waits for its own turn's reply. An answer
+  // recorded before answeredTurn existed counts as given the turn after the ask's own (its anchor's)
+  // turn, the earliest it can have been. Parked questions the agent answered keep their status.
+  settleAnswered(s, turn, raised, at) {
+    for (const it of this.itemsOf(s.sessionId)) {
+      if (!isAgentAsk(it) || it.status !== "answered" || raised.has(it.id)) continue;
+      const answered = it.answeredTurn !== undefined && it.answeredTurn !== null ? num(it.answeredTurn) : num(it.anchor?.turn) + 1;
+      if (answered > turn) continue;
+      this.setStatus(it, "resolved", at);
+      it.resolvedBy = "answer";
+    }
   }
 
   // The turn ended and extraction is running (hooks contract: pending, then stop up to ~4 s
@@ -405,10 +442,26 @@ export class Store {
 
   // The panel is a reader: every act of the person arrives as a spool event
   // {type: "act", session_id, item, action, arg}; action "seen" marks the session's chip seen.
+  // The agent's resolve_asks (bin/mcp, ledgr_spool.act) posts {type: "act", session_id, item, handle:
+  // "A4", action: "resolve", arg: null, actor: "agent", turn, [note]}, one per handle: only resolve, only
+  // an agent ask still open, answered or deferred; it gets `resolvedBy: "agent"`, `resolvedTurn` from
+  // `turn` when given and `resolvedNote` from `note` (one line). Anything else the agent sends is
+  // dropped. Any other actor (none, "person", unknown) is the person. `handle` finds the item when
+  // `item` is absent or unknown.
   on_act(ev, s, at) {
     if (ev.action === "seen") { this.markSeen(s.sessionId, at); return; }
-    const it = this.item(ev.item);
-    if (it && it.anchor?.sessionId === s.sessionId) this.act(ev.item, ev.action, ev.arg, at);
+    const it = this.item(ev.item) ?? (str(ev.handle) ? this.byHandle(s.sessionId, ev.handle) : null);
+    if (!it || it.anchor?.sessionId !== s.sessionId) return;
+    if (ev.actor === "agent") {
+      if (ev.action !== "resolve" || !isAgentAsk(it) || isClosed(it)) return;
+      this.setStatus(it, "resolved", at);
+      it.resolvedBy = "agent";
+      if (ev.turn !== null && ev.turn !== undefined && Number.isFinite(Number(ev.turn))) it.resolvedTurn = num(ev.turn);
+      const note = squash(ev.note).slice(0, 200);
+      if (note) it.resolvedNote = note;
+      return;
+    }
+    this.act(it.id, ev.action, ev.arg, at);
   }
 
   // {type: "retry", session_id, turn, terminal}: re-run extraction for a turn.
@@ -714,6 +767,7 @@ export class Store {
     if (!it) return;
     it.status = status;
     it.updatedAt = at;
+    delete it.resolvedBy; delete it.resolvedNote;   // who closed it (and why): set after by the caller that closes it on someone's behalf
     const s = this.d.sessions[it.anchor?.sessionId];
     if (status === "resolved" || status === "dismissed") { it.resolvedAt = at; it.resolvedTurn = s?.turn ?? it.resolvedTurn; }
     else { delete it.resolvedAt; delete it.resolvedTurn; }
@@ -783,10 +837,11 @@ export class Store {
   }
 
   // ── derived ──────────────────────────────────────────────────────────
-  // shared("ledgr.chips"): { [terminal]: { s, q, a, st, t, ag, [b], [p] } } (spec 3.2, 6.5).
+  // shared("ledgr.chips"): { [terminal]: { s, q, a, st, t, ag, [b], [p], [o], [w] } } (spec 3.2, 6.5).
   // `a` counts open asks at or above extract.threshold (suggestions do not count); `b` the open
-  // blocking ones among them. `st`: "collecting" (working, questions parked this turn), else
-  // "blocking" (an open blocking ask, agent not working), else "surfaced" or "seen".
+  // blocking ones among them. `st`: "blocking" (an open blocking ask, whether or not the agent works:
+  // a prompt or a permission wait never hides it), else "collecting" (working, questions parked this
+  // turn), else "surfaced" or "seen". `w: 1`: the agent is working (the chip quiets its pulse).
   // `p`: the turn whose asks are being extracted (a pending event under 30 s old). `o`: how the
   // counted asks arrived when they all arrived one way ("tool": declare_asks, "extract_block",
   // "extract_model"), for the chip's tooltip.
@@ -800,10 +855,11 @@ export class Store {
       const p = this.pendingTurn(s.sessionId, now);
       if (!q && !a && p === null) continue;
       const parked = mine.filter((it) => isHuman(it) && num(it.createdAt) >= num(s.promptAt)).length;
-      const st = s.state === "working" && parked ? "collecting" : b && s.state !== "working" ? "blocking" : s.surfaced ? "surfaced" : "seen";
+      const working = s.state === "working";
+      const st = b ? "blocking" : working && parked ? "collecting" : s.surfaced ? "surfaced" : "seen";
       const via = [...new Set(mine.filter(isAgentAsk).map((it) => it.origin).filter(Boolean))];
       out[t] = { s: s.sessionId, q, a, st, t: s.turn, ag: agentLabel(m.agent ?? s.agent), ...(b ? { b } : {}), ...(p !== null ? { p } : {}),
-        ...(via.length === 1 ? { o: via[0] } : {}) };
+        ...(via.length === 1 ? { o: via[0] } : {}), ...(working ? { w: 1 } : {}) };
     }
     return out;
   }

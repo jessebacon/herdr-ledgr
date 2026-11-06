@@ -513,3 +513,130 @@ Jesse runs two Claude Code accounts through `CLAUDE_CONFIG_DIR`: `~/.claude` and
 - preview.png retaken in authoritative mode (docs/preview-recipe.md rewritten): a throwaway Haiku
   session in a new space, its reply ending with `ledgr: 3 items for you, 2 blocking` and the bullet
   block, the panel with the same three asks; space closed and session forgotten afterwards.
+
+## 15. Blocking while working, who closed an ask, answered then settled (2026-11-06)
+
+Jesse: the blocking chip "doesn't consistently show", and clicking Done felt redundant after
+answering an ask in the prompt.
+
+- Chip (`store.js` `chips()`): `st` is `blocking` whenever `b` > 0, ahead of `collecting`; the old
+  rule (`b && s.state !== "working"`) muted it on every prompt and through every permission wait. A
+  working session adds `w: 1` to the record (`{s, q, a, st, t, ag, [b], [p], [o], [w]}`).
+  `mods/ledgr-pane/main.js`: `pulseFor` skips the pulse while `w` is set and pulses when a loud chip
+  stops working (`prev.w`), so a turn that ends still blocking pulses once; the header's own spinner
+  shows beside the red chip; the tooltip adds " · agent working".
+  `ledgr-pane.demo-chip:blocking-working` draws it. `host.js` reads `b`, which was never muted, and is
+  unchanged.
+- Folds (`store.js` `groupOpen({newest, blocking, unfolded, folded})`, pure; used by the asks lane in
+  `panel.js`): open when the person opened the group, else when it is the newest or holds an open
+  blocking ask, unless the person folded it. The group line drops its ", N blocking"; a folded group
+  with a blocker shows a separate "◆ N blocking" in `blocked`, semibold.
+- `on_act` (`store.js`): the item comes from `item`, else from `handle` (`byHandle`), and must belong
+  to the event's session. `actor: "agent"` (the MCP server's `resolve_asks`, hooks notes "Closed by the
+  agent"): only `resolve`, only an agent ask not yet closed (open, answered, deferred); it sets
+  `resolvedBy: "agent"`, `resolvedTurn` from `turn` when it is a number, and `resolvedNote` from
+  `note` (one line, 200 characters). Anything else from the agent is dropped. Any other actor (none,
+  "person", unknown) is the person and goes through `act()` as before, so Done and Reopen still win.
+- `setStatus` deletes `resolvedBy` and `resolvedNote` on every status change; the caller that closes
+  an item on someone's behalf sets them after (`on_confluence_landed` sets `"branch"`). Before this, an
+  item reopened and then closed with Done kept "resolved by its branch".
+- `settleAnswered(s, turn, raised, at)`: called from `on_asks` after the re-raise rules, for any asks
+  event that is not mid-turn (`tool_call` > 0), and for `skip`; `pending` and `error` never reach it.
+  `raised` holds the items this turn's asks named again (a same-turn match, or a prior found by
+  `repeat_of` or key); an answered ask among them has reopened in place as before. Every other agent
+  ask still `answered` with `answeredTurn` at or before this turn becomes `resolved`,
+  `resolvedBy: "answer"`; one answered later (a prompt that beat a slow extraction) waits for its own
+  turn. An answer from before `answeredTurn` existed counts as given at its anchor's turn + 1.
+  `on_prompt` now records `answeredTurn` for an `[A3]` ref (`on_answers_landed` already did). Parked
+  questions keep `answered`.
+- Words (`words.js` `resolvedByWords`): "resolved by its branch" (the panel adds the branch's name),
+  "closed by the agent", "answered by you"; none for the person's Done. The Closed row reads
+  "closed by the agent at turn N · note" or "answered by you at turn N" (the `answeredTurn`), and an
+  ask settled by its answer keeps its `→ answer` line.
+- `store.js` is an engine file: the overlay's `my-tabs` copy follows at the next `install.sh`.
+- Tests: `test_store.mjs` "blocking while working, closed by the agent, answered then settled" (69
+  checks; 458 in all): the chip blocking over working and collecting, `w`, the fold rule, agent acts
+  (resolve only; never a parked question, an item already closed or another session's handle; the
+  note; Reopen clears who closed it; an unknown actor is the person), answered asks settling at the
+  turn's own asks event, a re-raise reopening in place, `skip` settling, a mid-turn declaration and an
+  `error` not settling, a late answer waiting, a legacy answer settling, parked questions kept, and a
+  settled ask raised again becoming a new item that points at it.
+
+## 16. Paste into the prompt (2026-11-06)
+
+Research earlier the same day: Claude Code offers no way for an outside process to type into a
+running session, and a UserPromptSubmit hook adds context only the model sees. Jesse: "yes, build it:
+focus the pane, confirm focus, paste, no Enter, lead-in kept". The answer sheet, one answer and the
+confluence now land in the target's prompt; clipboard plus focus stays the fallback, and the rule for
+everything else (Go to anchor, Copy for prompt, `/btw`, Ask for a conclusion: `stageText`).
+
+- `nav.js` `stageIntoPrompt(text, terminal, cx, {paste, done})`, called from an event handler (the
+  clipboard is written with that call's `cx`):
+  1. `cx.write_to_clipboard(text)`.
+  2. `pasteBlock(t, paste)` names a reason not to paste: `gone` (no terminal, or not live), `off`
+     (`ui.pasteIntoPrompt` false), `plain` (no agent in `agents()`: a shell may run what a paste
+     holds), `blocked` (the agent waits on its own prompt, such as a permission menu, not the input
+     box). `pane.focus` runs unless `gone`. With a reason, `done({pasted: false, why})` is called at
+     once and the reason returned; nothing else happens.
+  3. Otherwise a `cx.spawn` task sleeps `PASTE.stepMs` (50) at a time up to `PASTE.waitMs` (600) and
+     counts looks in a row where `focusedOn(t)` holds: `focused().terminal === t` and `shown` empty
+     or `t` (no other terminal shown in that pane through `terminal.show`). At `PASTE.settle` (2) it
+     reads the clipboard back (CRLF and LF compared as one); if it still holds the text it runs
+     `run("terminal.paste")` once, with no arguments, and reports `{pasted: true, ms}`. The earliest
+     paste is 100 ms after the click: never in the click's own tick, never on a focus still moving.
+  4. Otherwise `{pasted: false, why}`: `focus` (never two looks in a row on the target within the
+     wait), `clipboard` (it changed: the person copied something), `error` (a look threw). The text
+     stays on the clipboard. The function returns `"pasting"`.
+- `terminal.paste` is the command ⌘V is bound to: the clipboard into the focused terminal as a
+  bracketed paste, no key names, no Enter. It takes no target, which is why the focus is confirmed
+  first. `terminal.paste_image` (Ctrl+V's, which may hand the key to the program) is banned.
+- `panel.js` `stage(msg, terminal, cx, w)` is the only caller (`w`: `{what, where, lead, word,
+  tail}`). It sets `this.pasting`, ignores a second click within `PASTE.waitMs + 400` ms ("Still
+  pasting into …"), shows "… copied; pasting it into the prompt in …" while the task runs, and the
+  result's words after. Callers: `stageAnswers` (the group's Paste N answers and, through
+  `copyAnswer`, Paste answer), `sendToTrunk` (Paste into trunk; it posts `conclude` only when `stage`
+  took the click), `copyConfluence` (Paste confluence again). Demo mode writes the clipboard only
+  (`demoHow`). `pasteOn()` is `ui.pasteIntoPrompt !== false`.
+- `trunkLine(ts, it, staged)`: the Conclude editor's and the staged row's trunk line follow the
+  setting. On: "Paste into trunk puts the message in its prompt without sending it; add a word of
+  your own such as “Adopt this branch result for Q1:”, then Enter"; staged, "the message waits in its
+  prompt (if not, Paste confluence again); …"; blocked adds "(nothing is pasted while it waits)";
+  working says a prompt sent now joins the running turn. Off: the old lead-in-before-⌘V wording.
+- `words.js` `stageLabels(paste)`: on, "Paste 2 answers into pane t3", "Paste answer", "Paste into
+  trunk", "Paste confluence again" (menu: "Paste the confluence again"), the group's dim line "pasted
+  into the prompt, never sent"; off, "Copy 2 answers for pane t3", "Copy answer", "Send to trunk",
+  "Copy confluence again", "clipboard + focus the pane; nothing is typed". `stagedWords(r, w)`:
+  pasted, "Answer for Ask 2 pasted into the prompt in pane t3, not sent: add a word of your own, such
+  as “My answer to A2:”, then press Enter." (a working target adds "(working: press Enter once it is
+  idle; a prompt sent now joins the running turn)"); one wording each for `gone`, `plain`, `blocked`,
+  `focus`, `clipboard` and `error`, each saying nothing was pasted and how to go on; `off` keeps the
+  old "copied and pane t3 focused: type “…”, then ⌘V, Enter."
+- Config: `ui.pasteIntoPrompt`, default `true`, in `config.js` `DEFAULTS` and `ledgr_config.py`
+  `DEFAULT_CONFIG` (the panel reads it; the Python copy keeps the defaults in step). The installer
+  asks nothing; set it in `config.json`. `config.js` is an engine file: the overlay's `my-tabs` copy
+  follows at the next `install.sh`.
+- Unchanged: the marker lines and the landing (`ledgr_landing.py`); the lead-in, now a word the
+  person adds to the pasted message before Enter (Claude Code presents a paste as possibly not the
+  person's words; the message's closing line is already in their voice). A paste joins any draft
+  already in the prompt: known and accepted, since nothing is sent. A working agent still gets the
+  paste; the words say to press Enter once it is idle.
+- Tests. `test-nav.sh`'s stub `herdr` gains `focused()` (a value, or a function of the look's number)
+  and logs every look in call order with the commands. `test_nav.mjs`, 233 checks: for idle, done and
+  working Claude Code and Codex targets, clipboard, `pane.focus`, two looks on the target, one
+  `terminal.paste` (at 100 ms); a late focus (three looks elsewhere, then the paste right after two on
+  the target); a flickering focus (nothing after the full wait); no focus (another terminal, a mod
+  pane, no window); another terminal shown in the pane; a changed or empty clipboard; CRLF line ends
+  taken as the same text; a look that throws; `off`, `blocked`, `plain` and `gone` with no task and no
+  look; and over every call of every case, no `hc` or `exec`, only `pane.focus` and `terminal.paste`,
+  no Enter, line break or key name in any argument, `terminal.paste` only without arguments.
+  `test_no_keystrokes.py`, 313 checks: `terminal.paste` in `nav.js` alone, once, without arguments,
+  inside `stageIntoPrompt` and after its `focusedOn(terminal)`, `PASTE.settle` and clipboard check;
+  `terminal.search` and `terminal.paste_image` nowhere; no `run(...)` argument holding Enter, a line
+  break, `keys` or `send`; `stageAnswers`, `sendToTrunk`, `copyConfluence` and `stage` call no `run`,
+  `hc` or `exec` themselves; `stageIntoPrompt` has one caller, the panel's `stage`, which honours
+  `ui.pasteIntoPrompt`. `test_store.mjs`: the default and every wording, on and off (20 checks, 478 in
+  all); `test-store.sh` checks that `ledgr_config.py` agrees. `herdr-app check mods/ledgr` passes.
+- Live probe (2026-11-06, throwaway panes, the primitives only): `pane.focus` returned in 15 ms,
+  `focused()` named the target at 24 ms, `terminal.paste` succeeded, and `hc read` showed the probe
+  text once, not submitted. A raw-byte probe received exactly `ESC[200~ … \n … ESC[201~`: a line break
+  stays inside the bracketed paste rather than arriving as a bare Enter.

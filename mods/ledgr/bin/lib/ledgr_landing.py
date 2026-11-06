@@ -1,7 +1,8 @@
 """ledgr landing detector (Phase 3): does a submitted prompt carry a ledgr message the panel staged?
 
-The panel never types into a terminal. It puts one of two messages on the clipboard and focuses the
-pane; the person pastes and presses Enter. When that prompt is submitted, the UserPromptSubmit hook
+The panel never presses Enter. It puts one of two messages on the clipboard, focuses the pane and,
+once the focus is confirmed, pastes it into the prompt (terminal.paste; else the person pastes);
+the person presses Enter. When that prompt is submitted, the UserPromptSubmit hook
 calls detect() on it. A message starts with a marker line (mods/ledgr/confluence.js writes them):
 
     ledgr confluence <branch id> <item id>      a branch's conclusion returning to its trunk

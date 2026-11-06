@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 const dir = process.argv[2];
 if (!dir) { console.error("usage: test_store.mjs <module folder>"); process.exit(2); }
-const { Store, passageHash, norm, levelOf, isSuggestion, thresholdOf, LEVELS } = await import(`${dir}/store.js`);
+const { Store, passageHash, norm, levelOf, isSuggestion, isBlocking, groupOpen, thresholdOf, LEVELS } = await import(`${dir}/store.js`);
 const B = await import(`${dir}/branch.js`);
 const CF = await import(`${dir}/confluence.js`);
 const CFG = await import(`${dir}/config.js`);
@@ -420,11 +420,11 @@ st.apply(vev("act", { item: vh("A2").id, action: "promote" })); A.equal(vh("A2")
 // a re-run of the same turn keeps promoted and takes the new level
 st.apply(vev("asks", { turn: 1, source: "model", asks: [ask("Add a digest later?", "confirm", { level: "needed" })] }));
 A.equal(vh("A1").level, "needed"); A.equal(vh("A1").promoted, true); A.equal(vh("A5"), null, "same turn and passage: same item");
-// the blocking state yields to working and to collecting; resolving the blocker ends it
+// the blocking state holds while the agent works (2026-11-06: it no longer yields); resolving the blocker ends it
 st.apply(vev("prompt", { turn: 2, prompt_id: "vp2", local: false, prompt_head: "next", refs: [] }));
-A.notEqual(st.chips()[VT].st, "blocking", "agent working: not the blocking state");
+vc = st.chips()[VT]; A.equal(vc.st, "blocking", "agent working: still the blocking state"); A.equal(vc.w, 1, "working is marked on the chip");
 st.apply(vev("stop", { turn: 2, prompt_id: "vp2", text_path: null, text_head: "", passage_hash: "v2" }));
-A.equal(st.chips()[VT].st, "blocking", "idle again with the blocker open");
+vc = st.chips()[VT]; A.equal(vc.st, "blocking", "idle again with the blocker open"); A.equal(vc.w, undefined, "idle: no w");
 st.act(vh("A3").id, "resolve"); vc = st.chips()[VT]; A.equal(vc.b, undefined, "no open blocking ask: no b"); A.notEqual(vc.st, "blocking");
 // suggestions alone neither surface the chip nor show it
 const W = "eeeeeeee-6666-0000-0000-000000000001", WT = "t41";
@@ -527,6 +527,26 @@ A.equal(CFG.handoffOf({ instruct_block: true, asks: { handoff: " Prose " } }), "
 A.equal(CFG.handoffOf({ instruct_block: false, asks: { handoff: "ledgr" } }), "prose", "instruct_block false is prose");
 A.equal(CFG.handoffOf({ instruct_block: true, asks: { handoff: "bogus" } }), "ledgr", "unknown: ledgr");
 A.equal(CFG.handoffOf({ instruct_block: true }), "ledgr", "missing asks: ledgr");
+// ui.pasteIntoPrompt (2026-11-06): on by default; the three paste actions read "Paste …" when on and
+// keep their older names when off; the words after a staging say whether it was pasted, never sent.
+A.equal(CFG.DEFAULTS.ui.pasteIntoPrompt, true, "ui.pasteIntoPrompt defaults on");
+A.equal(CFG.DEFAULTS.ui.animations, true, "the other ui defaults are kept");
+{
+  const on = WORDS.stageLabels(true), off = WORDS.stageLabels(false);
+  A.equal(on.one, "Paste answer"); A.equal(on.send, "Paste into trunk"); A.equal(on.again, "Paste confluence again");
+  A.equal(on.sheet(2, "t3"), "Paste 2 answers into pane t3"); A.equal(on.sheet(1, null), "Paste 1 answer");
+  A.equal(off.one, "Copy answer"); A.equal(off.send, "Send to trunk"); A.equal(off.again, "Copy confluence again");
+  A.equal(off.sheet(2, "t3"), "Copy 2 answers for pane t3");
+  const w = { what: "Answer for Ask 2", where: "pane t3", lead: "My answer to A2:", word: "idle" };
+  A.match(WORDS.stagedWords({ pasted: true, ms: 100 }, w), /^Answer for Ask 2 pasted into the prompt in pane t3, not sent: add a word of your own, such as “My answer to A2:”, then press Enter\.$/);
+  A.match(WORDS.stagedWords({ pasted: true }, { ...w, word: "working" }), /not sent \(working: press Enter once it is idle/);
+  A.match(WORDS.stagedWords({ pasted: false, why: "focus" }, w), /^Answer for Ask 2 copied; nothing was pasted \(the focus did not reach pane t3 in time\): paste with ⌘V in the pane/);
+  A.match(WORDS.stagedWords({ pasted: false, why: "off" }, w), /^Answer for Ask 2 copied and pane t3 focused: type “My answer to A2:”, then ⌘V, Enter\.$/, "off: the older wording");
+  for (const why of ["gone", "plain", "blocked", "clipboard", "error"]) {
+    const t = WORDS.stagedWords({ pasted: false, why, error: "x" }, w);
+    A.ok(!/pasted into the prompt/.test(t) && /not pasted|nothing was pasted|not live/.test(t), `${why}: says nothing was pasted: ${t}`);
+  }
+}
 const prof = checks - phase1 - phase2 - phase3 - sev;
 
 // ── Asks declared by tool (bin/mcp declare_asks: source "tool") ─────────
@@ -573,4 +593,105 @@ st.apply(kev("asks", { turn: 1, source: "tool", provider: "mcp", replaces_turn: 
 A.equal(kv("A1"), null, "an empty later declaration clears the turn's untouched tool asks"); A.ok(kv("A3"), "...the drafted one stays");
 const toolChecks = checks - phase1 - phase2 - phase3 - sev - prof;
 
-console.log(`OK: store, ${checks} checks (${phase1} phase 1, ${phase2} phase 2, ${phase3} phase 3, ${sev} severity and resume, ${prof} profiles and handoff, ${toolChecks} tool asks), 0 failure(s)`);
+// ── Blocking while working, who closed an ask (the agent's resolve_asks), answered then settled ─
+st = Store.fromText(null);
+const G = "gggggggg-7777-0000-0000-000000000001", GT = "t90";
+const gev = (type, p) => ({ v: 1, id: `g${++n}`, type, at: (at += 1000), terminal: GT, session_id: G, ...p });
+const gh = (h) => st.byHandle(G, h);
+const gturn = (turn, asks, extra = {}) => {   // one whole turn: prompt, pending, stop, the turn's asks
+  st.apply(gev("prompt", { turn, prompt_id: `gp${turn}`, local: false, prompt_head: extra.head ?? "go", refs: extra.refs ?? [] }));
+  st.apply(gev("pending", { turn }));
+  st.apply(gev("stop", { turn, prompt_id: `gp${turn}`, text_path: null, text_head: "", passage_hash: `g${turn}` }));
+  if (asks) st.apply(gev("asks", { turn, source: extra.source ?? "model", asks }));
+};
+st.apply(gev("session_start", { agent: "claude-code", source: "startup", cwd: "/g", session_name: "settle", turn: 0 }));
+gturn(1, [ask("Grant the keychain access", "do", { level: "blocking" }), ask("Pick the log format", "decide", { level: "needed" }),
+  ask("Name the release", "provide", { level: "needed" })]);
+// 1. the chip: blocking whether or not the agent works, and over collecting
+let gc = st.chips()[GT]; A.equal(gc.st, "blocking"); A.equal(gc.b, 1); A.equal(gc.w, undefined);
+st.apply(gev("prompt", { turn: 2, prompt_id: "gp2", local: false, prompt_head: "carry on", refs: [] }));
+gc = st.chips()[GT]; A.equal(gc.st, "blocking", "a prompt does not hide the blocker"); A.equal(gc.w, 1); A.equal(gc.b, 1); A.equal(gc.a, 3);
+st.apply(gev("capture", { turn: 2, agent: "claude-code", request: req("rq_gq1", "is the cache warm?", null, {}, G, 2) }));
+gc = st.chips()[GT]; A.equal(gc.st, "blocking", "blocking wins over collecting"); A.equal(gc.q, 1, "the parked question still counts");
+st.apply(gev("pending", { turn: 2 }));
+st.apply(gev("stop", { turn: 2, prompt_id: "gp2", text_path: null, text_head: "", passage_hash: "g2" }));
+st.apply(gev("asks", { turn: 2, source: "model", asks: [] }));
+gc = st.chips()[GT]; A.equal(gc.st, "blocking"); A.equal(gc.w, undefined, "idle: no w");
+// 2. the fold rule (panel.js groupOpen): newest open; a group holding an open blocking ask open too; the person's click wins
+A.equal(groupOpen({ newest: true }), true, "the newest group is open"); A.equal(groupOpen({}), false, "an older group folds");
+A.equal(groupOpen({ blocking: 1 }), true, "an older group with an open blocker stays open");
+A.equal(groupOpen({ blocking: 1, folded: true }), false, "the person's fold wins over a blocker");
+A.equal(groupOpen({ newest: true, folded: true }), false, "...and over the newest rule");
+A.equal(groupOpen({ unfolded: true }), true, "the person's unfold wins");
+const blockersAt = (turn) => st.itemsOf(G).filter((it) => it.anchor?.turn === turn && it.status === "open" && isBlocking(it) && !isSuggestion(it, st.threshold)).length;
+A.equal(groupOpen({ newest: false, blocking: blockersAt(1) }), true, "turn 1 (not the newest group) holds the blocker: open");
+// 3. the agent's resolve_asks: act events with actor "agent" and a handle, one per handle
+A.equal(WORDS.resolvedByWords("agent"), "closed by the agent"); A.equal(WORDS.resolvedByWords("answer"), "answered by you");
+A.equal(WORDS.resolvedByWords("branch"), "resolved by its branch"); A.equal(WORDS.resolvedByWords(undefined), null, "the person's Done: no words");
+st.apply(gev("act", { item: null, handle: "A1", action: "dismiss", actor: "agent", arg: null }));
+A.equal(gh("A1").status, "open", "the agent may only resolve");
+st.apply(gev("act", { item: null, handle: "Q1", action: "resolve", actor: "agent", arg: null }));
+A.equal(gh("Q1").status, "open", "the agent does not close a parked question");
+st.apply(gev("act", { item: null, handle: "A1", action: "resolve", actor: "agent", arg: null }));
+A.equal(gh("A1").status, "resolved", "resolved by handle"); A.equal(gh("A1").resolvedBy, "agent"); A.equal(gh("A1").resolvedTurn, 2);
+gc = st.chips()[GT]; A.equal(gc.b, undefined, "the agent closed the blocker: no b"); A.notEqual(gc.st, "blocking");
+st.apply(gev("act", { item: gh("A2").id, handle: "A2", action: "resolve", arg: null, actor: "agent", turn: 2, note: "  Took JSON,\n as the repo already logs it " }));
+A.equal(gh("A2").resolvedBy, "agent", "by item id too"); A.equal(gh("A2").resolvedTurn, 2, "the event's turn");
+A.equal(gh("A2").resolvedNote, "Took JSON, as the repo already logs it", "the agent's note, one line");
+st.apply(gev("act", { item: gh("A2").id, action: "reopen" }));
+A.equal(gh("A2").status, "open"); A.equal(gh("A2").resolvedBy, undefined, "reopened: who closed it goes"); A.equal(gh("A2").resolvedNote, undefined, "...and why");
+st.apply(gev("act", { item: gh("A2").id, action: "resolve" }));
+A.equal(gh("A2").status, "resolved"); A.equal(gh("A2").resolvedBy, undefined, "the person's Done has no resolvedBy");
+st.apply(gev("act", { item: null, handle: "A2", action: "resolve", actor: "agent" }));
+A.equal(gh("A2").resolvedBy, undefined, "already closed by the person: the agent does not relabel it");
+st.apply(gev("act", { item: gh("A3").id, action: "resolve", actor: "robot" }));
+A.equal(gh("A3").status, "resolved", "an unknown actor is the person"); A.equal(gh("A3").resolvedBy, undefined);
+st.apply(gev("act", { item: gh("A3").id, action: "reopen" }));
+st.apply({ ...gev("act", { item: null, handle: "A3", action: "resolve", actor: "agent" }), session_id: "nobody-0000" });
+A.equal(gh("A3").status, "open", "another (unknown) session's handle: nothing");
+A.equal(Store.fromText(st.toText()).d.items[gh("A1").id].resolvedBy, "agent", "resolvedBy survives a save");
+// 4. answered, then settled at the turn's asks event
+gturn(3, [ask("Choose the cache size", "decide", { level: "needed" }), ask("Send the staging URL", "provide", { level: "needed" })]);
+gturn(4, [], { head: "[A3] go ahead. [A4] 512 MB", refs: ["A3", "A4"] });   // A3 reopened above; A4 is the cache size
+A.equal(gh("A4").answeredTurn, 4, "an [A4] ref records the turn it was answered");
+A.equal(gh("A4").status, "resolved", "answered at turn 4, not raised again by turn 4's reply: settled"); A.equal(gh("A4").resolvedBy, "answer");
+A.equal(gh("A4").answer, "[A3] go ahead. [A4] 512 MB", "the answer stays on the item"); A.equal(gh("A3").resolvedBy, "answer");
+gturn(5, [ask("Send the staging URL", "provide", { level: "needed" })], { head: "[A5] later", refs: ["A5"] });
+A.equal(gh("A5").status, "open", "answered, then raised again by the same turn's reply: open in place");
+A.match(gh("A5").note, /asked again at turn 5/); A.equal(gh("A6"), null, "...not a new item");
+// a mid-turn declaration does not settle; the Stop re-emit does
+st.apply(gev("prompt", { turn: 6, prompt_id: "gp6", local: false, prompt_head: "ledgr answers …", refs: [] }));
+st.apply(gev("answers_landed", { turn: 6, for_session: G, handles: ["A5"], answers: { A5: "https://staging.example" } }));
+A.equal(gh("A5").status, "answered"); A.equal(gh("A5").answeredTurn, 6);
+st.apply(gev("asks", { turn: 6, source: "tool", provider: "mcp", tool_call: 1, replaces_turn: false, asks: [kAsk("Rotate the token", "needed")] }));
+A.equal(gh("A5").status, "answered", "a mid-turn tool call does not settle");
+st.apply(gev("pending", { turn: 6 }));
+st.apply(gev("asks", { turn: 6, source: "tool", provider: "mcp", replaces_turn: true, asks: [kAsk("Rotate the token", "needed")] }));
+A.equal(gh("A5").status, "resolved", "the Stop re-emit settles it"); A.equal(gh("A5").resolvedBy, "answer");
+A.equal(gh("A6").status, "open", "the new tool ask is untouched");
+// an answer given after the turn whose asks arrive late (or a re-run of an older turn) waits for its own turn
+st.apply(gev("prompt", { turn: 7, prompt_id: "gp7", local: false, prompt_head: "[A6] done", refs: ["A6"] }));
+st.apply(gev("asks", { turn: 6, id: "g-late6", source: "model", asks: [] }));
+A.equal(gh("A6").status, "answered", "turn 6's late asks do not settle an answer from turn 7");
+st.apply(gev("stop", { turn: 7, prompt_id: "gp7", text_path: null, text_head: "", passage_hash: "g7" }));
+st.apply(gev("asks", { turn: 7, source: "error", asks: [], error: "no credential" }));
+A.equal(gh("A6").status, "answered", "an extraction error says nothing: still answered");
+st.apply(gev("asks", { turn: 7, source: "skip", asks: [] }));
+A.equal(gh("A6").status, "resolved", "a reply too short to extract raised nothing: settled"); A.equal(gh("A6").resolvedBy, "answer");
+// parked questions the agent answered keep their status; a legacy answered ask (no answeredTurn) settles
+A.equal(gh("Q1").status, "open");
+st.apply(gev("prompt", { turn: 8, prompt_id: "gp8", local: false, prompt_head: "[Q1] about the cache", refs: ["Q1"] }));
+st.apply(gev("stop", { turn: 8, prompt_id: "gp8", text_path: null, text_head: "", passage_hash: "g8" }));
+A.equal(gh("Q1").status, "answered", "the question was asked and answered at its turn's stop");
+const legacy = st.d.items[gh("A2").id]; legacy.status = "answered"; legacy.answer = "old"; delete legacy.answeredTurn;
+st.apply(gev("asks", { turn: 1, id: "g-rerun1", source: "model", asks: [] }));
+A.equal(legacy.status, "answered", "no answeredTurn: a re-run of the ask's own turn does not settle it");
+st.apply(gev("asks", { turn: 8, source: "model", asks: [] }));
+A.equal(gh("Q1").status, "answered", "a parked question is not settled by the sweep");
+A.equal(legacy.status, "resolved", "an answered ask from before answeredTurn settles"); A.equal(legacy.resolvedBy, "answer");
+A.equal(st.snapshot().items.some((i) => i.id === gh("A4").id), false, "a settled ask leaves the snapshot");
+gturn(9, [ask("choose the cache size", "decide", { level: "needed" })]);
+A.equal(gh("A7").status, "open", "the agent asking a settled ask again: a new item"); A.equal(gh("A7").parentId, gh("A4").id, "...pointing at the settled one");
+const settleChecks = checks - phase1 - phase2 - phase3 - sev - prof - toolChecks;
+
+console.log(`OK: store, ${checks} checks (${phase1} phase 1, ${phase2} phase 2, ${phase3} phase 3, ${sev} severity and resume, ${prof} profiles, handoff and paste words, ${toolChecks} tool asks, ${settleChecks} blocking while working, closed by the agent, answered then settled), 0 failure(s)`);

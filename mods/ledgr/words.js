@@ -31,9 +31,49 @@ export function originWords(origin) {
   }[origin] ?? (origin ? String(origin).replace(/_/g, " ") : "");
 }
 
+// Who closed an item (its `resolvedBy`), for the Closed list: "resolved by its branch" (the panel adds
+// the branch's name), "closed by the agent" (resolve_asks), "answered by you" (the answer took: the
+// agent's next reply did not raise it again). None (the person's Done) has no words.
+export function resolvedByWords(by) {
+  return { branch: "resolved by its branch", agent: "closed by the agent", answer: "answered by you" }[by] ?? null;
+}
+
 // A branch by what it is for: "branch of Question 1". Its hc name (br-q1-c51e) is the short id
 // shown beside it, small.
 export const branchWords = (item) => `branch of ${item ? itemWords(item) : "a question"}`;
 
 // A session by its name; the id prefix only when it has none.
 export const sessionWords = (s) => s?.sessionName || s?.repo || (s?.sessionId ? `session ${String(s.sessionId).slice(0, 8)}` : "no session");
+
+// The three actions that stage a message for a prompt (the answer sheet, one answer, the
+// confluence), by ui.pasteIntoPrompt: "Paste …" when on (nav.js stageIntoPrompt pastes it, never
+// sends it), the older "Copy …" / "Send to trunk" when off (clipboard plus focus).
+export function stageLabels(paste) {
+  const n_ = (n) => `${n} answer${n === 1 ? "" : "s"}`;
+  return paste
+    ? { sheet: (n, t) => `Paste ${n_(n)}${t ? ` into ${paneWords(t)}` : ""}`, one: "Paste answer", send: "Paste into trunk",
+        again: "Paste confluence again", againMenu: "Paste the confluence again", how: "pasted into the prompt, never sent" }
+    : { sheet: (n, t) => `Copy ${n_(n)}${t ? ` for ${paneWords(t)}` : ""}`, one: "Copy answer", send: "Send to trunk",
+        again: "Copy confluence again", againMenu: "Copy the confluence again", how: "clipboard + focus the pane; nothing is typed" };
+}
+
+// What a staging did and what is left to the person, from stageIntoPrompt's result r ({pasted} or
+// {pasted: false, why}). what: "Answer for Ask 2"; where: "pane t3" or "the trunk (pane t3)"; lead:
+// the lead-in suggestion (confluence.js leadIn, answersLeadIn); word: the target's live word
+// (working, blocked, gone, idle...). A paste is never sent: the person adds a word and presses Enter.
+export function stagedWords(r, { what, where, lead, word }) {
+  const typeLead = `type “${lead}”, then ⌘V, Enter`;
+  if (r?.pasted) {
+    const wait = word === "working" ? " (working: press Enter once it is idle; a prompt sent now joins the running turn)" : "";
+    return `${what} pasted into the prompt in ${where}, not sent${wait}: add a word of your own, such as “${lead}”, then press Enter.`;
+  }
+  switch (r?.why) {
+    case "gone": return `${what} copied; ${where} is not live: when it is back, ${typeLead}.`;
+    case "plain": return `${what} copied and ${where} focused, not pasted (no agent runs there): ${typeLead}.`;
+    case "blocked": return `${what} copied and ${where} focused, not pasted (it waits on its own prompt): answer that first, then type “${lead}”, ⌘V, Enter.`;
+    case "focus": return `${what} copied; nothing was pasted (the focus did not reach ${where} in time): paste with ⌘V in the pane, add a word of your own such as “${lead}”, then Enter.`;
+    case "clipboard": return `${what} not pasted: the clipboard changed before the paste. Click again to stage it.`;
+    case "error": return `${what} copied; nothing was pasted (${String(r.error ?? "error").slice(0, 120)}): paste with ⌘V in ${where}, add a word of your own such as “${lead}”, then Enter.`;
+    default: return `${what} copied and ${where} focused${word === "working" ? " (working: wait for idle)" : ""}: ${typeLead}.`;
+  }
+}

@@ -6,10 +6,11 @@
 //
 // ledgr-pane: a clone of Herdr's shipped `pane` header (0.1.13), plus the ledgr chip (ledgr spec
 // 6.5). Optional: ledgr works without it. It only reads shared state and runs no writer.
-// The chip reads shared("ledgr.chips")[terminal] = { s, q, a, st, t, ag, b, o }, written only by
-// the ledgr writer: hidden with nothing open; "collecting" (dim "? 2") while the agent
-// works and questions were parked this turn; "blocking" (`blocked` colour, "1 blocking · 2 asks")
-// while an ask the agent stopped on is open (`b` of the `a` asks); "surfaced" (accent "2 parked ·
+// The chip reads shared("ledgr.chips")[terminal] = { s, q, a, st, t, ag, b, o, w }, written only by
+// the ledgr writer: hidden with nothing open; "blocking" (`blocked` colour, "1 blocking · 2 asks")
+// while an ask the agent stopped on is open (`b` of the `a` asks), also while the agent works (`w`:
+// the header's own spinner shows beside it, and the chip does not pulse); "collecting" (dim "? 2")
+// while the agent works and questions were parked this turn; "surfaced" (accent "2 parked ·
 // 3 asks") after a turn ends with something new; "seen" (muted "? 2 · 3"). `a` leaves out asks below
 // ledgr's extract.threshold (suggestions). `p` (a turn number) means the asks
 // of that turn are being extracted: a small native spinner shows until they land (or 30 s).
@@ -19,7 +20,7 @@
 // turns the pulse and the spinner's motion off. No toast, no sound, no periodic timers.
 // Click: show the ledgr panel on that session (where the panel is: shared("ledgr.ui").panel, from
 // ledgr's config.json ui.panel; default the `panel` column's `panel-body` stack, child `ledgr`).
-// `herdr-app do ledgr-pane.demo-chip:<surfaced|blocking|seen|collecting|off>` draws that chip state on
+// `herdr-app do ledgr-pane.demo-chip:<surfaced|blocking|blocking-working|seen|collecting|off>` draws that chip state on
 // every shown header (a scripted look at the states and the pulse; nothing is read or published).
 
 import { View, div, svg, image } from "gpui-kit";
@@ -73,19 +74,21 @@ export default class Pane extends View {
 
   command(c) {
     if (!String(c).startsWith("demo-chip:")) return;
-    const st = String(c).slice("demo-chip:".length);
+    const arg = String(c).slice("demo-chip:".length);
+    const w = arg === "blocking-working", st = w ? "blocking" : arg;
     this.demoChip = st === "off" ? null
-      : { s: "demo", q: 1, a: st === "blocking" ? 3 : 2, ...(st === "blocking" ? { b: 1 } : {}), st, t: (this.demoChip?.t ?? 17) + 1, ag: "claude" };
+      : { s: "demo", q: 1, a: st === "blocking" ? 3 : 2, ...(st === "blocking" ? { b: 1 } : {}), st, t: (this.demoChip?.t ?? 17) + 1, ag: "claude", ...(w ? { w: 1 } : {}) };
   }
 
   // The chip's one pulse: compares this render's chip with the last one this pane drew. Quiet to
   // loud, or loud again for a later turn, starts it; the second frame (16 ms later) sets the halo's
-  // target, and the transition does the rest without the script.
+  // target, and the transition does the rest without the script. A working chip (`w`) stays loud
+  // without pulsing (a prompt does not end a turn); the turn ending loud pulses as before.
   pulseFor(c, cx) {
     const prev = this.lastChip;
-    this.lastChip = c ? { st: c.st, t: c.t ?? 0, b: c.b ?? 0 } : null;
+    this.lastChip = c ? { st: c.st, t: c.t ?? 0, b: c.b ?? 0, w: Boolean(c.w) } : null;
     if (prev === undefined || shared("ledgr.ui")?.animations === false) return;
-    if (loud(c) && (!loud(prev) || (c.t ?? 0) > prev.t)) {
+    if (loud(c) && !c.w && (!loud(prev) || prev.w || (c.t ?? 0) > prev.t)) {
       const p = this.pulse = { at: Date.now(), phase: 0, color: c.st === "blocking" ? "blocked" : "accent" };
       cx.timer.after(16, (cx) => { if (this.pulse === p) { p.phase = 1; cx.notify(); } });
     }
@@ -137,7 +140,7 @@ export default class Pane extends View {
       .cursor_pointer()
       .hover((s) => s.bg(t.hover))
       .gap(4)
-      .tooltip(`ledgr: ${c.q} parked, ${c.a} asked of you${c.b ? ` (${c.b} blocking: the agent waits on ${c.b === 1 ? "it" : "them"})` : ""}${c.a && ORIGIN[c.o] ? `, ${ORIGIN[c.o]}` : ""} · turn ${c.t ?? "?"}${pending ? ` · extracting turn ${c.p}` : ""}`)
+      .tooltip(`ledgr: ${c.q} parked, ${c.a} asked of you${c.b ? ` (${c.b} blocking: the agent waits on ${c.b === 1 ? "it" : "them"})` : ""}${c.a && ORIGIN[c.o] ? `, ${ORIGIN[c.o]}` : ""} · turn ${c.t ?? "?"}${c.w ? " · agent working" : ""}${pending ? ` · extracting turn ${c.p}` : ""}`)
       .on_click((_e, cx) => {
         cx.stop_propagation();
         showLedgrPanel();

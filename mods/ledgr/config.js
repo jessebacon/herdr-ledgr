@@ -31,10 +31,13 @@ export const DEFAULTS = {
   // ASKED OF YOU lane folds while the agent works and opens at the end of each turn); false (the
   // default) leaves every fold to the person. animations: false turns off every ledgr motion (rows
   // entering and leaving, highlights, the chip's pulse, ledgr's spinners spin no more).
+  // pasteIntoPrompt: true (the default) makes Paste answer(s) and Paste into trunk put the message
+  // into the target's prompt with Herdr's terminal.paste once that pane has the focus (nav.js
+  // stageIntoPrompt; never Enter); false keeps them clipboard plus focus, and the person pastes.
   // panel: the layout node ids the panel lives in (install.sh writes them when it puts the block
   // somewhere else): `column` is shown and hidden, `stack` (null: none) selects `child`. The default
   // is the right-hand panel stack of Herdr's `main` layout and its clones.
-  ui: { foldAsksWhileWorking: false, animations: true, panel: { column: "panel", stack: "panel-body", child: "ledgr" } },
+  ui: { foldAsksWhileWorking: false, animations: true, pasteIntoPrompt: true, panel: { column: "panel", stack: "panel-body", child: "ledgr" } },
   retention_days: 14,
 };
 

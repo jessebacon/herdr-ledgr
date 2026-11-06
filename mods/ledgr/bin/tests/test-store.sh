@@ -28,6 +28,9 @@ assert a and a["kind"] == "answers" and a["for_session"] == "aaaaaaaa-3333-0000-
 assert a["answers"] == {"A1": "a, as you recommended.", "A2": "after the reboot"}, a
 o = L.detect(open(f"{d}/msg-answer-one.txt").read())   # lead-in line, then one ask's sheet (Copy answer)
 assert o and o["kind"] == "answers" and o["handles"] == ["A2"] and o["answers"] == {"A2": "after the reboot"}, o
+# The hooks' config defaults agree with config.js on the panel's paste switch (ui.pasteIntoPrompt).
+import ledgr_config as K
+assert K.DEFAULT_CONFIG["ui"]["pasteIntoPrompt"] is True, K.DEFAULT_CONFIG["ui"]
 PY
 fi
 # The store's summary line last (run-all.sh shows the last line), with the parser check on it.

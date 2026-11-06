@@ -1210,3 +1210,34 @@ Notes: `mods/ledgr/bin/mcp/README.md`, `BUILD-NOTES-hooks.md` "Declared by tool,
 | Not built | A panel action that releases a parked question to the agent: `parked_questions` returns an empty list until it exists | |
 
 Status on 2026-11-06: offline tests pass (`tests/test_mcp.py` in `run-all.sh`); registered on the maintainer's machine for `~/.claude` and `~/.claude-work`, both shown connected, `--check` healthy.
+
+### Blocking while working, closed by the agent, answered then settled (2026-11-06)
+
+Notes: `BUILD-NOTES-mod.md` section 15, `BUILD-NOTES-hooks.md` "Closed by the agent: resolve_asks", `mods/ledgr/bin/mcp/README.md` "resolve_asks".
+
+| Topic | Built | Why |
+|---|---|---|
+| Chip (6.5) | `blocking` whenever an open blocking ask at or above the threshold is open, whether or not the agent works (supersedes "agent not working" in the severity table above); `w: 1` on the chip record marks a working session, which keeps the colour and skips the pulse until the turn ends | Jesse: the blocking chip "doesn't consistently show"; `working` hid it on every prompt and permission wait |
+| Fold (6.2) | A turn group holding an open blocking ask stays open, as the newest does; the person's click wins (`groupOpen()`); folded, it shows "◆ N blocking" | A blocker should not hide in an older turn |
+| Item states (3.1, 6.3) | `resolvedBy` gains `"agent"` (with `resolvedNote`) and `"answer"` beside `"branch"`; none means the person's Done. `setStatus` clears both on every change | The Closed list says who closed an ask |
+| Agent closes (2.9, 3.3) | MCP `resolve_asks(handles, note?)` posts one `act` per ask with `actor: "agent"`, `handle`, `turn`; the writer accepts only `resolve`, only on an agent ask not yet closed; any other actor is the person | Jesse: Done felt redundant after answering in the prompt. The person keeps Done and Reopen |
+| Answered (6.3, 6.4) | `answered` is a waypoint: at the turn's `asks` event (or `skip`; not `pending`, a mid-turn tool call or `error`) an ask answered at or before that turn and not raised again becomes `resolved`, `resolvedBy: "answer"`; an `[A3]` ref records `answeredTurn` as the sheet already did | The reply after the answer is the evidence that it took; a re-raise still reopens in place |
+| Instruction | The `ledgr` and `both` wordings and the server's `instructions` add: when the user's message answers or drops an open ask, call `resolve_asks` before declaring anything new | |
+| Install | `mcp__ledgr__resolve_asks` appended to the allow entries; `--check` flags a registered server that lacks an entry, with "run ./install.sh again with --mcp on" | An earlier install would prompt on the new tool |
+
+Status on 2026-11-06: offline tests pass (store 458, mcp 76, hooks 127, installer 69). Not yet deployed: the maintainer's install needs `./install.sh` again with `--mcp on`, then `/mcp` (or a restart) in running sessions; the instruction sentence reaches a session at its next SessionStart.
+
+### Paste into the prompt (2026-11-06)
+
+Notes: `BUILD-NOTES-mod.md` section 16, `BUILD-NOTES-phase3.md` (notes under items 2 and 7).
+
+| Topic | Built | Why |
+|---|---|---|
+| Delivery (8.6, 6.4) | The answer sheet, one answer and the confluence are pasted into the target's prompt: `nav.js` `stageIntoPrompt` writes the clipboard, runs `pane.focus`, and runs Herdr's `terminal.paste` (what ⌘V runs; no arguments) once `focused()` names the target terminal, with no other terminal shown in its pane, on two looks 50 ms apart within 600 ms and the clipboard still holds the text. Never Enter: the person adds a word and sends it. Supersedes in part the Phase 3 "Delivery" row and the 0.1.0 "Navigation" row's clipboard plus focus | Jesse: "yes, build it: focus the pane, confirm focus, paste, no Enter, lead-in kept". Claude Code offers no way for an outside process to type into a running session; a hook adds context only the model sees |
+| Guards | Nothing is pasted into a terminal that is not live, runs no agent (a shell may run what a paste holds) or whose agent is `blocked` (a permission menu), nor when the focus is not confirmed in time or the clipboard changed; the text stays on the clipboard and the status line says how to paste with ⌘V. One paste at a time (`panel.js` `stage`, the only caller) | `terminal.paste` has no target: it goes wherever the focus is |
+| Keystrokes | Still none: `hc keys`, `hc send`, `terminal.search` and `terminal.paste_image` are banned; `terminal.paste` lives only in `stageIntoPrompt` (`test_no_keystrokes.py`, `test_nav.mjs`) | A paste presses no key and sends nothing |
+| Lead-in | Kept, as a word the person adds to the pasted message before Enter: "…pasted into the prompt in pane t3, not sent: add a word of your own, such as “My answer to A2:”, then press Enter." Marker lines and landing unchanged | Claude Code presents a paste as possibly not the person's words |
+| Words, switch | Buttons "Paste N answers into pane t3", "Paste answer", "Paste into trunk", "Paste confluence again"; one status wording per case that pasted nothing. `ui.pasteIntoPrompt` (default `true`, no installer question); `false` restores clipboard plus focus and the older labels. Go to anchor, Copy for prompt, `/btw` and Ask for a conclusion stay clipboard plus focus | |
+| Known | A paste joins a draft already in the prompt | Accepted: nothing is sent, and the person sees it before Enter |
+
+Status on 2026-11-06: offline tests pass (nav 233, no keystrokes 313, store 478); `herdr-app check mods/ledgr` passes. Live, the primitives on throwaway panes: `pane.focus` returned in 15 ms, the focus was confirmed at 24 ms, `terminal.paste` succeeded and `hc read` showed the probe once, not submitted; a raw-byte probe received exactly `ESC[200~ … \n … ESC[201~`, so a line break stays inside the bracketed paste.

@@ -311,7 +311,11 @@ def test_mcp():
            "the exact argv from the MCP README (installed path, the hooks' python3)")
         ok(L.mcp_registered(ctx, work) == "ok" and L.mcp_registered(ctx, other) is None, "registered for the chosen folder only")
         allow = json.loads(read(work))["permissions"]["allow"]
-        ok(allow == ["Bash(ls:*)"] + L.MCP_TOOLS and json.loads(read(work))["model"] == "opus", "the three allow entries added, the rest kept")
+        ok(allow == ["Bash(ls:*)"] + L.MCP_TOOLS and json.loads(read(work))["model"] == "opus", "the four allow entries added, the rest kept")
+        ok(L.MCP_TOOLS == ["mcp__ledgr__declare_asks", "mcp__ledgr__open_asks", "mcp__ledgr__parked_questions", "mcp__ledgr__resolve_asks"]
+           and L.mcp_tool_names() == ["declare_asks", "open_asks", "parked_questions", "resolve_asks"], "MCP_TOOLS: resolve_asks added last")
+        lines, problem = L.mcp_report(ctx, work, True)
+        ok(problem is None and "allow entries present" in lines[0] and len(lines) == 1, "--check: registered with every allow entry is healthy")
         ok(read(work).endswith(b"}\n") and read(other) == b"{}\n", "a final newline; the declined folder's settings untouched")
         ok(warn == [], "no warnings")
         calls.clear(); changes.clear()
@@ -321,7 +325,28 @@ def test_mcp():
         ok(line.startswith("CLAUDE_CONFIG_DIR=") and " claude mcp add --scope user --transport stdio ledgr -- /opt/py3 -I -B " in line, "the line shown and printed by --check")
         ok(L.config_env(os.path.expanduser("~/.claude/settings.json")) is None and L.mcp_user_json(os.path.expanduser("~/.claude/settings.json")) == os.path.expanduser("~/.claude.json"),
            "the default folder: no CLAUDE_CONFIG_DIR, servers in ~/.claude.json (paths only; nothing read)")
-        ok(L.perms_missing(other) == L.MCP_TOOLS, "perms_missing lists all three when none are there")
+        ok(L.perms_missing(other) == L.MCP_TOOLS, "perms_missing lists all four when none are there")
+        lines, problem = L.mcp_report(ctx, other, False)
+        ok(problem is None and "not registered" in lines[0], "--check: a folder the person declined is reported, not counted")
+        lines, problem = L.mcp_report(ctx, other, True)
+        ok(problem and "missing for" in problem and any("register: " in x for x in lines), "--check: chosen but not registered is a problem")
+        # an install from before resolve_asks: the server registered, the first three allow entries only
+        old = ["mcp__ledgr__declare_asks", "mcp__ledgr__open_asks", "mcp__ledgr__parked_questions"]
+        write(work, json.dumps({"model": "opus", "permissions": {"allow": ["Bash(ls:*)"] + old}}, indent=2) + "\n")
+        ok(L.perms_missing(work) == ["mcp__ledgr__resolve_asks"], "older install: perms_missing names resolve_asks only")
+        lines, problem = L.mcp_report(ctx, work, False)
+        ok(problem and "mcp__ledgr__resolve_asks" in problem and "--mcp on" in problem,
+           "--check: registered but resolve_asks not allowed is a problem even when the answers did not choose mcp, with the remedy")
+        ok(any("would prompt" in x and "earlier install" in x and "./install.sh --mcp on" in x for x in lines), "--check: the line says why and how")
+        calls.clear(); changes.clear()
+        quiet(L.apply_mcp, ctx, st, ans, changes, warn)
+        allow = json.loads(read(work))["permissions"]["allow"]
+        ok(calls == [] and allow == ["Bash(ls:*)"] + old + ["mcp__ledgr__resolve_asks"]
+           and changes == [f"{L.tilde(work)}: permissions.allow += mcp__ledgr__resolve_asks"],
+           "install again (--mcp on): no claude call, resolve_asks appended, the rest kept in place")
+        ok(L.mcp_report(ctx, work, True)[1] is None, "--check: healthy afterwards")
+        # uninstall's filter takes every ledgr entry, the new one included, and nothing else
+        ok([x for x in allow if x not in L.MCP_TOOLS] == ["Bash(ls:*)"], "uninstall: all four ledgr entries removed, the rest kept")
         st.d["mcp"] = []
         quiet(L.apply_mcp, ctx, st, {**ans, "mcp": False}, changes, warn)
         ok(calls == [], "mcp false: nothing run")

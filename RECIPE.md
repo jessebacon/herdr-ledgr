@@ -8,8 +8,9 @@ without you), needed (the task is not truly done until you act), optional (an of
 Asks below the threshold are kept in a folded "below threshold" line. A small always-visible ledgr
 button counts what is open and opens the panel; an optional chip in each pane header counts that
 pane's session. A parked question can be branched into its own forked Claude Code session, and its one
-approved answer carried back to the end of the trunk. Nothing is ever typed into an agent's prompt:
-answers, `/btw` questions and branch results go to the clipboard and the pane is focused.
+approved answer carried back to the end of the trunk. ledgr presses no keys in a terminal, and never
+Enter: answers and branch results are pasted into the agent's prompt once its pane has the focus, for
+the person to send; `/btw` questions and search slices go to the clipboard and the pane is focused.
 
 ![ledgr](preview.png)
 
@@ -40,13 +41,15 @@ Tell the person all of this before copying anything (the manual's step 1).
   installer shows and then runs Claude Code's own command,
   `claude mcp add --scope user --transport stdio ledgr -- <python3> -I -B ~/.config/herdr-app/mods/ledgr/bin/mcp/ledgr_mcp.py`
   (with `CLAUDE_CONFIG_DIR` set for a folder other than `~/.claude`; Claude Code writes it into that
-  folder's `.claude.json`, `~/.claude.json` for the default; backup first), and adds three allow
-  entries, `mcp__ledgr__declare_asks`, `mcp__ledgr__open_asks` and `mcp__ledgr__parked_questions`, to
-  that folder's settings file so a call never prompts. The server starts with each Claude Code session
-  of that folder and offers tools only inside a Herdr terminal (`HC_TERMINAL_ID`; outside it, none). It
-  can: record the items the agent declares for this turn (`declare_asks`: an `asks` spool event, its
-  per-turn state in `ledgr-data/mcp/`, and the pointer line it returns), list this session's open asks
-  (`open_asks`) and the questions you released to the agent (`parked_questions`). It reads and writes
+  folder's `.claude.json`, `~/.claude.json` for the default; backup first), and adds four allow
+  entries, `mcp__ledgr__declare_asks`, `mcp__ledgr__open_asks`, `mcp__ledgr__parked_questions` and
+  `mcp__ledgr__resolve_asks`, to that folder's settings file so a call never prompts. The server starts
+  with each Claude Code session of that folder and offers tools only inside a Herdr terminal
+  (`HC_TERMINAL_ID`; outside it, none). It can: record the items the agent declares for this turn
+  (`declare_asks`: an `asks` spool event, its per-turn state in `ledgr-data/mcp/`, and the pointer line
+  it returns), close this session's asks your message answered or dropped (`resolve_asks`: one `act`
+  spool event per ask, marked as closed by the agent; you can reopen it), list this session's open
+  asks (`open_asks`) and the questions you released to the agent (`parked_questions`). It reads and writes
   only `ledgr-data/` (log `log/mcp.log`), makes no network call and runs nothing else. `--check`
   reports the registration and the entries per folder and prints the command when one is missing;
   `./uninstall.sh` runs `claude mcp remove --scope user ledgr` per folder and removes the entries.
@@ -71,20 +74,27 @@ Tell the person all of this before copying anything (the manual's step 1).
   `git -C <cwd> rev-parse` (whether "isolate in a worktree" applies), `/usr/bin/which claude` once,
   and `bash mods/ledgr/bin/adapters/claude/extract.sh --retry …` (the Retry button). The hooks run
   `python3`, `/usr/bin/security find-generic-password` (the key) and `/usr/bin/curl` (the call).
-- **Reads the clipboard.** The capture box reads it when it opens, to offer the copied passage as the
-  question's quote (attached only if it matches the agent's saved turn text or screen). The panel
-  writes the clipboard for Copy answer, Copy answers, `/btw`, Send to trunk and Go to anchor, and
-  focuses the pane (`pane.focus`); that is all it does to a terminal.
+- **Reads the clipboard and pastes into a prompt.** The capture box reads the clipboard when it opens,
+  to offer the copied passage as the question's quote (attached only if it matches the agent's saved
+  turn text or screen). The panel writes the clipboard for Paste answer, Paste answers, Paste into
+  trunk, `/btw`, Copy for prompt and Go to anchor, and focuses the pane (`pane.focus`). For the Paste
+  actions it then runs Herdr's `terminal.paste` (what ⌘V runs: the clipboard into the focused
+  terminal, no key names, no Enter) once Herdr reports that terminal focused on two looks in a row
+  and the clipboard, read back, still holds ledgr's text: the message waits in the prompt until the
+  person sends it. Never into a terminal with no agent (a shell could run the lines) or an agent
+  waiting on its own prompt; `ui.pasteIntoPrompt: false` turns the paste off (clipboard plus focus
+  only). That is all it does to a terminal.
 - **Writes under the Herdr home only.** The mod, its hooks and the MCP server write `ledgr-data/`
   (store, spool, saved turn texts, per-session `decisions.md`, the MCP server's per-turn declarations
   in `mcp/`, logs, `config.json`) and the mod's own files. The installer also writes the Claude files
   named above (backup first) and its own state, backups and the files as they were before ledgr in
   `~/.local/state/ledgr/`.
-- **Never:** sends keystrokes to a terminal (no `hc keys`, no `hc send`: nothing is typed into a
-  prompt and Enter is never pressed; `bin/tests/test_no_keystrokes.py` checks the source); reaches the
-  network beyond the one extraction provider; contacts any other application; reads files outside the
-  Herdr home and the Claude config folders you chose (the installer also reads `~/.local/bin` wrappers
-  and shell start-up files to find those folders, and `~/.local/state/ledgr/`).
+- **Never:** sends keystrokes to a terminal (no `hc keys`, no `hc send`, no find bar; Enter is never
+  pressed, and the one paste above is the only text that reaches a prompt;
+  `bin/tests/test_no_keystrokes.py` checks the source and allows `terminal.paste` in one function);
+  reaches the network beyond the one extraction provider; contacts any other application; reads files
+  outside the Herdr home and the Claude config folders you chose (the installer also reads
+  `~/.local/bin` wrappers and shell start-up files to find those folders, and `~/.local/state/ledgr/`).
 
 ## What you see
 
@@ -121,19 +131,24 @@ Tell the person all of this before copying anything (the manual's step 1).
   - **ASKED OF YOU** lane (second): folded or open only when you click its head (kept across reloads);
     while the agent works the head says "agent working" in `working`. The head carries the threshold
     control, a quiet `blocking only ▾` / `blocking + needed ▾` / `everything ▾` menu that writes
-    `extract.threshold` to `config.json`. Grouped by turn, newest group open, older groups one line
-    (`turn 12 · 2 asks, 1 open, 1 blocking`). Each row: glyph, `Ask 5`, kind, text, `raised again` (in
-    `accent`) for an ask you dismissed that the agent raised again; decide rows show option chips, the
+    `extract.threshold` to `config.json`. Grouped by turn: the newest group and any group holding an
+    open blocking ask are open, older groups one line (`turn 12 · 2 asks, 1 open`); your click wins,
+    and a group you folded that still holds a blocker adds `◆ 1 blocking` in `blocked`. Each row:
+    glyph, `Ask 5`, kind, text, `raised again` (in `accent`) for an ask you dismissed that the agent
+    raised again; decide rows show option chips, the
     recommended one marked "(rec.)". Blocking asks sort first in their group with a `◆` glyph and a
     `blocking` tag (both `blocked`). Asks below the threshold sit in one folded line at the bottom of
     their group, `below threshold (N)`: open, each row is dim with a hollow glyph, its level tag and a
     `promote` pill; they never count. A spinner and "extracting turn N" sit in the lane head while
-    extraction runs; a failed turn shows "asks not extracted for turn N: <error>" with Retry.
+    extraction runs; a failed turn shows "asks not extracted for turn N: <error>" with Retry. Under an
+    open group with answers typed or picked: **Paste 2 answers into pane t21** and a dim "pasted into
+    the prompt, never sent" ("Copy 2 answers for pane t21" and "clipboard + focus the pane; nothing is
+    typed" with `ui.pasteIntoPrompt` off).
   - Clicking a row expands it: the quote in italics (over 300 characters cut with "…"), then "show
     whole message", which opens the anchoring message as markdown at full height, the paragraph holding
-    the quote marked with a 2 px `accent` bar on an `accent` tint; for asks an Answer field with Copy
-    answer beside it; the buttons; a dim line in words: `Ask 13 · found by the extractor · needed ·
-    turn 19`.
+    the quote marked with a 2 px `accent` bar on an `accent` tint; for asks an Answer field with Paste
+    answer beside it (Copy answer with `ui.pasteIntoPrompt` off); the buttons; a dim line in words:
+    `Ask 13 · found by the extractor · needed · turn 19`.
   - Footer, 30 px: `older than a day (n) ›  deferred (n) ›  closed (n) ›` folds; a status line below for
     the last action's result.
 - **Capture box** (⌘J): a popup at the top of the window, 600 × 236, no dimming, so the stream stays
@@ -142,10 +157,11 @@ Tell the person all of this before copying anything (the manual's step 1).
   field and a one-line reason; key hints; `session: t21 ↻ 1/3` to switch.
 - **Header chip** (optional mod `ledgr-pane`: Herdr's `pane` header plus the chip), 18 px, 10.5 px
   text: hidden with nothing open; `? 2` dim while the agent works and you parked questions this turn;
-  `1 blocking · 2 asks · 1 parked` in `blocked` on a faint `blocked` tint while a blocking ask is open
-  and the agent is not working; `2 parked · 3 asks` in `accent` on a faint `accent` tint after a turn
-  ends with something new; `? 1 · 2` muted once seen; a small spinner while that turn's asks are being
-  extracted. Turning loud pulses the chip once: a halo that fades over about 0.9 s.
+  `1 blocking · 2 asks · 1 parked` in `blocked` on a faint `blocked` tint while a blocking ask is open,
+  also while the agent works (beside the header's own spinner, without pulsing); `2 parked · 3 asks`
+  in `accent` on a faint `accent` tint after a turn ends with something new; `? 1 · 2` muted once
+  seen; a small spinner while that turn's asks are being extracted. Turning loud pulses the chip once:
+  a halo that fades over about 0.9 s.
 - **Motion** (`ui.animations`, default true; false stops all of it): only on a state change. A row
   entering its lane fades in from 6 px above under a highlight that decays over about a second
   (`blocked` tint for a blocking ask, `accent` otherwise; several at once staggered 45 ms). A row
@@ -177,8 +193,9 @@ Tell the person all of this before copying anything (the manual's step 1).
   optional, options optional). A JSON array is still read; a block that mixes the two is rejected,
   and a malformed bullet is dropped with a reason, as a JSON item with an unknown level is.
 - Agent status: working lets the counts collect and puts "agent working" on the asks lane head; at
-  Stop (blocked, done, idle) the host badge and the chip surface (or turn `blocking`). The panel never
-  opens itself; no toast, no sound.
+  Stop (blocked, done, idle) the host badge and the chip surface. An open blocking ask keeps the chip
+  `blocking` through prompts and permission waits; it pulses when a turn ends still blocking. The
+  panel never opens itself; no toast, no sound.
 - Status is not an ask: a statement of what is done, pending or uncommitted yields nothing; an ask
   exists only when the message asks you to do or decide something, or says the agent waits on you. A
   closing line that only offers to go on is optional unless the message says the agent cannot proceed.
@@ -197,21 +214,36 @@ Tell the person all of this before copying anything (the manual's step 1).
   `/btw About "<quote>": <question>` on the clipboard, then focuses the agent's pane. Esc cancels. Tab
   moves between the question and the hand quote field.
 - Row actions: **Done**, **Defer ▾** (tomorrow, in a week, next session), the row's own step (Promote,
-  Branch… on a question, Copy confluence again, Reopen), and **⋯** holding **Not needed**, Ask about
+  Branch… on a question, Paste confluence again, Reopen), and **⋯** holding **Not needed**, Ask about
   this, Copy for prompt (`[Q3] <question>`), Stage /btw, Call off, and Go to anchor (opens the row on
   its whole message with the passage marked, focuses the pane, puts a 20-40 character slice of the
   quote on the clipboard, and says how to search for it: in Claude, ctrl+o for the transcript, then
   `/`, ⌘V, Enter; it presses no keys itself). A session whose terminal is gone offers **Resume
-  session…** (`claude --resume` in a new pane) or **Transcript gone**. "Copy answers" builds `ledgr answers <session id>`, `Answers to your
-  asks from turn N:`, then `A5: …` lines; when that prompt is sent, the hook marks those asks answered.
-- A prompt that contains `[A5]` marks that ask answered; `[Q3]` marks the question sent.
+  session…** (`claude --resume` in a new pane) or **Transcript gone**. "Paste answers" (a turn's) and
+  "Paste answer" (one ask's) build `ledgr answers <session id>`, `Answers to your asks from turn N:`,
+  then `A5: …` lines and paste them into that session's prompt (below); when that prompt is sent, the
+  hook marks those asks answered.
+- A prompt that contains `[A5]` marks that ask answered; `[Q3]` marks the question sent. An answered
+  ask closes by itself when that turn's asks arrive, unless the reply raised it again ("answered by
+  you at turn N"); with the MCP server the agent closes the asks your message answered or dropped
+  (`resolve_asks`, "closed by the agent at turn N"). Done stays your override, and Reopen undoes either.
 - Branch… on a parked question: a confirmation shows the context manifest (what the fork knows and does
   not know) and its placement; Launch starts the fork beside the trunk. Conclude… opens an editor
-  prefilled with the branch's `ledgr-conclusion` block; Send to trunk copies `ledgr confluence
-  <branch> <item>` + the question + "Conclusion:" + your text + a closing line in your voice, focuses
-  the trunk and marks the question `rejoin_pending` (↩). When the trunk's hook sees that prompt
-  submitted, the question resolves, the branch shows REJOINED, and a line lands in
-  `ledgr-data/sessions/<sid>/decisions.md`. Close branch (two clicks) then ends its terminal.
+  prefilled with the branch's `ledgr-conclusion` block; Paste into trunk stages `ledgr confluence
+  <branch> <item>` + the question + "Conclusion:" + your text + a closing line in your voice, pastes
+  it into the trunk's prompt (below) and marks the question `rejoin_pending` (↩). When the trunk's
+  hook sees that prompt submitted, the question resolves, the branch shows REJOINED, and a line lands
+  in `ledgr-data/sessions/<sid>/decisions.md`. Close branch (two clicks) then ends its terminal.
+- The paste (`ui.pasteIntoPrompt`, default true): Paste answer(s), Paste into trunk and Paste
+  confluence again put the message on the clipboard, focus the target's pane and run Herdr's
+  `terminal.paste` once Herdr reports that terminal focused on two looks 50 ms apart (within 600 ms)
+  and the clipboard still holds the message. Nothing is sent: the status line says "Answer for Ask 2
+  pasted into the prompt in pane t3, not sent: add a word of your own, such as “My answer to A2:”,
+  then press Enter." Nothing is pasted when the target is not live, runs no agent, or waits on its
+  own prompt (a permission menu), or when the focus does not arrive in time; the status line says so
+  and how to paste with ⌘V. A second click while a paste is pending is ignored. A paste joins a draft
+  already in the prompt. With the switch off the buttons read Copy answers, Copy answer, Send to trunk
+  and Copy confluence again, and the person types a lead-in, then ⌘V, Enter.
 
 ## Built from
 
@@ -233,8 +265,8 @@ Tell the person all of this before copying anything (the manual's step 1).
   `bin/` (Python 3.9+, standard library only): `adapters/README.md` (the adapter contract: identity,
   turn signal, instruction injection, turn text, optional fork and resume), the Claude Code adapter,
   the block parser, the extractor and its providers, `mcp/ledgr_mcp.py` (the stdio MCP server:
-  `declare_asks`, `open_asks`, `parked_questions`; JSON-RPC over stdin and stdout, tools only inside a
-  Herdr terminal: `HC_TERMINAL_ID`, or `LEDGR_TERMINAL`), the offline tests.
+  `declare_asks`, `resolve_asks`, `open_asks`, `parked_questions`; JSON-RPC over stdin and stdout,
+  tools only inside a Herdr terminal: `HC_TERMINAL_ID`, or `LEDGR_TERMINAL`), the offline tests.
 - **Writer election**: only the holder of `shared("ledgr.writer")` `{id, by, at}` writes
   `ledgr-data/store.json`. The host block runs a writer (role `host`); a mod that imports an engine
   copy from its own `ledgr/` folder runs one under its own name; the panel runs one only as a fallback
@@ -249,17 +281,18 @@ Tell the person all of this before copying anything (the manual's step 1).
   the `worktree` dialog (Branch's "isolate in a worktree"), and `pane` (what `ledgr-pane` clones).
 - **herdr**: `watchFolder`, `readTextFile`, `writeTextFile`, `fs/promises`, `shared`/`setShared`
   (`ledgr.writer`, `ledgr.ping`, `ledgr.chips` (`a` counts at or above the threshold, `b` the blocking
-  ones), `ledgr.focus`, `ledgr.ui` `{animations, panel}`), `focused`, `agents`, `panes`, `terminals`,
-  `layout`, `placement`, `run` (`pane.focus`, `layout.select`, `layout.show`, `layout.hide`,
-  `mod.open`, `terminal.keep`, `terminal.peek`), `openOverlay`, `closeOverlay`,
-  `nextCommand`, `hc`, `exec`; `cx.read_from_clipboard`, `cx.write_to_clipboard`.
+  ones, `w` the agent working), `ledgr.focus`, `ledgr.ui` `{animations, panel}`), `focused`,
+  `agents`, `panes`, `terminals`, `layout`, `placement`, `run` (`pane.focus`, `layout.select`,
+  `layout.show`, `layout.hide`, `mod.open`, `terminal.keep`, `terminal.peek`; `terminal.paste` in
+  `nav.js` `stageIntoPrompt` only), `openOverlay`, `closeOverlay`, `nextCommand`, `hc`, `exec`;
+  `cx.read_from_clipboard`, `cx.write_to_clipboard`.
 - **Data**, `<Herdr home>/ledgr-data/`: `store.json` (written only by the writer), `spool/` (one JSON
   event per file), `terminals/<t>.json` (identity map), `sessions/<sid>.json` and
   `sessions/<sid>/decisions.md`, `turns/<sid>/<n>.md`, `mcp/<sid>/<turn>.json` (tool declarations),
   `snapshot.json`, `archive/`, `log/`, `tmp/`, `config.json` (`extract.provider`, `model`,
   `base_url`, `mode`, `threshold`; `asks.handoff`, `instruct_block`, `instruct_reinject`;
-  `ui.animations`, `ui.foldAsksWhileWorking`, `ui.panel`; the full list with defaults is in the
-  README's Configuration table).
+  `ui.animations`, `ui.foldAsksWhileWorking`, `ui.pasteIntoPrompt`, `ui.panel`; the full list with
+  defaults is in the README's Configuration table).
 - **Install.** Both paths end in the same files:
   - `./install.sh` asks each question with its reason (defaults in brackets are what is installed
     now); `./install.sh --yes --answers ledgr.install.json` asks nothing (schema:
@@ -274,7 +307,7 @@ Tell the person all of this before copying anything (the manual's step 1).
     merge `keys.json`, asking before replacing a key in use; add the blocks from
     `setup/layout-blocks.json` to a personal layout; add the three hook entries above to
     `~/.claude/settings.json` (and each other Claude config folder's settings.json you use); optionally
-    run the `claude mcp add` command above per config folder and add the three allow entries
+    run the `claude mcp add` command above per config folder and add the four allow entries
     (`mods/ledgr/bin/mcp/README.md`); `chmod +x mods/ledgr/bin/adapters/claude/*.sh`; store the key with
     `security add-generic-password -s ledgr -a anthropic -w`; `herdr-app check mods/ledgr` (and
     `mods/ledgr-pane`).
@@ -316,8 +349,10 @@ Tell the person all of this before copying anything (the manual's step 1).
   The fork is taken at the end of the session, so it also sees every turn after the anchor; the
   manifest says how many.
 - The confluence resolves only when the trunk's UserPromptSubmit hook sees the marker line as the first
-  line of a pasted block, or of the prompt after at most a one-line lead-in. Type a lead-in such as
-  "Adopt this branch result for Q1:" before ⌘V (the panel suggests it).
+  line of a pasted block, or of the prompt after at most a one-line lead-in. Paste into trunk puts
+  the message in the prompt as a paste, marker first; add a word of your own (the panel suggests
+  "Adopt this branch result for Q1:") and press Enter. With `ui.pasteIntoPrompt` off, type that
+  lead-in before ⌘V.
 - Assumes macOS (Keychain, `security`), Claude Code for the hooks (no asks lane for other agents yet),
   and python3 3.9 or newer at `/opt/homebrew/bin`, `/usr/local/bin` or `/usr/bin` (or `LEDGR_PYTHON`).
   Providers `cli` (`claude -p`) and `openai-compatible` are untested end to end.
@@ -345,7 +380,7 @@ Tell the person all of this before copying anything (the manual's step 1).
 - Editing `extract.threshold` in `ledgr-data/config.json`, or choosing on the lane head's menu, changes
   the counts and the lanes within a couple of seconds, with no restart.
 - `./install.sh --check` reports the three hooks registered, a writer holding the role and the Keychain
-  item resolving; when the MCP server was chosen, `ledgr` registered (user scope) and the three allow
+  item resolving; when the MCP server was chosen, `ledgr` registered (user scope) and the four allow
   entries present for each chosen config folder.
 - With the MCP server registered, a Claude Code turn that leaves something for you ends with the
   pointer line only (no block), and the rows show "declared by the agent (tool)".

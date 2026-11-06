@@ -200,6 +200,8 @@ class FakeWriter(threading.Thread):
     def __init__(self):
         super().__init__(daemon=True)
         self.stop = False
+        self.acts = []
+
 
     def run(self):
         while not self.stop:
@@ -207,11 +209,25 @@ class FakeWriter(threading.Thread):
                 ev = rjson(p)
                 if isinstance(ev, dict) and ev.get("type") == "asks" and ev.get("source") == "tool":
                     self.apply(ev)
+                elif isinstance(ev, dict) and ev.get("type") == "act" and ev.get("action") == "resolve":
+                    self.acts.append(ev)
+                    self.resolve(ev)
                 try:
                     os.unlink(p)
                 except OSError:
                     pass
             time.sleep(0.02)
+
+    def resolve(self, ev):
+        """store.js act("resolve") plus the contract: resolvedBy "agent" when actor is "agent"."""
+        path = os.path.join(DATA, "snapshot.json")
+        snap = rjson(path, {"v": 1, "items": []})
+        for it in snap["items"]:
+            if it.get("id") == ev["item"] and it["anchor"]["sessionId"] == ev["session_id"]:
+                it.update(status="resolved", resolvedAt=ev["at"], updatedAt=ev["at"])
+                if ev.get("actor") == "agent":
+                    it["resolvedBy"] = "agent"
+        wjson(path, snap)
 
     def apply(self, ev):
         path = os.path.join(DATA, "snapshot.json")
@@ -248,13 +264,18 @@ def main():
     check("initialize: the requested 2025-06-18 is answered as is, serverInfo ledgr, tools capability, instructions",
           r.get("protocolVersion") == "2025-06-18" and r["serverInfo"]["name"] == "ledgr" and "tools" in r["capabilities"]
           and "declare_asks" in (r.get("instructions") or "") and "resultType" not in r, r)
+    check("instructions: answered or dropped asks go to resolve_asks, by handle, before declaring",
+          "resolve_asks" in r.get("instructions", "") and "answers or drops" in r.get("instructions", "")
+          and "before declaring anything new" in r.get("instructions", ""), r.get("instructions"))
     check("notifications/initialized: no response", c.silent())
     r = c.req("initialize", {"protocolVersion": "1999-01-01", "capabilities": {}, "clientInfo": {"name": "x"}})["result"]
     check("initialize: an unknown version is answered with the newest legacy one (2025-11-25)", r.get("protocolVersion") == "2025-11-25", r)
     check("ping: empty result", c.req("ping").get("result") == {})
     tl = c.req("tools/list")["result"]["tools"]
     names = [t["name"] for t in tl]
-    check("tools/list: declare_asks, open_asks, parked_questions, in that order", names == ["declare_asks", "open_asks", "parked_questions"], names)
+    check("tools/list: declare_asks, resolve_asks, open_asks, parked_questions, in that order",
+          names == ["declare_asks", "resolve_asks", "open_asks", "parked_questions"], names)
+    tool = {t["name"]: t for t in tl}
     d = tl[0]
     item = d["inputSchema"]["properties"]["items"]["items"]
     check("declare_asks: items schema requires level, kind, text; level enum blocking|needed; loads upfront",
@@ -264,7 +285,14 @@ def main():
           all(len(t["description"]) < 700 for t in tl) and all(w in d["description"] for w in
                                                                 ("blocking", "needed", "one line", "verbatim", "only for a choice", "pointer line", "list nothing in prose")),
           [len(t["description"]) for t in tl])
-    check("open_asks and parked_questions take no parameters", all(t["inputSchema"] == {"type": "object", "additionalProperties": False} for t in tl[1:]))
+    check("open_asks and parked_questions take no parameters",
+          all(tool[n]["inputSchema"] == {"type": "object", "additionalProperties": False} for n in ("open_asks", "parked_questions")))
+    ra = tool["resolve_asks"]
+    check("resolve_asks: handles (strings) required, note optional, loaded upfront (alwaysLoad, like declare_asks), not read-only, the rules in its description",
+          ra["inputSchema"]["required"] == ["handles"] and ra["inputSchema"]["properties"]["handles"]["items"] == {"type": "string"}
+          and set(ra["inputSchema"]["properties"]) == {"handles", "note"} and ra.get("_meta", {}).get("anthropic/alwaysLoad") is True
+          and ra["annotations"]["readOnlyHint"] is False
+          and all(w in ra["description"] for w in ("answered or made moot", "before declare_asks", "Never close", "reopen")), ra)
     m = c.req("resources/list")
     check("unknown method: -32601", m.get("error", {}).get("code") == -32601, m)
     c.send({"jsonrpc": "2.0", "method": "notifications/whatever", "params": {}})
@@ -290,9 +318,9 @@ def main():
           r.get("resultType") == "complete" and MODERN in r["supportedVersions"] and "2025-11-25" in r["supportedVersions"]
           and "tools" in r["capabilities"] and r["_meta"]["io.modelcontextprotocol/serverInfo"]["name"] == "ledgr", r)
     r = c.req("tools/list", {}, modern_meta())["result"]
-    check("tools/list (modern): resultType, ttlMs, cacheScope, the three tools",
+    check("tools/list (modern): resultType, ttlMs, cacheScope, the four tools",
           r.get("resultType") == "complete" and isinstance(r.get("ttlMs"), int) and r.get("cacheScope") in ("public", "private")
-          and len(r["tools"]) == 3, r)
+          and len(r["tools"]) == 4, r)
     m = c.req("tools/list", {}, modern_meta("1900-01-01"))
     check("unsupported version: -32022 with supported and requested",
           m.get("error", {}).get("code") == -32022 and MODERN in m["error"]["data"]["supported"]
@@ -461,6 +489,45 @@ def main():
     sc = r.get("structuredContent") or {}
     check("with the flag: only this session's open questions released to the agent (Q2)",
           [x["handle"] for x in sc.get("questions", [])] == ["Q2"] and "note" not in sc and "Q2: Should we pin the SDK?" in text(r), sc)
+
+    print("== resolve_asks (no writer)")
+    take_events()
+    snap_items += [ask("A3", "Old closed one", "resolved", resolvedAt=now - 3600e3),
+                   ask("A4", "Pick the font", "answered", answer="serif")]
+    wjson(os.path.join(DATA, "snapshot.json"), {"v": 1, "items": snap_items})
+    r = c.call("resolve_asks", {"handles": ["a5", "[A4]", "A6", "A3", "A99", "A8", "Q1", "A5"],
+                                "note": "  The user picked\n  safe.  "})
+    sc, tx = r.get("structuredContent") or {}, text(r)
+    check("resolve: open A5 and answered A4 resolved; dismissed A6 and resolved A3 already closed; A99, another "
+          "session's A8 and a question Q1 unknown; duplicates and case folded; not an error",
+          not r.get("isError") and sc.get("ok") is True and sc.get("resolved") == ["A5", "A4"]
+          and sc.get("already_closed") == ["A6", "A3"] and sc.get("unknown") == ["A99", "A8", "Q1"]
+          and sc.get("session_id") == SID and sc.get("turn") == 6, sc)
+    evs = take_events()                          # two files in the same ms sort by their random part
+    byh = {e.get("handle"): e for e in evs}
+    e5, e4 = byh.get("A5", {}), byh.get("A4", {})
+    check("resolve: one act event per resolved ask, with the contract fields (actor agent, handle, turn, note)",
+          len(evs) == 2 and all(e.get("type") == "act" and e.get("action") == "resolve" and e.get("arg") is None
+                                and e.get("actor") == "agent" and e.get("session_id") == SID and e.get("terminal") == "t99"
+                                and e.get("turn") == 6 and e.get("note") == "The user picked safe." and e.get("v") == 1
+                                and len(e.get("id", "")) == 36 for e in evs)
+          and (e5.get("item"), e5.get("handle"), e4.get("item"), e4.get("handle")) == ("rq_a5", "A5", "rq_a4", "A4")
+          and sc.get("event_ids") == [e5.get("id"), e4.get("id")], evs)
+    check("resolve: the text names each list, the question, and that no writer has applied it yet",
+          "ledgr closed A5, A4 as resolved by the agent (turn 6)" in tx and "Already closed: A6, A3." in tx
+          and "Not an ask of this session: A99, A8, Q1" in tx and "Q1 is a parked question" in tx
+          and "has not applied" in tx and sc.get("writer") == "timeout", tx)
+    r = c.call("resolve_asks", {"handles": ["A99"]})
+    sc = r.get("structuredContent") or {}
+    check("resolve: only an unknown handle: reported, not an error, nothing written",
+          not r.get("isError") and sc.get("resolved") == [] and sc.get("unknown") == ["A99"] and sc.get("writer") is None
+          and "closed nothing" in text(r) and not spool_files(), [sc, text(r)])
+    r = c.call("resolve_asks", {"handles": [5, "A5"]})
+    r2 = c.call("resolve_asks", {})
+    check("resolve: handles not an array of strings, or missing: isError, nothing written",
+          r.get("isError") is True and r2.get("isError") is True and not spool_files(), [text(r), text(r2)])
+    snap_items[:] = [it for it in snap_items if it.get("handle") not in ("A3", "A4")]
+    wjson(os.path.join(DATA, "snapshot.json"), {"v": 1, "items": snap_items})
     check("server 1 exits 0 when stdin closes", c.close() == 0)
 
     print("== handles from the writer")
@@ -485,6 +552,19 @@ def main():
           s2.get("handles") == ["A10", "A12"] and s2.get("replaces_turn") is True and open7 == ["A10", "A12"], [s2.get("handles"), open7])
     st = rjson(os.path.join(DATA, "mcp", SID, "7.json"), {})
     check("state file records the handles", st.get("handles") == ["A10", "A12"], st)
+    r = c.call("resolve_asks", {"handles": ["A10"]})
+    sc = r.get("structuredContent") or {}
+    a10 = next((it for it in rjson(os.path.join(DATA, "snapshot.json"), {}).get("items", []) if it.get("handle") == "A10"), {})
+    ev = fw.acts[-1] if fw.acts else {}
+    check("resolve with a writer: applied, said without the pending line; A10 resolved by the agent",
+          sc.get("resolved") == ["A10"] and sc.get("writer") == "applied" and "has not applied" not in text(r)
+          and a10.get("status") == "resolved" and a10.get("resolvedBy") == "agent", [sc, a10])
+    check("resolve: no note, no note key; the turn is the map's (7)", ev.get("turn") == 7 and "note" not in ev
+          and ev.get("handle") == "A10" and ev.get("actor") == "agent", ev)
+    r = c.call("resolve_asks", {"handles": ["A10"]})
+    sc = r.get("structuredContent") or {}
+    check("resolve the same handle again: already closed, no event", sc.get("already_closed") == ["A10"]
+          and sc.get("resolved") == [] and len(fw.acts) == 1, sc)
     fw.stop = True
     fw.join(2)
     check("server 2 exits 0", c.close() == 0)
@@ -568,7 +648,7 @@ def main():
     c.init()
     tl = c.req("tools/list")["result"]["tools"]
     r = c.call("open_asks")
-    check("LEDGR_TERMINAL stands in for HC_TERMINAL_ID", len(tl) == 3 and "herdr:iterm-2" in json.dumps(r.get("structuredContent")), r)
+    check("LEDGR_TERMINAL stands in for HC_TERMINAL_ID", len(tl) == 4 and "herdr:iterm-2" in json.dumps(r.get("structuredContent")), r)
     c.close()
 
     print("== hygiene")
@@ -587,7 +667,8 @@ def main():
     pyc = [os.path.join(dp, n) for dp, dn, fn in os.walk(BIN) for n in dn + fn if n == "__pycache__" or n.endswith(".pyc")]
     check("no bytecode in the mod folder (the server ran without -B)", not pyc, pyc)
     lg = open(os.path.join(DATA, "log", "mcp.log")).read() if os.path.exists(os.path.join(DATA, "log", "mcp.log")) else ""
-    check("log: ledgr-data/log/mcp.log has start, declare and exit lines", " start pid=" in lg and " declare " in lg and " exit pid=" in lg)
+    check("log: ledgr-data/log/mcp.log has start, declare, resolve and exit lines", " start pid=" in lg and " declare " in lg
+          and " resolve " in lg and "resolved=['A5', 'A4']" in lg and " exit pid=" in lg)
 
 
 if __name__ == "__main__":

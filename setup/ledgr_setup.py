@@ -40,8 +40,11 @@ HOOKS = [("SessionStart", "session-start.sh"), ("UserPromptSubmit", "user-prompt
 HOOK_MARK = "mods/ledgr/bin/adapters/"
 # ledgr's MCP server (mods/ledgr/bin/mcp/README.md): registered with Claude Code at user scope, once per
 # chosen config folder, plus these allow entries in that folder's settings file so a call never prompts.
+# A tool added later goes at the end: an earlier install's file gains it there (apply_mcp appends the
+# missing ones), so a fresh file and an upgraded one read the same; --check names a missing one.
 MCP_NAME = "ledgr"
-MCP_TOOLS = ["mcp__ledgr__declare_asks", "mcp__ledgr__open_asks", "mcp__ledgr__parked_questions"]
+MCP_TOOLS = ["mcp__ledgr__declare_asks", "mcp__ledgr__open_asks", "mcp__ledgr__parked_questions",
+             "mcp__ledgr__resolve_asks"]
 AGENTS = [("claude", "Claude Code", True), ("codex", "Codex", False), ("gemini", "Gemini CLI", False),
           ("opencode", "OpenCode", False)]
 PROVIDERS = [("anthropic", "Anthropic API (Claude Haiku; an API key in the Keychain)"),
@@ -992,7 +995,7 @@ def gather(ctx, st, f, a, file_answers, flags):
         ans["mcp"] = ask.yesno("Register ledgr's MCP server with Claude Code so agents can declare asks without printing a block?",
                                "The agent calls ledgr's declare_asks tool instead of writing a ledgr-asks block at the end of its reply, "
                                "so the terminal's last screen stays the work's; the block stays the fallback. Registered at user scope "
-                               "in each chosen Claude config folder (claude mcp add), with three allow entries so a call never prompts.", want)
+                               "in each chosen Claude config folder (claude mcp add), with an allow entry per tool so a call never prompts.", want)
         if ans["mcp"]:
             for path in files:
                 argv, d, line = mcp_command(ctx, path)
@@ -1005,8 +1008,8 @@ def gather(ctx, st, f, a, file_answers, flags):
                 if miss:
                     say(f'    and adds to {tilde(path)}: "permissions": {{"allow": [ ..., {", ".join(json.dumps(x) for x in miss)} ]}}')
                 if not ask.yesno(f"Do that for {tilde(os.path.dirname(path))}?", "The server reads and writes only ledgr-data; it "
-                                 "starts with each Claude Code session of that folder and offers three tools (declare_asks, open_asks, "
-                                 "parked_questions).", True):
+                                 f"starts with each Claude Code session of that folder and offers {len(MCP_TOOLS)} tools "
+                                 f"({', '.join(mcp_tool_names())}).", True):
                     ans["_mcp_declined"].append(path)
     else:
         ans["mcp"] = False
@@ -1546,6 +1549,37 @@ def perms_missing(path):
     return [x for x in MCP_TOOLS if x not in allow]
 
 
+def mcp_tool_names():
+    return [x.split("__")[-1] for x in MCP_TOOLS]
+
+
+def mcp_report(ctx, p, chose):
+    """--check's lines for one settings file, and the problem to count (None when healthy). A server
+    registered here whose allow entries lack a tool (usually an install from before that tool, such as
+    resolve_asks, was added) would prompt on its calls, so that is a problem whatever the answers say;
+    the remedy is to run the installer again with --mcp on, which appends the missing entries."""
+    reg, miss = mcp_registered(ctx, p), perms_missing(p)
+    folder = tilde(os.path.dirname(p))
+    lines = [f"  MCP server      {folder}: "
+             + {"ok": "ledgr registered (user scope)", "other": "ledgr registered at ANOTHER path"}.get(reg, "not registered")
+             + f"; allow entries {'present' if not miss else 'missing: ' + ', '.join(miss)}"]
+    if reg == "ok" and not miss:
+        return lines, None
+    _, _, line = mcp_command(ctx, p)
+    if reg != "ok":
+        lines.append(f"                  register: {line}")
+    if miss:
+        lines.append(f'                  allow: add {", ".join(json.dumps(x) for x in miss)} to "permissions.allow" in {tilde(p)}')
+    if reg == "ok" and miss:
+        why = "allow entries from an earlier install" if len(miss) < len(MCP_TOOLS) else "no ledgr allow entries in this file"
+        lines.append(f"                  the server is registered, but calls to {', '.join(miss)} would prompt ({why}): run "
+                     "./install.sh again with --mcp on (./install.sh --mcp on, or --yes --answers FILE --mcp on)")
+        return lines, f"MCP allow entries missing for {folder}: {', '.join(miss)} (run ./install.sh again with --mcp on)"
+    if chose:
+        return lines, f"MCP server or its allow entries missing for {folder}"
+    return lines, None
+
+
 def claude_env(d):
     env = dict(os.environ)
     env.pop("CLAUDE_CONFIG_DIR", None)
@@ -1863,18 +1897,11 @@ def cmd_check(ctx, args):
             bad.append(f"hooks missing in {tilde(p)}")
     chose = st.d.get("answers", {}).get("mcp") is True
     for p in files:
-        reg, miss = mcp_registered(ctx, p), perms_missing(p)
-        say(f"  MCP server      {tilde(os.path.dirname(p))}: "
-            + {"ok": "ledgr registered (user scope)", "other": "ledgr registered at ANOTHER path"}.get(reg, "not registered")
-            + f"; allow entries {'present' if not miss else 'missing: ' + ', '.join(miss)}")
-        if reg != "ok" or miss:
-            _, _, line = mcp_command(ctx, p)
-            if reg != "ok":
-                say(f"                  register: {line}")
-            if miss:
-                say(f'                  allow: add {", ".join(json.dumps(x) for x in miss)} to "permissions.allow" in {tilde(p)}')
-            if chose:
-                bad.append(f"MCP server or its allow entries missing for {tilde(os.path.dirname(p))}")
+        lines, problem = mcp_report(ctx, p, chose)
+        for ln in lines:
+            say(ln)
+        if problem:
+            bad.append(problem)
     for p, why in f.get("claude_configs") or []:
         if p not in files and not hooks_in(p):
             say(f"  ! {tilde(p)} ({why}) has no ledgr hooks: sessions started with that CLAUDE_CONFIG_DIR do not join (./install.sh offers it)")

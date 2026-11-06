@@ -28,7 +28,9 @@ Without `instruction` but with `turn_text`, the extractor is the only channel.
 - The MCP server (`bin/mcp/ledgr_mcp.py`, any MCP client): `declare_asks` writes an `asks` event with
   `source: "tool"` mid-turn (`replaces_turn` on a later call of the same turn), and the turn's Stop
   re-emits the declaration from `ledgr-data/mcp/<session>/<turn>.json` with its quotes checked against
-  the whole turn's text and the message uuid (`lib/ledgr_extract.tool_declaration`). An adapter's only
+  the whole turn's text and the message uuid (`lib/ledgr_extract.tool_declaration`). `resolve_asks`
+  closes asks the user's message answered or dropped (one `act` event each, `actor: "agent"`); both
+  instruction wordings tell the agent to call it before declaring anything new. An adapter's only
   part is giving `extract()` the turn and, when it can, the turn's full assistant text.
 - The block grammar and the levels: `lib/parse_block.py`, `lib/ledgr_asks.py` (blocking, needed,
   optional; `extract.threshold` applies to declared and extracted asks alike).

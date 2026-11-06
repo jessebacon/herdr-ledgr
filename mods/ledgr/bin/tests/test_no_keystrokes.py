@@ -1,5 +1,8 @@
-"""ledgr never sends keystrokes to a terminal (no `hc keys`, no `hc send`), and the panel's copy
-actions are clipboard plus focus only. A static check over the mod's own source (comments are
+"""ledgr never sends keystrokes to a terminal (no `hc keys`, no `hc send`, no find bar, no Enter).
+Staging is clipboard plus focus; the one thing beyond it is Herdr's `terminal.paste` (what ⌘V runs:
+the clipboard into the focused terminal, no Enter, no key names), allowed in exactly one place,
+nav.js stageIntoPrompt, with no arguments, reached from the panel only through its `stage` method
+(Paste answer(s), Paste into trunk). A static check over the mod's own source (comments are
 stripped first, so the rule may be written down); the runtime half is tests/test_nav.mjs.
     python3 -I -B tests/test_no_keystrokes.py
 """
@@ -50,19 +53,49 @@ FORBIDDEN = [
     (re.compile(r"System Events|keystroke\s+\"|CGEventPost|osascript"), "synthetic key events"),
 ]
 
+# Herdr commands no ledgr code may run: the find bar, and the image paste (Ctrl+V's: it may hand the
+# key to the program).
+BANNED_COMMANDS = {"terminal.search", "terminal.paste_image"}
+# A run(...) call on one line: the command and its argument text.
+RUN = re.compile(r"\brun\(\s*[\"'`]([^\"'`]+)[\"'`]\s*(?:,([^\n]*?))?\)")
+
 files = dict(sources())
 ok(len(files) > 10, f"found the mod's sources under {MOD}")
 for rel, text in files.items():
     for rx, what in FORBIDDEN:
         m = rx.search(text)
         ok(m is None, f"{rel}: {what}: {m.group(0) if m else ''}")
+    for name in BANNED_COMMANDS:
+        ok(name not in text, f"{rel}: runs {name}")
+    if rel.endswith(".js"):
+        for cmd, args in RUN.findall(text):
+            # No Enter, no key names, no line break handed to any command.
+            ok(not re.search(r"enter|\\r|\\n|\bkeys\b|\bsend\b", args or "", re.I), f"{rel}: run(\"{cmd}\", {args.strip()}) passes a key or a line break")
+        # terminal.paste is nav.js's alone (below).
+        if rel != "nav.js":
+            ok("terminal.paste" not in text, f"{rel}: terminal.paste outside nav.js stageIntoPrompt")
 
-# nav.js: the only door to a terminal is pane.focus; no hc at all, no find bar.
+# nav.js: the doors to a terminal are pane.focus and, in stageIntoPrompt only, one terminal.paste with
+# no arguments; no hc at all, no find bar.
 nav = files.get("nav.js", "")
 ok(nav, "nav.js present")
 ok(re.search(r"\bhc\b", nav) is None, "nav.js does not use hc")
 ok("terminal.search" not in nav, "nav.js opens no find bar")
-ok(set(re.findall(r"\brun\(\s*\"([^\"]+)\"", nav)) == {"pane.focus"}, "nav.js runs pane.focus only")
+ok(set(re.findall(r"\brun\(\s*\"([^\"]+)\"", nav)) == {"pane.focus", "terminal.paste"}, "nav.js runs pane.focus and terminal.paste only")
+ok(nav.count("terminal.paste") == 1 and 'run("terminal.paste");' in nav, "one terminal.paste, with no arguments")
+
+
+def function(text, name):
+    """The body of a top-level `export function name(...) {` in nav.js, up to its closing brace."""
+    m = re.search(rf"^export function {name}\([^)]*\) \{{(.*?)^\}}$", text, flags=re.S | re.M)
+    return m.group(1) if m else None
+
+
+sip = function(nav, "stageIntoPrompt")
+ok(sip is not None and 'run("terminal.paste");' in sip, "terminal.paste lives in stageIntoPrompt")
+ok("focusedOn(terminal)" in sip and sip.index("focusedOn(terminal)") < sip.index('run("terminal.paste")'), "stageIntoPrompt looks at the focus before it pastes")
+ok("PASTE.settle" in sip and "read_from_clipboard" in sip, "it pastes only after the settled focus and its own text on the clipboard")
+ok(re.search(r"\bf\.terminal === t\b", function(nav, "focusedOn") or "") is not None, "focusedOn compares Herdr's focused terminal with the target")
 
 
 def method(text, name):
@@ -75,12 +108,19 @@ def method(text, name):
 
 
 panel = files.get("panel.js", "")
-for name in ("copyAnswers", "copyAnswer", "stageAnswers"):
+for name in ("copyAnswers", "copyAnswer", "stageAnswers", "sendToTrunk", "copyConfluence", "stage"):
     body = method(panel, name)
     ok(body is not None, f"panel.js has {name}")
     for bad in ("hc(", "run(", "exec(", "openOverlay(", "goTo", "spawn("):
         ok(bad not in body, f"panel.js {name} calls {bad}")
-ok("stageText(msg, s.terminal, cx)" in method(panel, "stageAnswers"), "stageAnswers stages through nav.js stageText (clipboard + focus)")
+ok("this.stage(msg, s.terminal, cx" in method(panel, "stageAnswers"), "stageAnswers stages through the panel's stage")
+ok("this.stage(msg, ts.terminal, cx" in method(panel, "sendToTrunk"), "Paste into trunk stages through the panel's stage")
+ok("this.stage(msg, ts?.terminal, cx" in method(panel, "copyConfluence"), "the confluence again: the same stage")
+stage = method(panel, "stage")
+ok("stageIntoPrompt(msg, terminal, cx, { paste: this.pasteOn()" in stage, "stage goes through nav.js stageIntoPrompt and honours ui.pasteIntoPrompt")
+ok("pasteIntoPrompt !== false" in (method(panel, "pasteOn") or ""), "ui.pasteIntoPrompt is on unless set false")
+callers = [rel for rel, text in files.items() if rel != "nav.js" and "stageIntoPrompt(" in text]
+ok(callers == ["panel.js"] and panel.count("stageIntoPrompt(") == 1, f"one caller of stageIntoPrompt, the panel's stage: {callers}")
 go = method(panel, "goTo")
 ok(go is not None and "goToAnchor(" in go, "goTo goes through nav.js goToAnchor")
 for bad in ("hc(", "run(", "exec("):

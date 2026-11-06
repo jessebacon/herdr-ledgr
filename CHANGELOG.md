@@ -4,7 +4,74 @@
 
 First public shape of the mod. Built on Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311.
 
-### Who owns the closing list, declare by tool, honest profiles (2026-11-06)
+### Blocking survives working, the agent closes answered asks, paste into the prompt (2026-11-06)
+
+- The pane chip keeps its `blocking` state while the agent works: an open blocking ask at or above
+  `extract.threshold` no longer yields to `working` on every prompt and through every permission
+  wait. A working chip stays in `blocked` beside Herdr's own spinner and does not pulse; it pulses
+  once the turn ends still blocking. The chip record gains `w: 1` for a working session, the tooltip
+  adds "agent working", and `ledgr-pane.demo-chip:blocking-working` draws the look. (The host
+  button's `◆` count reads `b`, which was never muted, and is unchanged.)
+- ASKED OF YOU: a turn group holding an open blocking ask stays unfolded with its `◆` rows, as the
+  newest group does; the person's own click still wins (`groupOpen()` in `store.js`), and a folded
+  group that still holds a blocker shows "◆ N blocking" in `blocked`.
+- `resolve_asks`, a fourth MCP tool, loaded upfront like `declare_asks`: `{handles: ["A4", …],
+  note?}` maps handles to this session's agent asks through `snapshot.json`, as `open_asks` does, and
+  drops one `act` spool event per ask still open, deferred or answered (`action: "resolve"`,
+  `actor: "agent"`, `handle`, `turn`, `note`; built by `ledgr_spool.act()`); it returns `resolved`,
+  `unknown` and `already_closed`. The writer's `on_act` takes only `resolve` from the agent and sets
+  `resolvedBy: "agent"` and `resolvedNote`; the Closed list reads "closed by the agent at turn N ·
+  note". Done stays the person's override and Reopen still works. Both instruction wordings and the
+  server's `instructions` gain one sentence: when the user's message answers or drops an open ask,
+  call `resolve_asks` with its handles before declaring anything new.
+- Answered, then settled: an ask marked answered (an `[A3]` ref in a prompt, which now records
+  `answeredTurn`, or the answer sheet) becomes `resolved` with `resolvedBy: "answer"` ("answered by
+  you at turn N") when the writer applies that turn's `asks` event, after the re-raise rules; a reply
+  that raised it again reopens it in place, as before. `skip` settles too; `pending`, a mid-turn tool
+  call and `error` do not. Parked questions are untouched. `setStatus` clears `resolvedBy` and
+  `resolvedNote` on every status change, so a reopened item no longer keeps "resolved by its branch".
+- Installer: `MCP_TOOLS` gains `mcp__ledgr__resolve_asks`, appended last so an earlier install's
+  settings file gains it in place (install, `--check` and uninstall follow). `--check` counts a
+  settings file whose server is registered but lacks an allow entry as a problem, whatever the
+  answers say, with the remedy "run ./install.sh again with --mcp on". Running sessions see the new
+  tool after `/mcp` reconnects the server, or a restart; the new instruction sentence reaches a
+  session at its next SessionStart.
+- Paste into the prompt (Jesse, 2026-11-06: "yes, build it: focus the pane, confirm focus, paste, no
+  Enter, lead-in kept"). The answer sheet, one answer and the confluence are now pasted into the
+  target's prompt instead of left on the clipboard. `nav.js` `stageIntoPrompt` writes the clipboard,
+  runs `pane.focus`, then looks at Herdr's `focused()` every 50 ms for up to 600 ms and runs
+  `terminal.paste` (the command behind ⌘V; no arguments) once the target terminal has had the focus,
+  with no other terminal shown in its pane, on two looks in a row (100 ms at the earliest) and the
+  clipboard still holds the same text. It pastes nothing into a terminal that is not live, runs no
+  agent (a shell could run a pasted line) or whose agent waits on its own prompt (`blocked`, a
+  permission menu), nor when the focus is not confirmed in time; the text then stays on the
+  clipboard. Enter is never sent, and `hc keys`, `hc send` and `terminal.search` stay banned. The
+  panel's `stage()` is the only caller and ignores a second click while a paste is pending.
+- Words and the switch: the buttons read "Paste 2 answers into pane t3", "Paste answer", "Paste into
+  trunk" and "Paste confluence again" (`words.js` `stageLabels`), and the status line says what
+  happened (`stagedWords`): "Answer for Ask 2 pasted into the prompt in pane t3, not sent: add a word
+  of your own, such as “My answer to A2:”, then press Enter.", with its own wording for each case
+  that pasted nothing (not live, no agent, waiting on its own prompt, focus not confirmed, clipboard
+  changed, an error). The lead-in stays (Claude Code presents a paste as possibly not the person's
+  words), and the person sends the prompt. `ui.pasteIntoPrompt` (`config.js`, `ledgr_config.py`;
+  default `true`, no installer question) set to `false` brings back clipboard plus focus and the old
+  labels ("Copy answers", "Copy answer", "Send to trunk", "Copy confluence again"). Go to anchor,
+  Copy for prompt, `/btw` and Ask for a conclusion stay clipboard plus focus.
+- Paste tests and the live probe: `test_nav.mjs` 233 checks (the focus confirmed at once, late,
+  flickering or never; another terminal shown in the pane; the clipboard changed; a look that throws;
+  every case that pastes nothing; over every call, no `hc`, no Enter or line break in any argument,
+  `terminal.paste` only without arguments); `test_no_keystrokes.py` 313 (`terminal.paste` only in
+  `stageIntoPrompt`, after its focus check, reached only from the panel's `stage`;
+  `terminal.paste_image` banned); `test_store.mjs` the default and the words. `herdr-app check`
+  passes. Live, on throwaway panes: `pane.focus` returned in 15 ms, the focus was confirmed at 24 ms,
+  `terminal.paste` succeeded and `hc read` showed the probe once, not submitted; a raw-byte probe
+  received exactly `ESC[200~ … \n … ESC[201~`, so a line break stays inside the bracketed paste. A
+  paste joins a draft already in the prompt (known and accepted: the person still presses Enter).
+- Tests: store 478 checks (69 new: blocking while working, the fold rule, closed by the agent,
+  answered then settled; 20 for the paste default and words), nav 233, no keystrokes 313, mcp 76,
+  hooks 127, installer 69.
+
+### ccdaa4f: who owns the closing list, declare by tool, honest profiles
 
 - `asks.handoff` (`ledgr` default, `both`, `prose`; installer: "Who owns the closing list the agent
   gives you?", `--asks-handoff`, answers key `asks_handoff`): in `ledgr` mode the agent keeps blocking

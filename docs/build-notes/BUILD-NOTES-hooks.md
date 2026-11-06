@@ -291,6 +291,44 @@ Offline runs point `LEDGR_KEYCHAIN_SERVICE` at a service that does not exist, so
   invented quote dropped, the final message's uuid used, no reinject, `source=tool` in hook.log.
 - `test-hooks.sh` timing: over 100 ms with a load average over 8 is a warning, not a failure.
 
+### Closed by the agent: resolve_asks (2026-11-06)
+
+Jesse found Done redundant after answering an ask in the prompt. The reference is
+`mods/ledgr/bin/mcp/README.md` "resolve_asks"; the writer's part is `BUILD-NOTES-mod.md` section 15.
+
+- `bin/mcp/ledgr_mcp.py` `t_resolve`: `resolve_asks(handles, note?)`, second in `tools/list` and
+  loaded upfront (`_meta["anthropic/alwaysLoad"]`) like `declare_asks`. Handles are normalised as
+  `store.js` `byHandle` does (`norm_handle`: brackets and spaces dropped, upper case), deduplicated,
+  at most 30 (`MAX_RESOLVE`); a single string or the array as JSON text is read as the list. The map is
+  `open_asks`'s: this session's agent asks in `snapshot.json`. Open, deferred or answered: one event
+  each; resolved or dismissed: `already_closed`; anything else (another session's, a typo, a `Q`
+  handle, with a note): `unknown`. Neither is an error. It then waits for the writer as
+  `declare_asks` does (`wait_applied("act")`: `applied`, `timeout`, `idle`) and logs one `resolve`
+  line in `mcp.log`.
+- `bin/lib/ledgr_spool.py` `act(t, sid, *, item, action, actor, handle, turn=None, note=None,
+  arg=None)`: the first `act` built outside the panel, `{item, action: "resolve", arg: null, actor:
+  "agent", handle, turn, [note]}`; `turn` is null on a synthetic session the store does not hold yet. The panel's own
+  `act` events carry none of `actor`, `handle`, `turn` or `note`, so the writer reads them as the
+  person's.
+- The instruction: `lib/asks-instruction-ledgr.txt` and `-both.txt` end with "When the user's message
+  answers or drops an open ask (open_asks lists them with handles such as A4), call resolve_asks with
+  those handles before declaring anything new." The server's `instructions` string carries the same
+  clause. The hooks print a wording again only at SessionStart or on a mode change, so a running
+  session gets the sentence at its next SessionStart.
+- Installer: `MCP_TOOLS` ends with `mcp__ledgr__resolve_asks`, so `apply_mcp` appends it to an earlier
+  install's allow list and leaves the rest in place; uninstall's filter removes all four. `mcp_report`
+  (new, used by `--check`) counts a settings file whose server is registered but lacks an allow entry
+  as a problem whatever the answers say, and says to run `./install.sh` again with `--mcp on`. The
+  interactive MCP question names the tools from `MCP_TOOLS`.
+- After the install, running sessions need `/mcp` to reconnect the server (or a restart) to see the
+  tool.
+- Tests: `test_mcp.py` 76 checks (13 new: the schema and `alwaysLoad`, the `instructions` clause,
+  open and answered asks closed with the contract fields, closed and unknown handles reported, bad
+  input refused with nothing written, and through the fake writer `resolvedBy: "agent"` and a second
+  call finding it closed); installer 69 (`test_mcp`: the fourth entry, `mcp_report` healthy, declined,
+  missing, and an earlier install's three entries upgraded in place). `test-hooks.sh` (127) is
+  unchanged.
+
 ## Confirmed live (2026-11-05)
 
 - The owner pid is the claude process: live map entries show t3 -> 4817 and t2 -> 60575, both `claude`, matching `~/.claude/sessions/<pid>.json` for those sessions.

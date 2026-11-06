@@ -14,11 +14,13 @@
 //   branch (open the Branch confirmation on the newest open parked question), branch-split,
 //   branch-agent (its placement), launch-branch (its Launch button), expand-branches, sessions
 //   (the session menu); Phase 3: conclude (Conclude… on the newest branch that can), conclude-edit:<text>
-//   (append a line to the open editor), send-to-trunk, ask-conclusion, copy-confluence, close-branch
-//   (twice: the two clicks), copy-answers (the newest turn with typed answers).
+//   (append a line to the open editor), send-to-trunk (Paste into trunk), ask-conclusion, copy-confluence
+//   (Paste confluence again), close-branch (twice: the two clicks), copy-answers (Paste answers: the newest
+//   turn with typed answers). The paste commands paste into the prompt only as the clicks do
+//   (ui.pasteIntoPrompt, focus confirmed; never Enter).
 //   For scripted looks: fold-mine, fold-asks (fold or unfold a lane), collapse-all (every open row, box and note),
 //   hide-branch:<hc name> (demo only: drop that branch from the demo store);
-//   pick:<handle>:<n> (click option n of an ask), copy-answer:<handle> (its Copy answer button),
+//   pick:<handle>:<n> (click option n of an ask), copy-answer:<handle> (its Paste answer button),
 //   go:<handle> (its ⋯ Go to anchor), session:<terminal|sid prefix> (show that session, as the session
 //   menu does).
 //   Severity and motion: act:<handle>:<resolve|dismiss|reopen|promote>, below-threshold (alias

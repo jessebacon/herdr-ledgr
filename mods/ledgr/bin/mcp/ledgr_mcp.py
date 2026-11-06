@@ -30,11 +30,14 @@ call from terminals/<t>.json, because the hooks may map it after the server star
     terminal's synthetic session `herdr:<t>`, exactly as the capture box does, said in the result.
   No terminal id, or LEDGR_INNER set (a process a ledgr hook started): tools/list is empty.
 
-Tools: declare_asks(items), open_asks(), parked_questions(). declare_asks writes
-ledgr-data/mcp/<session>/<turn>.json (the turn's declaration: call count, event ids, asks, handles);
-a second call in the same turn sets `replaces_turn: true` on its event. After emitting it waits up
-to LEDGR_MCP_WAIT_MS (default 2500) for the writer to ingest the event and reads the handles from
-snapshot.json; when the writer is not running (spool files older than 5 s) it does not wait.
+Tools: declare_asks(items), resolve_asks(handles, note?), open_asks(), parked_questions().
+declare_asks writes ledgr-data/mcp/<session>/<turn>.json (the turn's declaration: call count, event
+ids, asks, handles); a second call in the same turn sets `replaces_turn: true` on its event. After
+emitting it waits up to LEDGR_MCP_WAIT_MS (default 2500) for the writer to ingest the event and reads
+the handles from snapshot.json; when the writer is not running (spool files older than 5 s) it does
+not wait. resolve_asks maps each handle to this session's agent ask in snapshot.json (the items
+open_asks lists) and drops one `act` event per ask still open, deferred or answered (action
+"resolve", actor "agent", the handle, the turn); it waits for the writer the same way.
 """
 import json
 import os
@@ -78,7 +81,11 @@ INSTRUCTIONS = (
     "ledgr keeps the list of what the user must decide or do beside this conversation. When a reply "
     "leaves something blocking or needed for the user, call declare_asks once, when the work of the "
     "reply is done, and end the reply with the pointer line it returns, instead of a closing list or a "
-    "ledgr-asks block. open_asks shows what is already recorded, with handles such as A7.")
+    "ledgr-asks block. open_asks shows what is already recorded, with handles such as A7; when the user's "
+    "message answers or drops one of them, call resolve_asks with its handle before declaring anything new.")
+
+MAX_RESOLVE = 30                     # handles per resolve_asks call (the extractor lists at most 30 open asks)
+CLOSED = ("resolved", "dismissed")   # store.js isClosed
 
 ITEM_SCHEMA = {
     "type": "object",
@@ -112,6 +119,24 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {"items": {"type": "array", "items": ITEM_SCHEMA,
                                                                     "maxItems": A.MAX_ASKS}},
                         "required": ["items"], "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,
+                        "openWorldHint": False},
+        "_meta": {"anthropic/alwaysLoad": True},
+    },
+    {
+        "name": "resolve_asks",
+        "title": "Close asks the user settled",
+        "description": (
+            "Close asks the user has answered or made moot in their latest message, by handle (A4, as "
+            "open_asks and declare_asks give them). Call it before declare_asks in the same reply. Never "
+            "close an ask the user has not addressed; the user can reopen one in the panel. note: one line "
+            "on how it was settled, only if it helps. Unknown or already closed handles are reported, not "
+            "errors."),
+        "inputSchema": {"type": "object",
+                        "properties": {"handles": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                                                   "maxItems": MAX_RESOLVE, "description": "Handles such as A4."},
+                                       "note": {"type": "string", "description": "One line, optional."}},
+                        "required": ["handles"], "additionalProperties": False},
         "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,
                         "openWorldHint": False},
         "_meta": {"anthropic/alwaysLoad": True},
@@ -286,6 +311,11 @@ def handle_num(h):
         return 0
 
 
+def norm_handle(h):
+    """store.js byHandle: brackets and spaces dropped, upper case ("[a4]" is A4)."""
+    return re.sub(r"[\[\]\s]", "", h).upper() if isinstance(h, str) else ""
+
+
 def threshold_of(cfg):
     v = str(((cfg or {}).get("extract") or {}).get("threshold") or "").strip().lower()
     return v if v in A.LEVELS else "needed"
@@ -329,7 +359,8 @@ class Server:
             self.wait_ms = 2500
         self.handlers = {"ping": self.m_ping, "server/discover": self.m_discover, "tools/list": self.m_tools_list,
                          "tools/call": self.m_tools_call}
-        self.tools = {"declare_asks": self.t_declare, "open_asks": self.t_open, "parked_questions": self.t_parked}
+        self.tools = {"declare_asks": self.t_declare, "resolve_asks": self.t_resolve, "open_asks": self.t_open,
+                      "parked_questions": self.t_parked}
         log(f"start pid={os.getpid()} terminal={self.who.terminal or '-'} inner={self.who.inner} "
             f"config_dir={self.who.config_dir} profile={self.who.profile} owner={self.who.owner} "
             f"data={C.DATA} python={sys.version.split()[0]} tools={'on' if self.who.enabled else 'off'}")
@@ -684,6 +715,24 @@ class Server:
                 return [None] * len(asks), "timeout"
             time.sleep(0.05)
 
+    def wait_applied(self, kind):
+        """applied once the writer has ingested this process's `kind` spool files; timeout after
+        LEDGR_MCP_WAIT_MS; idle when no writer is ingesting (writer_idle), without waiting."""
+        spool, mine = C.path("spool"), f"-{kind}-{os.getpid()}-"
+        if self.writer_idle(spool):
+            return "idle"
+        deadline = time.monotonic() + self.wait_ms / 1000.0
+        while True:
+            try:
+                pending = any(mine in n for n in os.listdir(spool) if not n.startswith("."))
+            except OSError:
+                pending = False
+            if not pending:
+                return "applied"
+            if time.monotonic() >= deadline:
+                return "timeout"
+            time.sleep(0.05)
+
     def writer_idle(self, spool):
         """True when the spool holds an event older than WRITER_STALE_S: no writer is ingesting."""
         cut = time.time() - WRITER_STALE_S
@@ -722,6 +771,75 @@ class Server:
                     os.unlink(p)
                 except OSError:
                     pass
+
+    def t_resolve(self, args):
+        hs, note = args.get("handles"), args.get("note")
+        if isinstance(hs, str):                    # one handle, or the array as JSON text
+            try:
+                v = json.loads(hs)
+            except Exception:
+                v = hs
+            hs = v if isinstance(v, list) else [v]
+        if not isinstance(hs, list) or not all(isinstance(h, str) for h in hs):
+            return text_result('ledgr: handles must be an array of handles such as ["A4"]. Nothing closed.',
+                               {"ok": False, "error": "handles must be an array of strings"}, error=True)
+        if note is not None and not isinstance(note, str):
+            return text_result("ledgr: note must be one line of text. Nothing closed.",
+                               {"ok": False, "error": "note must be a string"}, error=True)
+        ctx = self.who.resolve()
+        if ctx.get("error"):
+            return text_result("ledgr: " + ctx["error"], {"ok": False, "error": ctx["error"]}, error=True)
+        sid, t = ctx["session_id"], ctx["terminal"]
+        turn = ctx["turn"] if not ctx["synthetic"] or ctx.get("in_store") else None
+        note = (C.squash(note)[:200] or None) if note else None
+        wanted, notes = [], []
+        for raw in hs:
+            h = norm_handle(raw)
+            if h and h not in wanted:
+                wanted.append(h)
+        if len(wanted) > MAX_RESOLVE:
+            notes.append(f"only the first {MAX_RESOLVE} handles were read")
+            wanted = wanted[:MAX_RESOLVE]
+        # The handle map open_asks uses: this session's agent asks in snapshot.json, by handle.
+        mine = [it for it in snapshot_items() if session_of(it) == sid and it.get("direction") == "agent_to_human"
+                and isinstance(it.get("id"), str)]
+        resolved, unknown, already, ev_ids = [], [], [], []
+        for h in wanted:
+            found = [it for it in mine if it.get("handle") == h]
+            live = [it for it in found if it.get("status") not in CLOSED]
+            if not found:
+                unknown.append(h)
+                if re.match(r"^Q\d+$", h):
+                    notes.append(f"{h} is a parked question, not an ask; resolve_asks closes asks only")
+            elif not live:
+                already.append(h)
+            else:
+                ev_ids.append(S.act(t, sid, item=live[0]["id"], action="resolve", actor="agent", handle=h,
+                                    turn=turn, note=note))
+                resolved.append(h)
+        how = self.wait_applied("act") if ev_ids else None
+        log(f"resolve {sid} turn={turn} resolved={resolved} already_closed={already} unknown={unknown} "
+            f"note={'yes' if note else 'no'} events={len(ev_ids)} writer={how}")
+
+        lines = [f"ledgr closed {', '.join(resolved)} as resolved by the agent"
+                 + (f" (turn {turn})" if turn is not None else "") + "; the user can reopen any of them in the panel."
+                 if resolved else "ledgr closed nothing."]
+        if already:
+            lines.append(f"Already closed: {', '.join(already)}.")
+        if unknown:
+            lines.append(f"Not an ask of this session: {', '.join(unknown)} (open_asks lists the handles).")
+        lines += [f"Note: {x}." for x in notes]
+        if resolved and how != "applied":
+            lines.append("ledgr's writer has not applied this yet; the panel shows them closed once it does.")
+        if ctx.get("note"):
+            lines.append(f"Note: {ctx['note']}; this is the terminal's synthetic session {sid}.")
+        data = {"ok": True, "session_id": sid, "turn": turn, "synthetic": ctx["synthetic"], "resolved": resolved,
+                "unknown": unknown, "already_closed": already, "event_ids": ev_ids, "writer": how}
+        if notes:
+            data["notes"] = notes
+        if ctx.get("note"):
+            data["note"] = ctx["note"]
+        return text_result("\n".join(lines), data)
 
     def t_open(self, args):
         ctx = self.who.resolve()

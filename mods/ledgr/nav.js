@@ -2,11 +2,16 @@
 // message); then the agent's pane is focused and a distinctive slice of the quote goes on the
 // clipboard, with a note saying how to search for it.
 // ledgr never sends keystrokes to a terminal: no `hc keys`, no `hc send` (it presses Enter), and it
-// opens no find bar. Every staging (answers, /btw, a confluence, a search slice) is clipboard plus
-// `pane.focus`; the person types and pastes. Until 2026-11-06 Go to anchor pressed `ctrl+o /` in an
-// idle Claude pane. Removed: ctrl+o toggles Claude Code's transcript viewer, so what those keys did
-// depended on a screen state the mod cannot see (bin/tests/test_no_keystrokes.py guards this).
-import { run, agents, terminals } from "herdr";
+// opens no find bar. Until 2026-11-06 Go to anchor pressed `ctrl+o /` in an idle Claude pane.
+// Removed: ctrl+o toggles Claude Code's transcript viewer, so what those keys did depended on a
+// screen state the mod cannot see (bin/tests/test_no_keystrokes.py guards this).
+// Staging: Go to anchor, Copy for prompt, /btw and Ask for a conclusion are clipboard plus
+// `pane.focus` (stageText); the person pastes. The answer sheet, Copy answer and the confluence go
+// one step further (2026-11-06, Jesse): stageIntoPrompt also runs Herdr's `terminal.paste` (the
+// command ⌘V is bound to: the clipboard into the focused terminal, no Enter, no key names), and only
+// after Herdr reports the target terminal focused. It never presses Enter: the person reads what
+// landed, adds a word of their own and sends it (ui.pasteIntoPrompt false: clipboard plus focus).
+import { run, agents, terminals, focused } from "herdr";
 
 export function agentOf(t) {
   return t ? agents().find((a) => a.address === t) ?? null : null;
@@ -67,6 +72,64 @@ export function goToAnchor(item, session, cx) {
 export function stageText(text, terminal, cx) {
   cx.write_to_clipboard(text);
   if (terminal && isLive(terminal)) run("pane.focus", { terminal });
+}
+
+// How long stageIntoPrompt waits for Herdr to report the target focused, how often it looks, and
+// how many looks in a row must agree before it pastes (two: never in the click's own tick, and not
+// on a focus that is still moving).
+export const PASTE = { waitMs: 600, stepMs: 50, settle: 2 };
+
+// Whether keyboard input now goes to terminal t: Herdr's actual focus is t, and no other terminal
+// is shown in its place (terminal.show).
+export function focusedOn(t) {
+  const f = focused();
+  return Boolean(t && f && f.terminal === t && (!f.shown || f.shown === t));
+}
+
+// Why stageIntoPrompt will not paste into terminal t (null: it may). "off": ui.pasteIntoPrompt is
+// false; "gone": not live; "plain": no agent runs there (a shell may run what a paste holds);
+// "blocked": the agent waits on its own prompt (a permission menu, not the input box).
+export function pasteBlock(t, paste = true) {
+  if (!t || !isLive(t)) return "gone";
+  if (!paste) return "off";
+  const a = agentOf(t);
+  if (!a) return "plain";
+  return a.status === "blocked" ? "blocked" : null;
+}
+
+// The one-click paste. Must be called from an event handler (the clipboard is written with that
+// call's cx). In order: the text on the clipboard; the target's pane focused; then, if pasteBlock
+// allows it, a task looks at Herdr's focus every PASTE.stepMs, and once the target has been the
+// focused terminal PASTE.settle looks in a row (and the clipboard still holds this text) runs
+// `terminal.paste` once. No Enter, no key names, no other terminal: if the focus is not confirmed
+// within PASTE.waitMs nothing is pasted and the text stays on the clipboard (today's ⌘V by hand).
+// Returns "pasting" (the task decides) or the pasteBlock reason; `done(result, cx)` gets
+// {pasted: true, ms} or {pasted: false, why} ("off", "gone", "plain", "blocked", "focus",
+// "clipboard", "error"), synchronously for a reason known at once.
+export function stageIntoPrompt(text, terminal, cx, { paste = true, done } = {}) {
+  cx.write_to_clipboard(text);
+  const why = pasteBlock(terminal, paste);
+  if (why !== "gone") run("pane.focus", { terminal });
+  if (why) { done?.({ pasted: false, why }, cx); return why; }
+  const same = (a) => String(a ?? "").replace(/\r\n?/g, "\n") === String(text).replace(/\r\n?/g, "\n");
+  cx.spawn(async (cx) => {
+    let seen = 0, r = { pasted: false, why: "focus" };
+    try {
+      for (let ms = PASTE.stepMs; ms <= PASTE.waitMs; ms += PASTE.stepMs) {
+        await cx.sleep(PASTE.stepMs);
+        seen = focusedOn(terminal) ? seen + 1 : 0;
+        if (seen < PASTE.settle) continue;
+        if (!same(cx.read_from_clipboard())) { r = { pasted: false, why: "clipboard" }; break; }
+        run("terminal.paste");
+        r = { pasted: true, ms };
+        break;
+      }
+    } catch (e) {
+      r = { pasted: false, why: "error", error: String(e?.message ?? e) };
+    }
+    done?.(r, cx);
+  });
+  return "pasting";
 }
 
 // The answer sheet's one message (spec 6.4) moved to confluence.js (answersSheet) in Phase 3: it now

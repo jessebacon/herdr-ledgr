@@ -41,7 +41,10 @@ DEFAULT_CONFIG = {
     "nav": {"autoSearch": False},
     "branch": {"maxDepth": 2},
     "ui": {"foldAsksWhileWorking": False,     # the panel's: True = the asks lane folds while the agent works
-           "animations": True},               # the panel's and chip's: False = no motion at all
+           "animations": True,                # the panel's and chip's: False = no motion at all
+           "pasteIntoPrompt": True},          # the panel's: True = Paste answer(s) / Paste into trunk paste
+                                              # the message into the target's prompt (terminal.paste, once
+                                              # its pane has the focus; never Enter); False = clipboard + focus
     "retention_days": 14,
 }
 

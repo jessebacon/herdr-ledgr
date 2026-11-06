@@ -35,7 +35,12 @@ confluence_landed  UserPromptSubmit whose prompt starts  turn (the trunk's new t
 answers_landed  UserPromptSubmit whose prompt starts  turn, for_session (the marker's session id),
                 (Phase 3)                             handles ["A3"], answers {"A3": text (400)},
                 with "ledgr answers <session id>"     prompt_id. Emitted after prompt
-Written by the mod, not here: capture (a full Request), act, retry, branch (the panel's
+act             the agent closes asks the user        item (an item id), action ("resolve"), arg
+                answered (bin/mcp resolve_asks)       (null), actor ("agent"), handle ("A4"),
+                                                      turn|null, [note] (one line, 200 chars); the
+                                                      panel's own act events carry none of actor,
+                                                      handle, turn or note
+Written by the mod, not here: capture (a full Request), act (the person's), retry, branch (the panel's
 Branch confirmation: item, branch_id, placement, isolate), forget (session_id), conclude (Phase 3:
 branch_id, item, text, message, source, source_turn), close_branch (Phase 3: branch_id).
 
@@ -118,3 +123,12 @@ def confluence_landed(t, sid, *, turn, branch_id, item_id, prompt_id=None, concl
 def answers_landed(t, sid, *, turn, for_session, handles, answers, prompt_id=None, at=None):
     return emit("answers_landed", t, sid, {"turn": turn, "for_session": for_session, "handles": list(handles),
                                            "answers": dict(answers), "prompt_id": prompt_id}, at)
+
+
+def act(t, sid, *, item, action, actor, handle, turn=None, note=None, arg=None, at=None):
+    """An act on one item from outside the panel (the panel writes its own): today only the MCP
+    server's resolve_asks, actor "agent". The writer sets resolvedBy from actor."""
+    p = {"item": item, "action": action, "arg": arg, "actor": actor, "handle": handle, "turn": turn}
+    if note:
+        p["note"] = note
+    return emit("act", t, sid, p, at)

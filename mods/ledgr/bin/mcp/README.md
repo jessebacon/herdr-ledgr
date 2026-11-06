@@ -11,6 +11,7 @@ and its state live in `ledgr-data`).
 | Tool (Claude Code name) | What it does |
 |---|---|
 | `declare_asks(items)` (`mcp__ledgr__declare_asks`) | records this turn's blocking and needed items and returns their handles, the repeats, the rejected items with reasons, and the pointer line |
+| `resolve_asks(handles, note?)` (`mcp__ledgr__resolve_asks`) | closes the asks the user answered or made moot in their latest message, by handle, and reports which were closed, already closed or unknown |
 | `open_asks()` (`mcp__ledgr__open_asks`) | this session's open asks and the ones dismissed in the last 7 days, with handles (`A7`) |
 | `parked_questions()` (`mcp__ledgr__parked_questions`) | the user's parked questions that are released to the agent (see "Parked questions") |
 
@@ -49,10 +50,10 @@ CLAUDE_CONFIG_DIR=/Users/<you>/.claude-work claude mcp add --scope user --transp
 
 - A running session does not pick up a newly added server until it restarts (or `/mcp` reconnects
   it). `--check` can run `claude mcp get ledgr` per folder to report it.
-- `declare_asks` sets `_meta["anthropic/alwaysLoad"]: true`, so Claude Code loads it upfront instead
-  of behind tool search. It is the primary channel, and its description is about 540 characters. The
-  other two tools stay deferred. A user who sets `"alwaysLoad": false` on the server entry defers all
-  three.
+- `declare_asks` and `resolve_asks` set `_meta["anthropic/alwaysLoad"]: true`, so Claude Code loads
+  them upfront instead of behind tool search: both are called at the moment a reply is being written,
+  when a search would be skipped. `open_asks` and `parked_questions` stay deferred. A user who sets
+  `"alwaysLoad": false` on the server entry defers all four.
 
 ### Permission entries
 
@@ -60,11 +61,16 @@ So that a call never prompts, add these to `permissions.allow` in every settings
 hooks (the same `claude_settings` list), idempotently, with the usual backup:
 
 ```json
-"permissions": { "allow": ["mcp__ledgr__declare_asks", "mcp__ledgr__open_asks", "mcp__ledgr__parked_questions"] }
+"permissions": { "allow": ["mcp__ledgr__declare_asks", "mcp__ledgr__open_asks", "mcp__ledgr__parked_questions",
+                           "mcp__ledgr__resolve_asks"] }
 ```
 
-`"mcp__ledgr__*"` covers the same three tools, and any tool added later. The explicit names are
-narrower. Uninstall removes exactly these entries.
+`"mcp__ledgr__*"` covers the same four tools, and any tool added later. The explicit names are
+narrower. Uninstall removes exactly these entries. `mcp__ledgr__resolve_asks` came after the first
+three: a settings file from an earlier install lacks it, so `resolve_asks` would prompt. `--check`
+reports such a file ("the server is registered, but calls to mcp__ledgr__resolve_asks would
+prompt"), and running `./install.sh` again with `--mcp on` appends the entry and leaves the rest
+alone. A running session sees the new tool after `/mcp` reconnects the server, or a restart.
 
 ## Identity
 
@@ -147,10 +153,51 @@ asks are the turn's whole list. An explicit empty list in a later call of the sa
 event with `asks: []` and `replaces_turn: true`, which clears the turn. An empty list in a turn with no
 earlier call writes nothing.
 
+## resolve_asks
+
+Input: `{"handles": ["A4", …], "note"?: "one line"}`. A handle is matched the way `store.js`
+`byHandle` matches it (brackets and spaces dropped, upper case, so `[a4]` is `A4`); duplicates count
+once, and at most 30 are read. A single string, or the array sent as JSON text, is read as the list.
+
+- The map is the one `open_asks` shows: this session's agent asks (`direction: "agent_to_human"`,
+  `anchor.sessionId` the resolved session) in `snapshot.json`, by `handle`. The session comes from
+  the same identity rule as the other tools, so a child agent is refused and an unmapped terminal
+  uses `herdr:<t>`.
+- An ask whose status is `open`, `deferred` or `answered` is closed: one `act` spool event each,
+  through `ledgr_spool.act`. An ask already `resolved` or `dismissed` (`store.js` `isClosed`) is
+  reported in `already_closed` with no event. A handle that is not an ask of this session (another
+  session's, a typo, a parked question `Q3`) is reported in `unknown`, with a note for a `Q` handle.
+  Neither is an error: the result is `isError` only when `handles` is not an array of strings, `note`
+  is not a string, or the identity check refuses the call.
+- `note` is squashed to one line and cut at 200 characters. It goes on each event only when given.
+- The server then waits for the writer the way `declare_asks` does (`LEDGR_MCP_WAIT_MS`, no wait when
+  the spool holds a file older than 5 s) and says `writer`: `applied`, `timeout` or `idle` (null when
+  nothing was sent). Unless it is `applied`, the text says the panel shows the asks closed once the
+  writer applies them.
+- One `mcp.log` line per call: `resolve <sid> turn=… resolved=[…] already_closed=[…] unknown=[…]
+  note=yes|no events=N writer=…`.
+
+The result: `{ok, session_id, turn, synthetic, resolved: ["A4"], unknown: ["A99"], already_closed:
+["A3"], event_ids, writer, [notes], [note]}`, and a text such as `ledgr closed A4 as resolved by the
+agent (turn 12); the user can reopen any of them in the panel.`
+
+The event, one per closed ask (`turn` is null on a synthetic session the store does not have yet):
+
+```json
+{"v": 1, "id": "<uuid>", "type": "act", "at": 1794001021161, "terminal": "t5", "session_id": "<sid>",
+ "item": "rq_…", "action": "resolve", "arg": null, "actor": "agent", "handle": "A4", "turn": 12,
+ "note": "The user picked safe."}
+```
+
+The writer applies it like the panel's Done (`on_act`, which checks that the item belongs to the
+event's session) and, because `actor` is `"agent"`, sets `resolvedBy: "agent"` on the item, so the
+panel can say who closed it. The panel stays the person's override: Done closes an ask whatever the
+agent did, and Reopen brings back one the agent closed, which `open_asks` then lists as open again.
+
 ## For the writer's maintainer (store.js)
 
 The writer applies a `source: "tool"` event like a block event. `on_asks` handles it today without a
-change, with three gaps:
+change, with three gaps (the fourth item is `resolve_asks`'s `act`):
 
 1. **Origin.** `on_asks` sets `origin = ev.source === "block" ? "extract_block" : "extract_model"`
    and `quoteSource` the same way, so tool asks are labelled as model asks today. Proposed:
@@ -166,6 +213,10 @@ change, with three gaps:
    implements exactly this rule.
 3. **`ti.asks`.** The Stop hook's own `asks` event for the same turn overwrites the turn record. If it
    re-emits the tool asks (below), the record stays truthful.
+4. **`act` from the agent.** `resolve_asks` writes the panel's `act` event with three more fields:
+   `actor: "agent"`, `handle` and `turn` (and `note` when given). `on_act` already resolves the item;
+   with `actor === "agent"` it also sets `resolvedBy: "agent"`. `tests/test_mcp.py` (`FakeWriter`)
+   implements that.
 
 Ordering is unchanged. A tool event's `<ms>` file name is later than the turn's `prompt` and earlier
 than its `pending`, `stop` and final `asks`. `on_stop` already puts the message uuid on every item
@@ -195,7 +246,12 @@ blocking ask. Proposed, in `claude_extract.hook_mode` (agent-neutral, so better 
 
 When this server is registered, the SessionStart instruction can say: "If the ledgr `declare_asks`
 tool is available, call it instead of writing the block, then end the reply with the pointer line it
-returns." The server's own `instructions` field says the same for clients that show it.
+returns." The server's own `instructions` field says the same for clients that show it. Both
+`lib/asks-instruction-ledgr.txt` and `-both.txt` end with the `resolve_asks` line: "When the user's
+message answers or drops an open ask (open_asks lists them with handles such as A4), call
+resolve_asks with those handles before declaring anything new." The server's `instructions` carries
+the same clause. A running session gets the new line at its next SessionStart (a new session,
+`/clear`, resume or compact); the hooks print a wording again only when the mode changes.
 
 ## Parked questions
 
@@ -240,7 +296,7 @@ runtime first probes stdio servers for revision 2026-07-28, and the v1 runtime (
 
 ## Tests
 
-`tests/test_mcp.py` (63 checks, in `tests/run-all.sh`) spawns the server over real stdio with a
+`tests/test_mcp.py` (76 checks, in `tests/run-all.sh`) spawns the server over real stdio with a
 scratch `LEDGR_DATA` and covers the following:
 
 - both handshakes, `tools/list`, the error codes, a batch;
@@ -250,6 +306,9 @@ scratch `LEDGR_DATA` and covers the following:
 - repeats by text and by handle (an old dismissal, another session and this turn's own asks are not
   repeats);
 - `open_asks`, and `parked_questions` without and with the flag;
+- `resolve_asks`: open and answered asks closed with the contract fields, dismissed and resolved ones
+  reported as already closed, unknown handles (another session's, a question) reported, bad input,
+  and through the fake writer `resolvedBy: "agent"` and a second call finding it closed;
 - handles through a fake writer, including `replaces_turn` keeping a handle;
 - the no-map fallback, and the map appearing later;
 - a live other owner, a child agent, a dead owner, another config folder;

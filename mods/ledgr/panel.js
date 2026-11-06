@@ -13,13 +13,20 @@
 // Focus, and Conclude. The session menu nests branch sessions under their parent and offers Forget
 // for sessions whose terminal is gone.
 // Phase 3: Conclude opens an editor prefilled with the branch's ledgr-conclusion block (else its last
-// message, else empty); "Send to trunk" puts the confluence message (confluence.js) on the clipboard,
-// focuses the trunk's pane and posts `conclude` (branch concluded, question rejoin_pending). Nothing
-// is typed: the person pastes, and the trunk's UserPromptSubmit hook reports the landing. After it
-// lands, Close branch (two clicks) posts `close_branch` and the writer ends the branch terminal.
-// "Copy answers" stages the answer sheet with its `ledgr answers <session>` marker line.
+// message, else empty); "Paste into trunk" puts the confluence message (confluence.js) on the
+// clipboard, focuses the trunk's pane, pastes it into the prompt once Herdr reports that pane focused
+// (nav.js stageIntoPrompt: `terminal.paste`, never Enter) and posts `conclude` (branch concluded,
+// question rejoin_pending). The person adds a word and sends it; the trunk's UserPromptSubmit hook
+// reports the landing. After it lands, Close branch (two clicks) posts `close_branch` and the writer
+// ends the branch terminal. "Paste answers" stages the answer sheet with its `ledgr answers
+// <session>` marker line the same way. ui.pasteIntoPrompt false: clipboard plus focus only, and the
+// buttons read "Send to trunk", "Copy answers" (words.js stageLabels).
 // Severity: asks below extract.threshold (config.json) sit in a folded "suggestions (N)" line at the
 // bottom of their turn group, uncounted, each with Promote; blocking asks sort first with ◆ and a tag.
+// Turn groups: the newest is open, and so is every group that holds an open blocking ask; the
+// person's click wins over both (groupOpen). A folded group with a blocker shows "◆ N blocking".
+// Closed rows say who closed them when it was not the person's Done: its branch, the agent
+// (resolve_asks), or "answered by you" (the answer took at the next turn's end).
 // Motion (ui.animations): only on state transitions, found by comparing the classes of the store's
 // items before and after a change (observe): a row entering its lane fades and slides in under a
 // highlight that decays over about a second; a row leaving (resolved, dismissed, deferred) fades,
@@ -32,13 +39,13 @@ import { theme, props, shared, setShared, focused, layout, run, watchFolder, rea
 import * as fs from "fs/promises";
 import { randomUUID } from "crypto";
 import { FORCE_DEMO, DEFAULTS, loadConfig, dataDir, turnPath, agentLabel, storePath, panelPlace, panelShown, liveHome, handoffOf, HANDOFF_WORDS } from "./config.js";
-import { Store, isAgentAsk, isHuman, isClosed, levelOf, isSuggestion, isBlocking, thresholdOf, LEVELS } from "./store.js";
+import { Store, isAgentAsk, isHuman, isClosed, levelOf, isSuggestion, isBlocking, thresholdOf, LEVELS, groupOpen } from "./store.js";
 import { writeEvent } from "./spool.js";
 import { Writer, writerClaim, engineDrift } from "./writer.js";
-import { goToAnchor, stageText, busy, btwText } from "./nav.js";
+import { goToAnchor, stageText, stageIntoPrompt, PASTE, busy, btwText } from "./nav.js";
 import { demoData, FIXTURE_TURNS, DEMO_SESSION } from "./fixtures.js";
 import { manifest, manifestLines, liveStatus, maxDepthOf, preamble, branchName, transcriptPathOf } from "./branch.js";
-import { itemWords as H, paneWords as P, trunkWords, originWords, branchWords, sessionWords } from "./words.js";
+import { itemWords as H, paneWords as P, trunkWords, originWords, branchWords, sessionWords, resolvedByWords, stageLabels, stagedWords } from "./words.js";
 import { loadAdapters, adapterOf, asksMode } from "./adapters.js";
 import { confluenceMessage, answersSheet, conclusionRequest, extractConclusion, forkTurnOf, wrapperWords, leadIn, answersLeadIn } from "./confluence.js";
 
@@ -105,6 +112,7 @@ export class Panel {
     const p = props() ?? {};
     this.demo = FORCE_DEMO || p.demo === true;
     this.cfg = DEFAULTS;
+    this.pasting = 0;   // when a paste into a prompt started (stage): one at a time
     this.panelId = randomUUID();
     this.live = new Store(null);   // store.json as read (reader mode)
     this.liveText = null;
@@ -371,7 +379,7 @@ export class Panel {
     }
     // For scripted looks at the lower lane: fold or unfold a lane, close every open row and box.
     else if (c === "fold-mine") this.setCollapsed("mine", !this.collapsed.mine);
-    // `pick:<handle>:<n>` clicks option n (from 0) of that ask; `copy-answer:<handle>` its Copy answer.
+    // `pick:<handle>:<n>` clicks option n (from 0) of that ask; `copy-answer:<handle>` its Paste answer (Copy answer when ui.pasteIntoPrompt is off).
     else if (c.startsWith("pick:") || c.startsWith("copy-answer:")) {
       const st = this.viewStore(), sid = this.current(st), s = sid ? st.d.sessions[sid] : null;
       const [, h, n] = c.split(":");
@@ -545,7 +553,7 @@ export class Panel {
     if (!it) return;
     const had = Boolean(squash(it.draft));
     it.draft = text;
-    if (had !== Boolean(squash(text))) cx.notify();   // the Copy answer(s) buttons follow it
+    if (had !== Boolean(squash(text))) cx.notify();   // the Paste answer(s) buttons follow it
     if (this.demo) return;
     const d = { text, sent: false, seq: (this.drafts.get(id)?.seq ?? 0) + 1 };
     this.drafts.set(id, d);
@@ -612,21 +620,42 @@ export class Panel {
   // One ask's answer as a sheet of its own: the same marker line, so the same landing.
   copyAnswer(it, s, cx) { this.stageAnswers(s, it.anchor?.turn, [it], cx); }
 
-  // The answer sheet on the clipboard, the pane focused, and the lead-in hint (as for a confluence).
+  // The answer sheet into the session's prompt (this.stage: clipboard, focus, the paste once the
+  // focus is confirmed; never Enter), and the lead-in hint (as for a confluence).
   stageAnswers(s, turn, group, cx) {
     const items = group.filter((it) => this.answerOf(it));
     const msg = answersSheet(s.sessionId, turn, items);
     if (!msg) { this.flash = group.length === 1 ? `${H(group[0])} has no answer yet: type one or pick an option.` : `No answers typed or picked for turn ${turn}.`; cx.notify(); return; }
-    if (this.demo) cx.write_to_clipboard(msg);
-    else stageText(msg, s.terminal, cx);
     const hs = items.map((it) => it.handle), ws = items.map(H);   // hs: the lead-in's short forms
     const what = ws.length === 1 ? `Answer for ${ws[0]}` : `${ws.length} answers (${ws.join(", ")})`;
-    const word = this.trunkWord(s);
-    const how = `type “${answersLeadIn(hs)}”, then ⌘V, Enter`;
-    this.flash = this.demo
-      ? `(demo) ${what} copied to the clipboard; in a session you would ${how}.`
-      : `${what} copied and ${P(s.terminal, "the pane")} focused${word === "working" ? " (working: wait for idle)" : word === "gone" ? " (not live)" : ""}: ${how}. ${ws.length === 1 ? `${ws[0]} shows` : "They show"} answered once that prompt is sent.`;
-    cx.notify();
+    const lead = answersLeadIn(hs);
+    if (this.demo) { cx.write_to_clipboard(msg); this.flash = `(demo) ${what} copied to the clipboard; ${this.demoHow(lead)}.`; cx.notify(); return; }
+    this.stage(msg, s.terminal, cx, { what, where: P(s.terminal, "the pane"), lead, word: this.trunkWord(s),
+      tail: `${ws.length === 1 ? `${ws[0]} shows` : "They show"} answered once that prompt is sent.` });
+  }
+
+  // ui.pasteIntoPrompt (default on): the paste actions paste into the prompt once the focus is
+  // confirmed; off, they are clipboard plus focus as before.
+  pasteOn() { return this.cfg.ui?.pasteIntoPrompt !== false; }
+
+  demoHow(lead) {
+    return this.pasteOn() ? `in a session it would be pasted into the prompt, not sent, and you would add a word of your own such as “${lead}”, then Enter`
+      : `in a session you would type “${lead}”, then ⌘V, Enter`;
+  }
+
+  // The answer sheet, one answer and the confluence: nav.js stageIntoPrompt (the clipboard, the pane
+  // focused, `terminal.paste` once Herdr reports that terminal focused; never Enter, never another
+  // terminal). The flash says what happened (words.js stagedWords; w: {what, where, lead, word,
+  // tail}). A second click while a paste is pending is ignored, so nothing lands twice.
+  stage(msg, terminal, cx, w) {
+    if (this.pasting && Date.now() - this.pasting < PASTE.waitMs + 400) { this.flash = `Still pasting into ${w.where}…`; cx.notify(); return false; }
+    const say = (r, cx) => { this.pasting = 0; this.flash = `${stagedWords(r, w)}${w.tail ? ` ${w.tail}` : ""}`; cx.notify(); };
+    this.pasting = Date.now();
+    if (stageIntoPrompt(msg, terminal, cx, { paste: this.pasteOn(), done: say }) === "pasting") {
+      this.flash = `${w.what} copied; pasting it into the prompt in ${w.where}…`;
+      cx.notify();
+    }
+    return true;
   }
 
   // Go to anchor: the row opens on its whole message (the passage, highlighted), the pane is focused
@@ -782,14 +811,20 @@ export class Panel {
     return k && (!k.state || k.state === "live") ? k.status || "idle" : "gone";
   }
 
-  // The trunk's status plus how to paste: type a one-line lead-in first (Claude Code presents a bare
-  // paste as text that may hold instructions the person did not write), then ⌘V, Enter.
-  trunkLine(ts, it) {
-    const w = this.trunkWord(ts), t = trunkWords(ts?.terminal).replace(/^t/, "T");
-    const how = `type a one-line lead-in such as “${leadIn(it)}”, then ⌘V, Enter`;
-    if (w === "gone") return `${t} is not live: the message stays on the clipboard; when it is back, ${how}.`;
-    if (w === "working") return `${t} is working: wait until it is idle (a paste now joins the running turn), then ${how}.`;
-    if (w === "blocked") return `${t} is waiting on its own prompt: answer that first, then ${how}.`;
+  // The trunk's status plus how the message gets there. Claude Code presents a bare paste as text
+  // that may hold instructions the person did not write, so the person adds words of their own: a
+  // lead-in typed before ⌘V (paste off), or a word added to the pasted message before Enter (paste on;
+  // the message's closing line is already in their voice). `staged`: the staged row, after the click.
+  trunkLine(ts, it, staged = false) {
+    const w = this.trunkWord(ts), t = trunkWords(ts?.terminal).replace(/^t/, "T"), L = stageLabels(this.pasteOn());
+    const how = !this.pasteOn() ? `type a one-line lead-in such as “${leadIn(it)}”, then ⌘V, Enter`
+      : staged ? `the message waits in its prompt (if not, ${L.again}); add a word of your own such as “${leadIn(it)}”, then Enter`
+      : `${L.send} puts the message in its prompt without sending it; add a word of your own such as “${leadIn(it)}”, then Enter`;
+    if (w === "gone") return !this.pasteOn() ? `${t} is not live: the message stays on the clipboard; when it is back, ${how}.`
+      : `${t} is not live: when it is back, ${staged ? L.again : L.send}, add a word of your own and press Enter.`;
+    if (w === "working") return !this.pasteOn() ? `${t} is working: wait until it is idle (a paste now joins the running turn), then ${how}.`
+      : `${t} is working: a prompt sent now joins the running turn; wait until it is idle. ${how[0].toUpperCase()}${how.slice(1)}.`;
+    if (w === "blocked") return `${t} is waiting on its own prompt: answer that first${this.pasteOn() ? " (nothing is pasted while it waits)" : ""}, then ${how}.`;
     return `${t} is ${w}: ${how}.`;
   }
 
@@ -849,8 +884,10 @@ export class Panel {
     return k;
   }
 
-  // Send to trunk: the message goes on the clipboard and the trunk's pane is focused; the `conclude`
-  // event records it. Never typed (a paste the person makes joins nothing they did not see).
+  // Paste into trunk (Send to trunk with ui.pasteIntoPrompt off): the message goes on the clipboard,
+  // the trunk's pane is focused and, once the focus is confirmed, the message is pasted into its
+  // prompt (this.stage); the `conclude` event records it. Never sent: the person reads it, adds a
+  // word of their own and presses Enter.
   sendToTrunk(st, br, cx) {
     const k = this.conclude?.branchId === br.id ? this.conclude : null;
     const text = String(k ? k.input.value() : br.conclusion?.text ?? "").trim();
@@ -858,22 +895,20 @@ export class Panel {
     if (!text) { this.flash = "Write the conclusion first: an empty confluence is not staged."; cx.notify(); return; }
     if (!it || !ts) { this.flash = "The question or its trunk session is no longer in the ledger."; cx.notify(); return; }
     const msg = confluenceMessage({ branch: br, item: it, text });
-    const word = this.trunkWord(ts);
+    if (this.demo) { this.conclude = null; cx.write_to_clipboard(msg); this.flash = `(demo) Confluence for ${H(it)} copied; nothing is saved.`; cx.notify(); return; }
+    if (!this.stage(msg, ts.terminal, cx, { what: `Confluence for ${H(it)}`, where: trunkWords(ts.terminal), lead: leadIn(it), word: this.trunkWord(ts),
+      tail: `${H(it)} resolves when that prompt is sent.` })) return;
     this.conclude = null;
-    if (this.demo) { cx.write_to_clipboard(msg); this.flash = `(demo) Confluence for ${H(it)} copied; nothing is saved.`; cx.notify(); return; }
-    stageText(msg, ts.terminal, cx);
     this.post("conclude", { session_id: ts.sessionId, branch_id: br.id, item: it.id, text, message: msg, source: k?.source ?? "edited", source_turn: k?.turn ?? null },
       { action: "conclude", sid: ts.sessionId, branchId: br.id, text, message: msg, source: k?.source ?? "edited" }, cx);
-    this.flash = `Confluence for ${H(it)} copied and ${trunkWords(ts.terminal)} focused${word === "working" ? " (working: wait for idle)" : word === "gone" ? " (not live)" : ""}: type “${leadIn(it)}”, then ⌘V, Enter. ${H(it)} resolves when that prompt is sent.`;
-    cx.notify();
   }
 
+  // The staged confluence again (a paste that was cleared, or a trunk that was busy): staged the same way.
   copyConfluence(st, br, cx) {
-    const ts = st.d.sessions[br.parentSessionId], msg = br.conclusion?.message;
+    const ts = st.d.sessions[br.parentSessionId], msg = br.conclusion?.message, it = st.item(br.requestId);
     if (!msg) { this.flash = "No staged confluence for this branch."; cx.notify(); return; }
-    if (this.demo) cx.write_to_clipboard(msg); else stageText(msg, ts?.terminal, cx);
-    this.flash = `${this.demo ? "(demo) " : ""}Confluence copied again for ${trunkWords(ts?.terminal)}: type “${leadIn(st.item(br.requestId))}”, then ⌘V, Enter.`;
-    cx.notify();
+    if (this.demo) { cx.write_to_clipboard(msg); this.flash = `(demo) Confluence copied again; ${this.demoHow(leadIn(it))}.`; cx.notify(); return; }
+    this.stage(msg, ts?.terminal, cx, { what: `Confluence for ${it ? H(it) : "the question"} (again)`, where: trunkWords(ts?.terminal), lead: leadIn(it), word: this.trunkWord(ts) });
   }
 
   // The branch has no conclusion block: stage a short request for one in the branch's pane.
@@ -1266,7 +1301,7 @@ export class Panel {
   }
 
   body(t, st, s) {
-    const now = Date.now();
+    const now = Date.now(), L = stageLabels(this.pasteOn());
     const items = st.itemsOf(s.sessionId);
     const stale = (it) => it.status === "open" && now - (it.updatedAt ?? 0) > DAY;
     const active = (it) => (it.status === "open" || it.status === "answered" || it.status === "rejoin_pending") && !stale(it);
@@ -1316,14 +1351,16 @@ export class Panel {
           .sort((a, b) => (isBlocking(b) ? 1 : 0) - (isBlocking(a) ? 1 : 0) || (a.seq ?? 0) - (b.seq ?? 0));
         const sug = all.filter((it) => isSuggestion(it, th)).sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
         const k = `${s.sessionId}:${turn}`;
-        const open = this.unfolded.has(k) || (turn === newest && !this.folded.has(k));
         const nOpen = real(g).filter((it) => it.status === "open").length;
         const nBlock = real(g).filter((it) => it.status === "open" && isBlocking(it)).length;
+        // The newest group is open, and so is any group holding an open blocking ask (the agent waits
+        // on it); a click of the person's wins over both (groupOpen, store.js).
+        const open = groupOpen({ newest: turn === newest, blocking: nBlock, unfolded: this.unfolded.has(k), folded: this.folded.has(k) });
         const nAll = real(g).length, nSug = real(sug).length;
         const ti = st.turnInfo(s.sessionId, turn);
         if (!all.length) { if (ti?.asks?.source === "error") out.push(this.errorLine(t, s, turn, ti)); continue; }
         const label = [
-          nAll ? `${nAll} ask${nAll === 1 ? "" : "s"}${open ? "" : `, ${nOpen} open${nBlock ? `, ${nBlock} blocking` : ""}`}` : null,
+          nAll ? `${nAll} ask${nAll === 1 ? "" : "s"}${open ? "" : `, ${nOpen} open`}` : null,
           nSug && (!open || !nAll) ? `${nSug} below threshold` : null,
         ].filter(Boolean).join(" · ");
         out.push(h_flex().id(`grp-${turn}`).flex_none().h(24).px(6).gap(6).items_center().rounded(5).cursor_pointer().hover((x) => x.bg(t.hover))
@@ -1332,6 +1369,8 @@ export class Panel {
             cx.notify();
           })
           .child(div().flex_1().text_size(11).text_color(t.muted).child(`turn ${turn} · ${label}`))
+          // Folded by the person with a blocker inside: the blocker still shows, in its own colour.
+          .when(!open && nBlock > 0, (el) => el.child(div().flex_none().text_size(11).font_semibold().text_color(t.blocked).child(`◆ ${nBlock} blocking`)))
           .child(svg(ICON(open ? "chevron-down" : "chevron-right")).size(10).flex_none().text_color(t.dim)));
         if (ti?.asks?.source === "error") out.push(this.errorLine(t, s, turn, ti));
         if (!open) continue;
@@ -1342,9 +1381,9 @@ export class Panel {
         if (real(g).some((it) => !isClosed(it)) || real(sug).some((it) => this.answerOf(it))) {
           const n = real([...g, ...sug]).filter((it) => !isClosed(it) && this.answerOf(it)).length;
           out.push(h_flex().flex_none().pl(6 + IND).pr(6).py(3).gap(8).items_center()
-            .child(this.btn(t, `copy-${turn}`, `Copy ${n} answer${n === 1 ? "" : "s"}${s.terminal ? ` for ${P(s.terminal)}` : ""}`, (_e, cx) => this.copyAnswers(s, turn, cx),
-              { primary: n > 0, disabled: n === 0, tip: n ? `The answer sheet for turn ${turn}: clipboard + focus ${P(s.terminal, "the pane")}` : "Type an answer or pick an option on an ask first" }))
-            .child(div().flex_1().min_w(0).text_size(10.5).text_color(t.dim).child(n ? "clipboard + focus the pane; nothing is typed" : "type an answer or pick an option first")));
+            .child(this.btn(t, `copy-${turn}`, L.sheet(n, s.terminal), (_e, cx) => this.copyAnswers(s, turn, cx),
+              { primary: n > 0, disabled: n === 0, tip: n ? `The answer sheet for turn ${turn}: ${this.pasteOn() ? `pasted into the prompt in ${P(s.terminal, "the pane")} once it has the focus; never sent` : `clipboard + focus ${P(s.terminal, "the pane")}`}` : "Type an answer or pick an option on an ask first" }))
+            .child(div().flex_1().min_w(0).text_size(10.5).text_color(t.dim).child(n ? L.how : "type an answer or pick an option first")));
         }
         if (sug.length) out.push(...this.suggestions(t, st, s, turn, sug));
       }
@@ -1461,12 +1500,14 @@ export class Panel {
         sub.push(bits.join(" · "));
       }
     }
-    if (agent && it.status === "answered" && it.answer) sub.push(`→ ${squash(it.answer).slice(0, 140)}`);
+    if (agent && (it.status === "answered" || (it.status === "resolved" && it.resolvedBy === "answer")) && it.answer) sub.push(`→ ${squash(it.answer).slice(0, 140)}`);
     if (it.status === "rejoin_pending") {
       const rb = st.d.branches[it.rejoin?.branchId];
-      sub.push(`the confluence from its branch${rb?.name ? ` (${rb.name})` : ""} is on the clipboard: resolves when it is sent in ${trunkWords(s?.terminal)}`);
+      sub.push(`the confluence from its branch${rb?.name ? ` (${rb.name})` : ""} is staged for ${trunkWords(s?.terminal)}: resolves when it is sent there`);
     }
-    if (it.status === "resolved" && it.resolvedBy === "branch") { const rn = st.d.branches[it.resolution?.branchId]?.name; sub.push(`resolved by its branch${rn ? ` (${rn})` : ""} at turn ${it.resolvedTurn ?? "?"}`); }
+    if (it.status === "resolved" && it.resolvedBy === "branch") { const rn = st.d.branches[it.resolution?.branchId]?.name; sub.push(`${resolvedByWords("branch")}${rn ? ` (${rn})` : ""} at turn ${it.resolvedTurn ?? "?"}`); }
+    // Closed by the agent (resolve_asks), or the person's answer took (the next reply did not raise it).
+    else if (it.status === "resolved" && resolvedByWords(it.resolvedBy)) sub.push(`${resolvedByWords(it.resolvedBy)} at turn ${(it.resolvedBy === "answer" ? it.answeredTurn : null) ?? it.resolvedTurn ?? "?"}${it.resolvedNote ? ` · ${it.resolvedNote}` : ""}`);
     if (it.note) sub.push(it.note);
     if (it.status === "deferred") sub.push(it.deferUntil === "next_session" ? "deferred to next session" : typeof it.deferUntil === "number" ? `deferred until ${new Date(it.deferUntil).toLocaleString()}` : "deferred");
 
@@ -1528,7 +1569,7 @@ export class Panel {
   }
 
   details(t, st, s, it) {
-    const agent = isAgentAsk(it);
+    const agent = isAgentAsk(it), L = stageLabels(this.pasteOn());
     const closed = isClosed(it);
     const k = `${it.anchor?.sessionId}:${it.anchor?.turn}`;
     const text = this.passages.get(k);
@@ -1555,7 +1596,7 @@ export class Panel {
     const pend = it.status === "rejoin_pending";
     const pendBr = pend ? st.d.branches[it.rejoin?.branchId] ?? null : null;
     if (closed || it.status === "deferred") b("reopen", "Reopen", (_e, cx) => this.act(it.id, "reopen", null, cx));
-    if (pend && pendBr?.conclusion?.message) b("again", "Copy confluence again", (_e, cx) => this.copyConfluence(st, pendBr, cx), { primary: true });
+    if (pend && pendBr?.conclusion?.message) b("again", L.again, (_e, cx) => this.copyConfluence(st, pendBr, cx), { primary: true });
     if (!closed) b("done", "Done", (_e, cx) => this.act(it.id, "resolve", null, cx), { tip: DONE_TIP });
     if (!closed && it.status !== "deferred" && !pend) a.push(this.menuButton(t, `defer-${it.id}`, "Defer ▾", [
       ["tomorrow", "Tomorrow", (_e, cx) => this.act(it.id, "defer", Date.now() + DAY, cx)],
@@ -1599,9 +1640,9 @@ export class Panel {
         .child(h_flex().gap(6).items_center()
           .child(h_flex().flex_1().min_w(0).h(28).px(8).items_center().rounded(7).border_1().border_color(t.input).bg(t.background)
             .child(Input.new(input).flex_1().h_full().text_size(12).text_color(t.foreground)))
-          .child(this.btn(t, `copy1-${it.id}`, "Copy answer", (_e, cx) => this.copyAnswer(it, s, cx),
-            { primary: Boolean(this.answerOf(it)), disabled: !this.answerOf(it), tip: this.answerOf(it) ? `${H(it)}'s answer alone: clipboard + focus ${P(s.terminal, "the pane")}` : "Type an answer or pick an option first" })))
-        .child(div().text_size(10.5).text_color(t.dim).child("Drafts reach the agent via Copy answer(s); Resolve only records it here."))))
+          .child(this.btn(t, `copy1-${it.id}`, L.one, (_e, cx) => this.copyAnswer(it, s, cx),
+            { primary: Boolean(this.answerOf(it)), disabled: !this.answerOf(it), tip: this.answerOf(it) ? `${H(it)}'s answer alone: ${this.pasteOn() ? `pasted into the prompt in ${P(s.terminal, "the pane")}, never sent` : `clipboard + focus ${P(s.terminal, "the pane")}`}` : "Type an answer or pick an option first" })))
+        .child(div().text_size(10.5).text_color(t.dim).child(`Drafts reach the agent via ${L.one}(s); Resolve only records it here.`))))
       .child(h_flex().flex_wrap().gap(6).children(a))
       .when(gone && rs?.state === "failed", (el) => el.child(div().text_size(10.5).text_color(t.blocked).child(`Resume did not start: ${rs.error ?? "unknown error"}`)))
       .when(gone && rs?.state === "launched" && Boolean(rs.note), (el) => el.child(div().text_size(10.5).text_color(t.dim).child(`Resumed in ${P(rs.terminal)}: ${rs.note}`)))
@@ -1733,11 +1774,11 @@ export class Panel {
   // conclusion…, or Close branch after rejoin, with its End / Keep) and ⋯ for Focus, Copy again,
   // Ask for a conclusion and the preamble.
   branchActions(t, st, s, br, { canC, concl, staged, focusOk, live, it }) {
-    const more = [];
+    const more = [], L = stageLabels(this.pasteOn());
     more.push(["focus", "Focus the branch", (_e, cx) => this.focusBranch(br, cx),
       { disabled: !focusOk, tip: focusOk ? "Focus the branch's pane (a peek when it has none)" : "The branch has no live terminal" }]);
-    if (br.status === "concluded" && br.conclusion?.message) more.push(["again", "Copy the confluence again", (_e, cx) => this.copyConfluence(st, br, cx),
-      { tip: "The staged message to the clipboard again, and focus the trunk" }]);
+    if (br.status === "concluded" && br.conclusion?.message) more.push(["again", L.againMenu, (_e, cx) => this.copyConfluence(st, br, cx),
+      { tip: this.pasteOn() ? "The staged message into the trunk's prompt again (never sent)" : "The staged message to the clipboard again, and focus the trunk" }]);
     if (canC && !concl && !staged && focusOk && this.conclude?.branchId !== br.id) more.push(["ask", "Ask for a conclusion", (_e, cx) => this.askForConclusion(st, br, cx),
       { tip: "Stage a short request for a ledgr-conclusion block in the branch's pane" }]);
     if (!canC && br.status !== "rejoined") more.push(["conclude", "Conclude…", () => {}, { disabled: true,
@@ -1746,7 +1787,7 @@ export class Panel {
       (_e, cx) => { if (this.preOpen.has(br.id)) this.preOpen.delete(br.id); else this.preOpen.add(br.id); cx.notify(); }]);
     return h_flex().flex_wrap().gap(6)
       .when(canC && this.conclude?.branchId !== br.id, (x) => x.child(this.btn(t, `brk-${br.id}`, br.status === "concluded" ? "Edit conclusion…" : "Conclude…",
-        (_e, cx) => this.openConclude(st, br, cx), { primary: br.status !== "concluded" && Boolean(concl), tip: "Edit what goes back to the trunk, then stage it on the clipboard" })))
+        (_e, cx) => this.openConclude(st, br, cx), { primary: br.status !== "concluded" && Boolean(concl), tip: "Edit what goes back to the trunk, then stage it for the trunk's prompt" })))
       .when(br.status === "rejoined" && !br.closedAt && this.closeAsk !== br.id && live !== "closed", (x) => x.child(this.btn(t, `brx-${br.id}`, "Close branch",
         (_e, cx) => { this.closeAsk = br.id; cx.notify(); }, { tip: "End the branch's terminal; its record and conclusion stay" })))
       .when(this.closeAsk === br.id, (x) => x
@@ -1771,16 +1812,16 @@ export class Panel {
         ? `REJOINED · landed in ${trunkWords(s.terminal)} at turn ${br.rejoinedTurn ?? "?"} (${when(br.rejoinedAt)})`
         : `CONFLUENCE STAGED ${when(br.concludedAt)} · waiting for the paste`))
       .child(div().rounded(5).border_1().border_color(rejoined ? t.done : t.accent).bg(t.background).px(7).py(4).text_size(11.5).children(this.lines(br.conclusion?.text ?? "(no conclusion text recorded)")))
-      .when(!rejoined, (x) => x.child(div().text_size(10.5).text_color(this.trunkWord(s) === "working" ? t.working : t.dim).child(this.trunkLine(s, it))))
+      .when(!rejoined, (x) => x.child(div().text_size(10.5).text_color(this.trunkWord(s) === "working" ? t.working : t.dim).child(this.trunkLine(s, it, true))))
       .when(rejoined, (x) => x.child(div().text_size(10.5).text_color(t.dim).child(
         `${it ? H(it) : "The question"} resolved by this branch · line in ledgr-data/sessions/${String(s.sessionId).slice(0, 8)}…/decisions.md${br.closedAt ? ` · terminal closed ${when(br.closedAt)}` : ""}`)))
       .when(Boolean(br.closeError), (x) => x.child(div().text_size(10.5).text_color(t.blocked).child(`Close failed: ${br.closeError}`)));
   }
 
   // The Conclude editor: the prefilled, editable conclusion; the message as it will be staged; the
-  // trunk's live status. Send to trunk never types.
+  // trunk's live status. Send to trunk pastes after the focus is confirmed, or copies; it never presses Enter.
   concludeBox(t, st, s, br) {
-    const k = this.conclude, it = st.item(br.requestId);
+    const k = this.conclude, it = st.item(br.requestId), L = stageLabels(this.pasteOn());
     const F = forkTurnOf(br);
     const text = String(k.text ?? "").trim();
     const msg = it ? confluenceMessage({ branch: br, item: it, text: text || "…" }) : "";
@@ -1803,8 +1844,8 @@ export class Panel {
       .child(v_flex().id(`brk-msg-${br.id}`).max_h(170).overflow_y_scrollbar().rounded(5).border_1().border_color(t.border).bg(t.surface).px(7).py(4).text_size(11).text_color(t.muted).children(this.lines(msg)))
       .child(div().text_size(10.5).text_color(this.trunkWord(s) === "working" ? t.working : t.dim).child(this.trunkLine(s, it)))
       .child(h_flex().flex_wrap().gap(6).items_center()
-        .child(this.btn(t, `brk-send-${br.id}`, "Send to trunk", (_e, cx) => this.sendToTrunk(st, br, cx),
-          { primary: true, disabled: !text || !it, tip: "Clipboard + focus the trunk's pane; nothing is typed. The question resolves when you send it there." }))
+        .child(this.btn(t, `brk-send-${br.id}`, L.send, (_e, cx) => this.sendToTrunk(st, br, cx),
+          { primary: true, disabled: !text || !it, tip: this.pasteOn() ? "Pastes the message into the trunk's prompt once its pane has the focus; never sent. The question resolves when you send it there." : "Clipboard + focus the trunk's pane; nothing is typed. The question resolves when you send it there." }))
         .when(ask, (el) => el.child(this.btn(t, `brk-ask-${br.id}`, "Ask for a conclusion", (_e, cx) => this.askForConclusion(st, br, cx))))
         .when(k.edited && k.source !== "edited" && Boolean(k.prefill), (el) => el.child(this.btn(t, `brk-reset-${br.id}`, "Reset",
           (_e, cx) => { k.input.set_value(k.prefill); k.text = k.prefill; k.edited = false; cx.notify(); })))
