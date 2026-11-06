@@ -31,7 +31,7 @@ import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, P
 import { theme, props, shared, setShared, focused, layout, run, watchFolder, readTextFile, writeTextFile, openOverlay, agents, terminals, panes, exec, home } from "herdr";
 import * as fs from "fs/promises";
 import { randomUUID } from "crypto";
-import { FORCE_DEMO, DEFAULTS, loadConfig, dataDir, turnPath, agentLabel, storePath, panelPlace, panelShown, liveHome } from "./config.js";
+import { FORCE_DEMO, DEFAULTS, loadConfig, dataDir, turnPath, agentLabel, storePath, panelPlace, panelShown, liveHome, handoffOf, HANDOFF_WORDS } from "./config.js";
 import { Store, isAgentAsk, isHuman, isClosed, levelOf, isSuggestion, isBlocking, thresholdOf, LEVELS } from "./store.js";
 import { writeEvent } from "./spool.js";
 import { Writer, writerClaim, engineDrift } from "./writer.js";
@@ -1102,7 +1102,7 @@ export class Panel {
       .child(div().flex_none().font_semibold().text_size(13).child("ledgr"))
       .child(h_flex().id("lg-session").flex_1().min_w(0).h(26).px(6).gap(5).items_center().rounded(6).cursor_pointer()
         .hover((x) => x.bg(t.hover)).on_click((_e, cx) => { this.menu = !this.menu; cx.notify(); })
-        .when(Boolean(s), (el) => el.child(div().id("lg-agent").flex_none().tooltip(this.asksTip(s)).child(this.pill(t, agentLabel(s.agent)))))
+        .when(Boolean(s), (el) => el.child(div().id("lg-agent").flex_none().tooltip(this.asksTip(s)).child(this.pill(t, agentLabel(s.agent, s.profile)))))
         .when(Boolean(away?.agent), (el) => el.child(this.pill(t, away.name)))
         .when(Boolean(s?.parentSessionId), (el) => el.child(h_flex().id("lg-br-pill").flex_none().gap(3).px(5).py(0.5).rounded(4).items_center().bg(t.accent + "22")
           .tooltip(`Branch of ${st.d.sessions[s.parentSessionId]?.sessionName || String(s.parentSessionId).slice(0, 8)}${s.forkTurn !== undefined && s.forkTurn !== null ? `, forked at its turn ${s.forkTurn}` : ""}`)
@@ -1128,10 +1128,13 @@ export class Panel {
       .when(this.demo, (el) => el.child(this.pill(t, "demo", t.accent)));
   }
 
-  // How this session's agent declares or yields its asks (adapters.js): a tooltip line.
+  // How this session's agent declares or yields its asks (adapters.js): a tooltip line, then the
+  // config folder the hooks recorded for it (the profile in "claude · work").
   asksTip(s) {
     const m = asksMode(adapterOf(this.adapters, s), this.cfg);
-    return `${m.word}: ${m.tip}`;
+    const h = String(home() ?? ""), d = s?.configDir ? String(s.configDir) : "";
+    const dir = d && h && d.startsWith(`${h}/`) ? `~${d.slice(h.length)}` : d;
+    return `${m.word}: ${m.tip}${dir ? ` Config folder: ${dir} (profile ${s.profile ?? "unknown"}).` : ""}`;
   }
 
   // Branch sessions are listed under their parent, indented, not at the top level. Live sessions are
@@ -1147,7 +1150,7 @@ export class Panel {
     const roots = list.filter((s) => !(s.parentSessionId && ids.has(s.parentSessionId)));
     const groups = [];
     for (const s of roots.filter((x) => x.state !== "ended")) {
-      const k = `${String(s.sessionId).startsWith("herdr:") ? "herdr:" : ""}${agentLabel(s.agent)}`;
+      const k = `${String(s.sessionId).startsWith("herdr:") ? "herdr:" : ""}${agentLabel(s.agent, s.profile)}`;
       let g = groups.find((x) => x.k === k);
       if (!g) groups.push(g = { k, s, rows: [] });
       g.rows.push(...flat(s, 0));
@@ -1155,7 +1158,7 @@ export class Panel {
     const groupHead = (g) => {
       const m = asksMode(adapterOf(this.adapters, g.s), this.cfg);
       return h_flex().id(`lg-g-${g.k}`).px(8).pt(6).pb(2).gap(6).items_center().tooltip(m.tip)
-        .child(div().text_size(10.5).font_semibold().text_color(t.dim).child(`${agentLabel(g.s.agent).toUpperCase()}${g.k.startsWith("herdr:") ? " (NO HOOKS)" : ""}`))
+        .child(div().text_size(10.5).font_semibold().text_color(t.dim).child(`${agentLabel(g.s.agent, g.s.profile).toUpperCase()}${g.k.startsWith("herdr:") ? " (NO HOOKS)" : ""}`))
         .child(div().text_size(10.5).text_color(m.word === "declares asks" ? t.accent : t.dim).child(m.word));
     };
     const ended = roots.filter((s) => s.state === "ended").flatMap((s) => flat(s, 0));
@@ -1172,7 +1175,7 @@ export class Panel {
           cx.notify();
         })
         .when(depth > 0, (el) => el.child(svg(ICON("git-branch")).size(11).flex_none().text_color(t.accent)))
-        .child(this.pill(t, agentLabel(s.agent)))
+        .child(this.pill(t, agentLabel(s.agent, s.profile)))
         .child(div().flex_1().min_w(0).truncate().text_size(12).child(sessionWords(s)))
         .when(Boolean(s.terminal), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(P(s.terminal))))
         .child(div().flex_none().text_size(11).text_color(open ? t.accent : t.dim).child(open ? `${open} open` : gone ? "gone" : s.state))
@@ -1218,8 +1221,9 @@ export class Panel {
 
   // `note`: extraction running (spinner). `status`: a quiet word in the header, never a fold
   // (the asks lane says "agent working" while the turn runs).
-  // `extra`: a control drawn before the count (the asks lane's threshold menu).
-  laneHead(t, key, title, count, open, onToggle, note, status, extra) {
+  // `extra`: a control drawn before the count (the asks lane's threshold menu). `statusTip`: the
+  // status word's tooltip (the asks lane: who owns the closing list, asks.handoff).
+  laneHead(t, key, title, count, open, onToggle, note, status, extra, statusTip) {
     return h_flex().id(`lane-${key}`).flex_none().h(24).px(4).mt(4).gap(6).items_center().cursor_pointer()
       .on_click((_e, cx) => { onToggle(!open); cx.notify(); })
       .child(svg(ICON(open ? "chevron-down" : "chevron-right")).size(11).flex_none().text_color(t.dim))
@@ -1227,7 +1231,8 @@ export class Panel {
       .when(Boolean(note), (el) => el.child(h_flex().flex_none().gap(4).items_center()
         .child(svg(ICON("spinner")).size(11).text_color(t.working).when(this.animOn(), (x) => x.spin(900)))
         .child(div().text_size(10.5).text_color(t.working).child(note))))
-      .when(!note && Boolean(status), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.working).opacity(0.75).child(status)))
+      .when(!note && Boolean(status), (el) => el.child(div().id(`lane-${key}-status`).flex_none().text_size(10.5).text_color(t.working).opacity(0.75)
+        .when(Boolean(statusTip), (x) => x.tooltip(statusTip)).child(status)))
       .when(Boolean(extra), (el) => el.child(extra))
       .child(div().flex_none().text_size(11).text_color(count ? t.accent : t.dim).child(`${count} open`));
   }
@@ -1295,7 +1300,8 @@ export class Panel {
     const asksOpen = this.asksOpen(s);
     out.push(this.laneHead(t, "asks", "ASKED OF YOU", asks.filter((it) => st.counts(it)).length, asksOpen,
       (open) => this.setAsksOpen(s, open),
-      pend !== null ? `extracting turn ${pend}` : null, s.state === "working" ? "agent working" : null, this.thresholdMenu(t, st)));
+      pend !== null ? `extracting turn ${pend}` : null, s.state === "working" ? "agent working" : null, this.thresholdMenu(t, st),
+      HANDOFF_WORDS[handoffOf(this.cfg)]));
     if (asksOpen) {
       const turnsRec = st.d.turns[s.sessionId] ?? {};
       const errTurns = Object.entries(turnsRec).filter(([n, r]) => r?.asks?.source === "error" && Number(n) >= s.turn - 10).map(([n]) => Number(n));

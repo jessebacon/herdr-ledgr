@@ -3,7 +3,7 @@
 The confluence: a concluded branch returns one human-approved message to the end of its trunk, the
 parked question resolves, and ledgr never types into a terminal. The answer sheet for agent asks closes
 its loop the same way. Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311. Earlier notes:
-`BUILD-NOTES-mod.md`, `bin/BUILD-NOTES-hooks.md`, `BUILD-NOTES-phase2.md`. Spec: Sections 6.4, 8.6 and
+`BUILD-NOTES-mod.md`, `BUILD-NOTES-hooks.md`, `BUILD-NOTES-phase2.md`. Spec: Sections 6.4, 8.6 and
 11 of `docs/design/Herdr ledger mod design.md` (the Phase 3 table is appended to Section 11).
 
 ## 1. What it does

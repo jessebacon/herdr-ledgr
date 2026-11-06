@@ -1,8 +1,8 @@
 # ledgr adapters
 
-An adapter connects one agent engine to ledgr. The agent declaring its own asks, in a fenced
-`ledgr-asks` block at the end of a reply, is the primary channel; the model extractor is the fallback
-for a reply without one. So an adapter's main job is to get the ledgr-asks instruction into the
+An adapter connects one agent engine to ledgr. The agent declaring its own asks, with the MCP
+server's `declare_asks` tool (`bin/mcp/`) or else in a fenced `ledgr-asks` block at the end of a
+reply, is the primary channel; the model extractor is the fallback for a reply with neither. So an adapter's main job is to get the ledgr-asks instruction into the
 engine's context and to report its turns. Everything else in ledgr is agent-neutral.
 
 ## The contract: five capabilities
@@ -13,9 +13,9 @@ The panel reads it to say, per agent, how asks arrive: **declares asks**, **extr
 
 | Capability | What ledgr needs | Claude Code (the reference, `claude/`) |
 |---|---|---|
-| `identity` | Herdr terminal to session id, transcript, cwd, turn number | `session-start.sh` and `user-prompt-submit.sh` hooks, which inherit `HC_TERMINAL_ID`; `lib/ledgr_map.py` writes `terminals/<t>.json` and `sessions/<sid>.json` |
+| `identity` | Herdr terminal to session id, transcript, cwd, turn number; optionally the agent's config folder and profile (`config_dir`, `profile`: the panel shows "claude · work") | `session-start.sh` and `user-prompt-submit.sh` hooks, which inherit `HC_TERMINAL_ID`; `lib/ledgr_map.py` writes `terminals/<t>.json` and `sessions/<sid>.json`; profile from `CLAUDE_CONFIG_DIR` (else the transcript path): `~/.claude` is "default", `~/.claude-work` is "work" |
 | `turn_signal` | the moment a turn ends | `stop.sh` (Stop hook): part A at once, then the detached extractor |
-| `instruction` | the ledgr-asks instruction (`lib/asks-instruction.txt`) in the model's context | SessionStart hook stdout (startup, resume, clear, compact), plus one UserPromptSubmit reminder after a turn whose blocking ask only the extractor found (`instruct_reinject`) |
+| `instruction` | the ledgr-asks instruction (`lib/asks-instruction-ledgr.txt` or `-both.txt`, by `asks.handoff`; none in `prose`) in the model's context. Its preferred partner is the MCP server (`bin/mcp/`): an engine that can call tools declares with `declare_asks` and ends with the pointer line it returns; the block is the fallback | SessionStart hook stdout (startup, resume, clear, compact), plus one UserPromptSubmit reminder after a turn whose blocking ask only the extractor found (`instruct_reinject`) |
 | `turn_text` | the turn's last assistant message, where the block is read | Stop hook `last_assistant_message`; the record uuid from the transcript JSONL (`last_assistant.py`) |
 | `fork`, `resume` (optional) | Branch and Resume session | `claude --resume <sid> --fork-session`, `claude --resume <sid>` |
 
@@ -25,6 +25,11 @@ Without `instruction` but with `turn_text`, the extractor is the only channel.
 ## Agent-neutral, never per adapter
 
 - The spool contract: `lib/ledgr_spool.py` builds every event; the writer applies them.
+- The MCP server (`bin/mcp/ledgr_mcp.py`, any MCP client): `declare_asks` writes an `asks` event with
+  `source: "tool"` mid-turn (`replaces_turn` on a later call of the same turn), and the turn's Stop
+  re-emits the declaration from `ledgr-data/mcp/<session>/<turn>.json` with its quotes checked against
+  the whole turn's text and the message uuid (`lib/ledgr_extract.tool_declaration`). An adapter's only
+  part is giving `extract()` the turn and, when it can, the turn's full assistant text.
 - The block grammar and the levels: `lib/parse_block.py`, `lib/ledgr_asks.py` (blocking, needed,
   optional; `extract.threshold` applies to declared and extracted asks alike).
 - The extractor and its providers: `lib/ledgr_extract.py`, `providers/`.

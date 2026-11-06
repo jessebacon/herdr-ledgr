@@ -8,11 +8,21 @@ import ledgr_core as C
 
 DEFAULT_CONFIG = {
     "v": 1,
-    "instruct_block": True,           # print the ledgr-asks instruction at SessionStart (startup,
-                                      # resume, clear, compact): the agent declares its own asks
+    "instruct_block": True,           # the master switch: print the ledgr-asks instruction at
+                                      # SessionStart (startup, resume, clear, compact); false is
+                                      # asks.handoff "prose" whatever that says
     "instruct_reinject": True,        # with instruct_block: after a turn whose blocking ask only the
                                       # model found (no block in the message), print it once more
                                       # at that session's next prompt
+    "asks": {
+        "handoff": "ledgr",             # who owns the closing list the agent gives you (handoff()):
+                                        # ledgr = blocking and needed items only in the ledgr-asks block,
+                                        # the prose ends with one pointer line "ledgr: N items for you,
+                                        # M blocking" and lists nothing; both = the prose list as usual
+                                        # plus the block; prose = no instruction at all, extractor only.
+                                        # Read at every hook run: a running session gets the new wording
+                                        # at its next prompt
+    },
     "extract": {
         "mode": "block-first",          # block-first | always-model | block-only
         "provider": "anthropic",        # anthropic | openai-compatible | cli
@@ -34,6 +44,19 @@ DEFAULT_CONFIG = {
            "animations": True},               # the panel's and chip's: False = no motion at all
     "retention_days": 14,
 }
+
+
+HANDOFF_MODES = ("ledgr", "both", "prose")
+
+
+def handoff(cfg):
+    """The effective asks.handoff: "prose" when instruct_block (the master switch) is not true;
+    else asks.handoff, "ledgr" when missing or unknown."""
+    if not isinstance(cfg, dict) or cfg.get("instruct_block") is not True:
+        return "prose"
+    m = (cfg.get("asks") or {}).get("handoff") if isinstance(cfg.get("asks"), dict) else None
+    m = m.strip().lower() if isinstance(m, str) else ""
+    return m if m in HANDOFF_MODES else "ledgr"
 
 
 def defaults():

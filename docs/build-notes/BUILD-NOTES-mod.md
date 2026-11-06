@@ -4,7 +4,9 @@ Scope: the Herdr mod (panel, capture box, store, writer, spool reader, navigatio
 the chip, the `my-tabs` edits (button, toggle, the writer host), the `custom.json` block and the keys.
 The hooks and extractor (`mods/ledgr/bin/`) belong to the hooks agent; they were read and run (as
 libraries, against a scratch data folder), never edited. Authoritative event contract:
-`bin/lib/ledgr_spool.py` docstring and `bin/BUILD-NOTES-hooks.md`. Herdr 0.1.13 at build time.
+`bin/lib/ledgr_spool.py` docstring and `BUILD-NOTES-hooks.md`. Herdr 0.1.13 at build time.
+(Sections 1 to 9 describe Phase 1 as built. Since 0.1.0 the chip is the public `ledgr-pane`, `my-pane`
+is retired and `my-tabs` is the maintainer's overlay; later sections say so where it matters.)
 
 ## 1. Architecture (coordinator decision: option c)
 
@@ -113,7 +115,8 @@ at writer start.
 
 `config.json` belongs to the hooks; `config.js` mirrors their defaults (`instruct_block` false,
 `extract.provider` "anthropic", `cli_fallback` false, `timeout_s` 20, no `things`; since section 10
-also `extract.threshold` "needed" and `ui` `{foldAsksWhileWorking: false, animations: true}`) for a
+also `extract.threshold` "needed" and `ui` `{foldAsksWhileWorking: false, animations: true}`; since
+2026-11-06 `instruct_block` and `instruct_reinject` true and `asks.handoff` "ledgr", section 14) for a
 missing or invalid file, and for keys the file does not have.
 
 Passage hash: `sha1(whitespace-collapsed passage)[:12]`, passage = quote else text; the hooks' value
@@ -204,15 +207,15 @@ always wins. JS and Python agree.
   when the tab bar first renders; its reload (same code path) claimed the role with the panel hidden.
 - Not driven with real keys: ⌘J over a streaming pane, Enter/⌘Enter/Esc/Tab in the box, focus return,
   ⌘⇧J, clicks on row actions (the act path is covered by the store tests and the shared `writeEvent`).
-- `hc keys <t> ctrl+o /`; the `bad-*` quarantine; the 14-day archive; `openPanelOnAsks`: coded, not
-  exercised.
+- `hc keys <t> ctrl+o /` (removed 2026-11-06: ledgr sends no keystrokes); the `bad-*` quarantine; the
+  14-day archive; `openPanelOnAsks`: coded, not exercised.
 - Extraction: turns up to 14:55 ended in "no credential"; from 15:01 the model path works (the Keychain
   item was fixed meanwhile). Those older turns still show "asks not extracted" with Retry.
 
 ## 10. Fold ownership, ask severity, motion (2026-11-05, after the spacing commit 692dbcb)
 
 Three changes, in this order, deployed with `./install.sh` each time (check green for all three mods,
-engine copies identical). Hooks half: `bin/BUILD-NOTES-hooks.md`, "Severity".
+engine copies identical). Hooks half: `BUILD-NOTES-hooks.md`, "Severity".
 
 ### 10.1 The asks lane's fold is the person's
 
@@ -441,3 +444,72 @@ needed/review from a statement of state ("Two batches are now uncommitted in the
   the list were not seen. The code paths ran: `ledgr.threshold:blocking` wrote the file and the
   writer followed it.
 
+## 13. Which Claude profile a session belongs to (2026-11-06)
+
+Jesse runs two Claude Code accounts through `CLAUDE_CONFIG_DIR`: `~/.claude` and `~/.claude-work`
+(the `claude-work` wrapper). Every session read "claude".
+
+- The hooks record `config_dir` and `profile` (hooks notes, "Profiles"); `session_start` and `prompt`
+  carry them, the map entry too. `Store.setProfile` takes them from any hook event and from
+  `applyMap` into `s.configDir` / `s.profile`; an event without them keeps what is recorded, so a
+  session from before this picks them up at its next prompt.
+- One label: `config.js` `agentLabel(agent, profile)` ("claude · work"; "default" or none adds
+  nothing; at most 16 characters of profile; one argument is the bare kind, which the writer still
+  uses to find `bin/adapters/<agent>/extract.sh`). It lives in `config.js`, not `words.js`, because
+  `branch.js` is an engine file and needs it for the manifest: an engine file can only import engine
+  files (`branch.js` now imports `./config.js`; the host copies carry both).
+- Where it shows: the header pill (tooltip adds "Config folder: ~/.claude-work (profile work)."), the
+  session menu's group key and head (`CLAUDE · WORK`, a group apart from `CLAUDE`) and each row's pill,
+  the capture box's pill (from the map entry), and the manifest's Parent line:
+  `trip script (claude · work) · pane t1z (session f5c4026f), depth 0`. The manifest records
+  `parentProfile`; a manifest frozen before this shows `(claude)` from `parentAgent`, none if absent.
+  The chip's `ag` is unchanged (`ledgr-pane` does not draw it).
+- Branch and Resume: `configDirOf` prefers the recorded `configDir` (null when it is the default
+  folder: profile "default" or a folder named `.claude`), else the transcript-path derivation as
+  before. `transcriptPathOf` without a recorded transcript looks under the recorded folder.
+- Tests: `test_store.mjs` "profiles" (31 checks: the label, the store picking a profile up from
+  session_start, prompt (also local) and the map, keeping it across an event without one, surviving a
+  save; the Parent line for work and default; recorded beats derived; resume argv and transcript path).
+
+## 14. Closing-list mode on the lane, tool asks in the writer, the installer's MCP step (2026-11-06)
+
+- The ASKED OF YOU head's "agent working" has a tooltip naming the mode (`HANDOFF_WORDS[handoffOf(cfg)]`,
+  config.js; `laneHead` takes a `statusTip`). `adapters.js` `asksMode` reads `handoffOf` instead of
+  `instruct_block`. `config.js` DEFAULTS carry `asks: {handoff: "ledgr"}`.
+- `store.js` `on_asks`, `source: "tool"` (bin/mcp): `origin: "tool"` (words.js: "declared by the
+  agent (tool)"), `quoteSource` `tool_unverified` until the Stop hook's re-emit, then `tool`. A
+  mid-turn event (`tool_call` > 0) neither clears the turn's pending nor surfaces the chip; the Stop
+  re-emit (no `tool_call`) does both. `replaces_turn: true` drops this turn's tool asks the new list
+  no longer names unless touched (open, not promoted, no answer, no draft) - the rule of
+  `tests/test_mcp.py` FakeWriter, plus the draft. A tool ask matches its item by turn and text
+  whatever its quote became; an ask without an `options` key keeps the item's options and
+  recommendation. Store tests: 21 checks ("tool asks").
+- The chip record gains `o` (how the counted asks arrived, when one way); `ledgr-pane`'s tooltip adds
+  ", declared by the agent (tool)".
+- Installer: `HANDOFFS` question and `asks_handoff` answer (config `asks.handoff`, `instruct_block` =
+  not prose; an older answers file or `--instruct-block off` without `asks_handoff` means prose;
+  `--asks-handoff`), `--check` prints "closing list <mode>". The MCP step: "Register ledgr's MCP server
+  with Claude Code so agents can declare asks without printing a block?" (default yes interactively;
+  with `--yes` only when `mcp: true`, `--mcp on`, or it is registered already), then per chosen
+  config folder the exact `claude mcp add --scope user --transport stdio ledgr -- <python3> -I -B
+  <home>/mods/ledgr/bin/mcp/ledgr_mcp.py` (with `CLAUDE_CONFIG_DIR` for a non-default folder) and
+  the three allow entries, each consented to; `apply_mcp` backs up `.claude.json` and the settings
+  file first. `--check`: per folder "ledgr registered (user scope)" (read from `~/.claude.json` or
+  `<folder>/.claude.json`, no claude call) and the allow entries, printing the command for a missing
+  one (a failure only when the install chose MCP). The doctor also counts the last turns' sources from
+  hook.log: block and tool together as "declared by the agent". Uninstall: `claude mcp remove --scope
+  user ledgr` per registered folder and the allow entries with the hooks (original restored when only
+  ledgr's entries differ). Installer tests: `test_handoff`, `test_mcp` (a fake claude; scratch only).
+- Deployed with `--mcp off`: nothing registered, no Claude settings file written (mtimes unchanged).
+  Later the same evening Jesse ran `./install.sh --yes --answers ~/.local/state/ledgr/last-install.json
+  --mcp on`: `ledgr` registered for `~/.claude` and `~/.claude-work`, both shown connected, the allow
+  entries in both settings files, `--check` healthy.
+- Live, writer path for tool asks: a throwaway session made of spool events (fake terminal
+  `lt-tool1`): a mid-turn `asks` with `source: "tool"`, `tool_call: 1`, then `pending` and the Stop
+  re-emit without options. The panel showed "Ask 1 · declared by the agent (tool) · blocking · turn 1"
+  with its options while "agent working", then idle with the options kept, quote source `tool` and
+  the uuid on both items; forgotten through a `forget` spool event, and the panel went back to
+  following focus.
+- preview.png retaken in authoritative mode (docs/preview-recipe.md rewritten): a throwaway Haiku
+  session in a new space, its reply ending with `ledgr: 3 items for you, 2 blocking` and the bullet
+  block, the panel with the same three asks; space closed and session forgotten afterwards.

@@ -1,5 +1,5 @@
 #!/bin/bash
-# ledgr: every offline test (hooks half, the mod's store and nav under Node, the no-keystroke rule). No Claude, no Herdr window,
+# ledgr: every offline test (hooks half, the mod's store and nav under Node, the no-keystroke rule, the MCP server). No Claude, no Herdr window,
 # no API call, no Keychain read.
 #   bash tests/run-all.sh
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -19,4 +19,5 @@ bash tests/test-hooks.sh | tail -1 || rc=1
 bash tests/test-store.sh | tail -1 || rc=1        # the mod's store.js + branch.js under Node (skipped without node)
 "$PY" -I -B tests/test_no_keystrokes.py | tail -1 || rc=1   # no hc keys / hc send anywhere; copy = clipboard + focus
 bash tests/test-nav.sh | tail -1 || rc=1          # nav.js under Node with a recording herdr stub (skipped without node)
+"$PY" -I -B tests/test_mcp.py | tail -1 || rc=1    # the MCP server over stdio (scratch ledgr-data, a fake writer)
 exit $rc

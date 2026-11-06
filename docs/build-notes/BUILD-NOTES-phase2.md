@@ -1,7 +1,7 @@
 # ledgr Phase 2: build notes (2026-11-05)
 
 Branch action on a parked question, branch lineage, and the context manifest. Herdr 0.1.13, hc 0.1.18,
-Claude Code 2.1.311. Phase 1 notes: `BUILD-NOTES-mod.md`, `bin/BUILD-NOTES-hooks.md`. Spec: Sections 3, 6,
+Claude Code 2.1.311. Phase 1 notes: `BUILD-NOTES-mod.md`, `BUILD-NOTES-hooks.md`. Spec: Sections 3, 6,
 8 and 11 of `~/Repos/ledgr/docs/design/Herdr ledger mod design.md` (moved there from
 `~/Documents/reports/` during this build, unchanged; the Phase 2 table is appended to its Section 11).
 

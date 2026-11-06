@@ -25,6 +25,7 @@ export function originWords(origin) {
   return {
     extract_model: "found by the extractor",
     extract_block: "declared by the agent",
+    tool: "declared by the agent (tool)",
     capture: "parked by you",
     btw: "parked by you (/btw)",
   }[origin] ?? (origin ? String(origin).replace(/_/g, " ") : "");

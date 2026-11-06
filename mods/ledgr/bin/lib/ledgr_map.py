@@ -3,7 +3,9 @@
 an adapter turns its agent's hook input into `fields` and calls handle().
 
 fields (all optional strings unless noted): cwd, transcript_path, session_title, model, source,
-prompt, prompt_id, last_assistant_message, reason; local (bool, prompt only);
+prompt, prompt_id, last_assistant_message, reason; config_dir and profile (the agent's config
+folder and its short name, when the adapter knows them: Claude's CLAUDE_CONFIG_DIR, "default" or
+"work"; recorded on any event, carried by session_start and prompt); local (bool, prompt only);
 session_name_fallback (callable sid -> name|None, SessionStart only).
 
 Writes are atomic (temp file + rename) and idempotent per event: a prompt whose prompt_id is
@@ -137,6 +139,7 @@ def map_record(t, rec, event, now):
     return {"v": 1, "terminal": t, "scope": rec.get("scope"), "agent": rec.get("agent") or "other",
             "session_id": rec["session_id"], "session_name": rec.get("session_name"),
             "transcript_path": rec.get("transcript_path"), "cwd": rec.get("cwd"), "repo": rec.get("repo"),
+            "config_dir": rec.get("config_dir"), "profile": rec.get("profile"),
             "turn": rec.get("turn"), "prompt_id": rec.get("prompt_id"), "state": rec.get("state"),
             "last_passage_hash": rec.get("last_passage_hash"),
             "last_assistant_uuid": rec.get("last_assistant_uuid"),
@@ -177,11 +180,15 @@ def handle(event, sid, t, agent, fields):
         rec["cwd"] = cwd
         if f("transcript_path"):
             rec["transcript_path"] = f("transcript_path")
+        for k in ("config_dir", "profile"):
+            if f(k):
+                rec[k] = f(k)
         for k, v in (("session_name", None), ("repo", None), ("transcript_path", None), ("model", None),
                      ("turn", 0), ("turn_base", "ledgr"), ("turn_source", "hooks"), ("prompt_id", None),
                      ("state", "idle"), ("last_source", None), ("last_stop_at", None),
                      ("last_assistant_uuid", None), ("last_passage_hash", None), ("parent_session_id", None),
-                     ("owner_pid", None), ("owner_comm", None), ("started_at", now)):
+                     ("owner_pid", None), ("owner_comm", None), ("config_dir", None), ("profile", None),
+                     ("started_at", now)):
             rec.setdefault(k, v)
         rec.pop("pending_settle", None)                 # older builds kept a settle retry here
         rec["updated_at"] = now
@@ -206,7 +213,8 @@ def handle(event, sid, t, agent, fields):
                 rec["compactions"] = comps
             S.session_start(t, sid, agent=rec["agent"], source=src, model=rec.get("model"), cwd=rec.get("cwd"),
                             transcript_path=rec.get("transcript_path"), session_name=rec.get("session_name"),
-                            repo=rec.get("repo"), turn=turn, at=now)
+                            repo=rec.get("repo"), turn=turn, config_dir=rec.get("config_dir"),
+                            profile=rec.get("profile"), at=now)
             # 1 ms later, so name order (the mod's apply order) puts them after session_start.
             if lineage:
                 S.branch_started(t, sid, parent_session_id=lineage["parent_session_id"], item_id=lineage["parent_item"],
@@ -228,7 +236,8 @@ def handle(event, sid, t, agent, fields):
             for r in REF.findall(p):
                 if r not in refs:
                     refs.append(r)
-            S.prompt(t, sid, turn=turn, prompt_id=pid_, local=local, prompt_head=p, refs=refs, at=now)
+            S.prompt(t, sid, turn=turn, prompt_id=pid_, local=local, prompt_head=p, refs=refs,
+                     config_dir=rec.get("config_dir"), profile=rec.get("profile"), at=now)
 
         elif event == "Stop":
             msg = fields.get("last_assistant_message")
@@ -274,6 +283,19 @@ def take_reinject(sid):
         if not isinstance(rec, dict) or rec.get("reinject_pending") is None:
             return False
         rec.pop("reinject_pending", None)
+        C.write_json(sf, rec)
+    return True
+
+
+def set_instruct_mode(sid, mode):
+    """Record the handoff mode whose wording the session last got ("ledgr", "both", "prose"), so a
+    later change of asks.handoff reaches it once at its next prompt."""
+    with C.Lock("session-" + sid):
+        sf = C.path("sessions", sid + ".json")
+        rec = C.read_json(sf)
+        if not isinstance(rec, dict):
+            return False
+        rec["instruct_mode"] = mode
         C.write_json(sf, rec)
     return True
 

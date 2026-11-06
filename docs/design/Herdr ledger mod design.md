@@ -1,6 +1,6 @@
 # Herdr "ledgr" mod: design specification
 
-Date: 2026-11-05. Targets: Herdr app 0.1.12 (`layouts/custom.json:3-6`), Claude Code 2.1.311 (`claude --version`), macOS. Status: Phase 1 is build-ready and its hooks half is built (Section 11 lists where the build departs from this text); Phases 2 and 3 are outlined.
+Date: 2026-11-05. Targets: Herdr app 0.1.12 (`layouts/custom.json:3-6`), Claude Code 2.1.311 (`claude --version`), macOS. Status as written: Phase 1 build-ready, Phases 2 and 3 outlined. Status on 2026-11-06: Phases 1 to 3 shipped on 2026-11-05 (Herdr 0.1.13), then 0.1.0 packaging, ask severity, the closing-list modes and an MCP server on 2026-11-05 and 2026-11-06. The text below is the spec as written, with a few "Superseded" notes; Section 11 lists every place the build departs from it, in order.
 
 The ledger is a side panel plus three small hooks that keep a persistent, two-direction list of requests around one linear agent conversation. Agent to human: at the end of every turn, the asks the agent made of the person (decisions, confirmations, tasks, information) are pulled out of its final message and pinned in the panel, so they stay in view when the person asks a clarifying question about one of them and the terminal scrolls on. Human to agent: one keystroke opens a small box, while the agent is still streaming, where the person parks a question about what they are reading; it is saved against the session and the passage and never reaches the agent until the person sends it. Both directions use one schema. Nothing is surfaced mid-stream: items appear at the end of the turn, on a chip in the pane header, and nothing nags. Branching from a ledger item is Phase 2; carrying a branch's answer back is Phase 3.
 
@@ -26,6 +26,8 @@ The ledger is a side panel plus three small hooks that keep a persistent, two-di
 | Surfacing | Chip in a cloned pane header (`my-pane`): dim while working, expands at Stop; no auto-open, toast or sound | 6.5 |
 | Navigation | The panel shows the passage itself; a button opens Claude's own transcript search; Herdr cannot scroll a terminal to a line | 6.6 |
 | Branching | Phase 2: `hc run --parent ... -- claude --resume <sid> --fork-session` from an item, with a context manifest | 8 |
+
+Changed since (Section 11 has each): the store is `ledgr-data/store.json`, applied by one elected writer; asks are declared first (the `declare_asks` MCP tool or the block, instruction on by default, `asks.handoff`) and extracted as the fallback, each with a level; the chip is the public `ledgr-pane` mod and the writer's public host a view of `ledgr`; navigation sends no keystrokes.
 
 ## 1. Scope and non-goals
 
@@ -84,7 +86,9 @@ Code lives in the mod folder; data lives beside it in a folder the mod can write
                                           claude_hook.py, claude_extract.py, last_assistant.py
   bin/tests/                              test-hooks.sh, test_parse_block.py, test_last_assistant.py,
                                           run-extract-fixtures.py, run-all.sh
-  bin/BUILD-NOTES-hooks.md                every file, how to run the tests, the manual steps
+  bin/BUILD-NOTES-hooks.md                every file, how to run the tests, the manual steps (in the repo since
+                                          0.1.0: docs/build-notes/BUILD-NOTES-hooks.md)
+  bin/mcp/                                (added 2026-11-06) the stdio MCP server, ledgr_mcp.py
   fixtures/extract/                       extraction fixtures (9.4)
 
 ~/.config/herdr-app/ledgr-data/           data (hooks and the mod both write here)
@@ -492,6 +496,8 @@ When both are present:
 | `block-only` | either | never | block asks or nothing |
 
 `config.extract.audit_rate` (default 0): the share of block turns on which the model also runs, with disagreements logged to `log/extract-audit.jsonl` and not shown. Set it to 0.2 for the first week to check whether the agent's own block misses asks.
+
+**Superseded 2026-11-06.** The instruction is on by default (`instruct_block` true), and its wording follows `asks.handoff`: `bin/lib/asks-instruction-ledgr.txt` (the default: blocking and needed items only, out of the prose, which ends with one pointer line), `-both.txt`, or none for `prose`; `asks-instruction.txt` is gone. The block's readable form is one bullet per item (`- blocking · decide · text · "quote" · options: a | b`); the JSON array above is still read, a block mixing both is rejected. Items carry `level` (blocking, needed, optional) instead of `blocking`. When the MCP server is registered the agent calls `declare_asks` instead of writing a block, and the Stop hook settles that declaration with no model call. Section 11 has the details.
 
 ### 4.4 Model call
 
@@ -1058,13 +1064,15 @@ Introduced by this design and also untested:
 | `mods/ledgr/spool.js` | new | startup scan, `watchFolder` loop, parse retry, `unlink` |
 | `mods/ledgr/panel.js`, `capture.js`, `nav.js` | new | Sections 6, 5, 6.6 |
 | `mods/ledgr/config.js`, `fixtures.js`, `fixtures/extract/*` | new | settings defaults, demo data, extraction fixtures |
-| `mods/ledgr/bin/lib/`, `bin/providers/`, `bin/adapters/claude/`, `bin/tests/` | new | core, providers, Claude Code adapter, tests (2.2; `bin/BUILD-NOTES-hooks.md`) |
+| `mods/ledgr/bin/lib/`, `bin/providers/`, `bin/adapters/claude/`, `bin/tests/` | new | core, providers, Claude Code adapter, tests (2.2; `docs/build-notes/BUILD-NOTES-hooks.md`) |
 | `mods/my-pane/` | clone of `pane`, edited | chip (6.5) |
 | `mods/my-tabs/main.js` | edited | Ledger button, `toggle-ledgr`, global handling in `syncPanel` (6.1) |
 | `layouts/custom.json` | edited | header points at `my-pane`; `ledgr` block in `panel-body` (6.1) |
 | `keys.json` | edited | `cmd-j`, `cmd-shift-j`, `mod:ledgr` section |
 | `~/.claude/settings.json` | edited 2026-11-05; backup in `~/.local/state/ledgr/backup-20261105/` | three hook entries (2.4) |
 | `ledgr-data/` | created at first hook run | data (2.2) |
+
+The Phase 1 inventory as built on the maintainer's machine. Since 0.1.0 the chip is the optional public mod `ledgr-pane` (`my-pane` is retired), `my-tabs` lives in `examples/personal-overlay/`, and `install.sh` writes every live file from the repo (Section 11, "0.1.0").
 
 ## Appendix B: `ledgr-data/config.json` defaults
 
@@ -1084,9 +1092,11 @@ Introduced by this design and also untested:
 
 The hooks create the file with these values at their first run and never overwrite it; a missing or invalid file means these defaults.
 
+The defaults as written on 2026-11-05. Current ones (2026-11-06; `bin/lib/ledgr_config.py` and `mods/ledgr/config.js` are authoritative, the README's Configuration table describes each): `instruct_block` true, `instruct_reinject` true, `asks.handoff` "ledgr", `extract.threshold` "needed", `ui` `{foldAsksWhileWorking: false, animations: true}` plus `ui.panel` from the installer; the rest as above.
+
 ## 11. Build notes: hooks half (2026-11-05)
 
-Where the built hooks, map, spool writer and extractor depart from the text above, and why. The file list, test commands and manual steps are in `mods/ledgr/bin/BUILD-NOTES-hooks.md`.
+Where the built hooks, map, spool writer and extractor depart from the text above, and why. The file list, test commands and manual steps are in `docs/build-notes/BUILD-NOTES-hooks.md` (in `mods/ledgr/bin/` until 0.1.0).
 
 | Topic | Built | Why |
 |---|---|---|
@@ -1108,7 +1118,7 @@ Status on 2026-11-05: all offline tests pass (block parser 22, uuid lookup 10, f
 
 ### Phase 2: branch launcher, lineage and manifest (2026-11-05)
 
-Built on Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311. Files, the live test and the open items are in `mods/ledgr/BUILD-NOTES-phase2.md`. Where the build departs from Section 8 and the Phase 2 brief:
+Built on Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311. Files, the live test and the open items are in `docs/build-notes/BUILD-NOTES-phase2.md`. Where the build departs from Section 8 and the Phase 2 brief:
 
 | Topic | Built | Why |
 |---|---|---|
@@ -1129,7 +1139,7 @@ Status on 2026-11-05: offline tests pass (hooks 59, store 162); `herdr-app check
 
 ### Phase 3: confluence and answer-sheet landing (2026-11-05)
 
-Built on Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311. Files, the live test and the open items are in `mods/ledgr/BUILD-NOTES-phase3.md`. Where the build departs from Sections 1 (Phase 3), 6.4 and 8.6:
+Built on Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311. Files, the live test and the open items are in `docs/build-notes/BUILD-NOTES-phase3.md`. Where the build departs from Sections 1 (Phase 3), 6.4 and 8.6:
 
 | Topic | Built | Why |
 |---|---|---|
@@ -1146,3 +1156,57 @@ Built on Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311. Files, the live test and 
 | Not built | Send when idle, cherry-pick, mid-history insertion, a state document with diffs, reopen of a closed branch | Section 1's "Not in Phase 3", and the brief |
 
 Status on 2026-11-05: offline tests pass (hooks 78, store 249, the landing parser on both composed messages; the lead-in rule and the closing line's wording were refined after the live run and tested offline); `herdr-app check` passes for `ledgr` (also with `FORCE_DEMO`), `my-tabs`, `my-pane`. Live, on a scratch Haiku trunk and branch only: the branch's block prefilled Conclude, an edit was appended, Send to trunk staged the message and focused the trunk without typing, the simulated paste landed (`confluence_landed`, Q1 resolved by the branch, branch rejoined, one decisions.md line; a second paste wrote no second line), Close branch ended the branch terminal and kept the record, and an answer sheet marked two Haiku-extracted asks answered. Test data was removed through a `forget` event.
+
+### Ask severity, fold and motion (2026-11-05, evening; extraction rules 2026-11-06)
+
+Notes: `docs/build-notes/BUILD-NOTES-hooks.md` ("Severity", "Borderline asks", "Status lines") and `BUILD-NOTES-mod.md` sections 10 to 12.
+
+| Topic | Built | Why |
+|---|---|---|
+| Level (3.1, 4.3, 4.4) | Every agent ask has one `level`: `blocking` (the agent stopped or cannot finish without it), `needed` (the person must act for the task to be done; the agent went on), `optional` (an offer or suggestion). Required in the schema; a block item without one is `needed`, an unknown level is rejected; the boolean `blocking` is kept, derived | Jesse: judged by what the task needs, never by tone. Offers are now extracted as optional instead of dropped |
+| Threshold | `extract.threshold` (default `needed`): asks at or above it are open rows and count on the chip; lower ones are kept, folded per turn as "below threshold (N)" with Promote. A menu on the asks lane head writes it; writer and panel reread `config.json` on change | One switch for declared and extracted asks alike |
+| Chip (6.5) | Its own `blocking` state in `blocked` while a blocking ask is open and the agent is not working; blocking asks sort first | |
+| Extraction prompt (4.4) | A decision order; polite wording never lowers a level; a closer that only offers to go on is optional unless the agent says it cannot proceed; a statement of what is done or uncommitted is never an ask (2026-11-06); the quote is the one or two sentences that make the ask | Jesse's screenshots |
+| Fold (6.2) | The asks lane's fold is the person's alone; `ui.foldAsksWhileWorking` restores the spec's fold while working | Jesse |
+| Motion | Only on detected state changes, native transitions only; `ui.animations` turns it off | No reduced-motion setting reaches a mod |
+
+Status on 2026-11-06: offline tests pass; live Haiku runs of the `mixed`, `closer` and `status` fixtures pass.
+
+### 0.1.0: packaging and no keystrokes (2026-11-06)
+
+Notes: `CHANGELOG.md`, `docs/publishing-requirements.md`, the 6.6 note above.
+
+| Topic | Built | Why |
+|---|---|---|
+| Store (3.2, 3.3) | `ledgr-data/store.json` is the source of truth, restored before any ingest and written only by the holder of `shared("ledgr.writer")` | The Grok critique; a panel copy does not start until shown |
+| Writer host | A view of the `ledgr` mod itself (`{view: "host"}`, a 96 px button beside the status bar), elected among hosts; the panel writes only as a fallback after 4 s. The maintainer's `my-tabs` hosts it from an engine copy in `examples/personal-overlay/` | A shared mod must install without its author's other mods |
+| Chip (6.1, 6.5) | The optional mod `ledgr-pane` (Herdr's `pane` 0.1.13 plus the chip, read-only); `my-pane` retired, the maintainer uses `ledgr-pane` | The chip's code exists once |
+| Install | `install.sh` (interactive, `--yes --answers`, `--check`), `uninstall.sh` restoring pre-ledgr files; one hook set per chosen Claude settings file (`CLAUDE_CONFIG_DIR` folders); sessions labelled by profile (`claude · work`) | Herdr's manual; a second Claude account read only its own settings.json |
+| Navigation (6.6) | No keystrokes at all: clipboard plus `pane.focus`, the whole message in the panel | `ctrl+o` is a toggle (the 6.6 note) |
+
+### Declared first and the closing list (2026-11-06)
+
+Notes: `BUILD-NOTES-hooks.md` "Who owns the closing list", `BUILD-NOTES-mod.md` section 14, `mods/ledgr/bin/adapters/README.md`.
+
+| Topic | Built | Why |
+|---|---|---|
+| Channel (4) | The agent's declaration is primary and the model the fallback: `instruct_block` defaults on; a blocking ask only the model found puts the instruction into that session's next prompt once (`instruct_reinject`) | Jesse: "otherwise it just guesses"; it is also the path to other agents (the adapter contract) |
+| `asks.handoff` | `ledgr` (default): blocking and needed items only in the declaration, the prose ends with one line, `ledgr: N items for you, M blocking`; `both`: the prose list plus the block; `prose`: no instruction, the extractor alone. Read at every hook run; a running session gets the new wording once at its next prompt | The end of a reply is the terminal's most valuable screen, and a list plus a block repeats every item |
+| Block (4.3) | One bullet per item, `- blocking · decide · text · "quote" · options: a \| b` (level and kind required); the JSON array is still read; a block mixing both is rejected | Readable where it is printed |
+
+Status on 2026-11-06: live on the maintainer's sessions in `ledgr` mode, both config folders; the pointer line's counts matched the parsed block in every scratch run.
+
+### MCP server (2026-11-06)
+
+Notes: `mods/ledgr/bin/mcp/README.md`, `BUILD-NOTES-hooks.md` "Declared by tool, settled at Stop", `BUILD-NOTES-mod.md` section 14.
+
+| Topic | Built | Why |
+|---|---|---|
+| Producer (2.9, 3.3) | `bin/mcp/ledgr_mcp.py`, stdio, standard library: `declare_asks`, `open_asks`, `parked_questions`, offered only inside a Herdr terminal; a third spool producer (`asks` with `source: "tool"`, `replaces_turn` on a later call in the same turn) | The fenced block filled the terminal's last screen; any MCP client can call a tool |
+| Settling | At Stop a turn with `ledgr-data/mcp/<session>/<turn>.json` is settled from it: quotes checked against the turn's whole assistant text, the message uuid attached, no model call and no reinject; a valid block in the same reply wins | Quotes cannot be checked while the turn runs |
+| Writer | Such asks read "declared by the agent (tool)"; this turn's untouched tool asks a later call no longer names are dropped; an item keeps its options when a re-emit has none | |
+| Instruction | The `ledgr` and `both` wordings say: call `declare_asks` if it is available, else write the block | |
+| Install | Asked; `claude mcp add --scope user` per chosen config folder plus three `mcp__ledgr__*` allow entries; `--check` reports both; uninstall removes both | Claude Code owns `.claude.json` |
+| Not built | A panel action that releases a parked question to the agent: `parked_questions` returns an empty list until it exists | |
+
+Status on 2026-11-06: offline tests pass (`tests/test_mcp.py` in `run-all.sh`); registered on the maintainer's machine for `~/.claude` and `~/.claude-work`, both shown connected, `--check` healthy.

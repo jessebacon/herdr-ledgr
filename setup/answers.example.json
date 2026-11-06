@@ -1,17 +1,26 @@
 {
   "$comment": "Answers for ./install.sh --yes --answers FILE (save as ledgr.install.json). Every key is optional: a missing one keeps what is installed now, else the default shown here. Paths may start with ~. claude_settings: the Claude settings files to hook, the primary first; add one per other config folder (a Claude Code started with CLAUDE_CONFIG_DIR, such as ~/.claude-work/settings.json); leave the key out to be offered every one found. Never put an API key here: with --yes the key comes from LEDGR_API_KEY, or run ./install.sh without --yes to type it (hidden).",
   "herdr_home": "~/.config/herdr-app",
-  "claude_settings": ["~/.claude/settings.json"],
-  "agents": ["claude"],
+  "claude_settings": [
+    "~/.claude/settings.json"
+  ],
+  "agents": [
+    "claude"
+  ],
   "provider": "anthropic",
   "model": "claude-haiku-5-5",
   "base_url": null,
   "api_key": "keep",
   "instruct_block": true,
+  "asks_handoff": "ledgr",
   "threshold": "needed",
   "animations": true,
   "fold_asks_while_working": false,
-  "keys": { "capture": "cmd-j", "toggle": "cmd-shift-j", "replace_conflicts": false },
+  "keys": {
+    "capture": "cmd-j",
+    "toggle": "cmd-shift-j",
+    "replace_conflicts": false
+  },
   "layout": {
     "name": "my-layout",
     "clone_from": "main",
@@ -21,5 +30,6 @@
     "chip": "ledgr-pane"
   },
   "overlay": null,
-  "run_tests": true
+  "run_tests": true,
+  "mcp": true
 }

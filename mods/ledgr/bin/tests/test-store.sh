@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.." || exit 1
 NODE=$(command -v node) || { echo "SKIP: store test (no node on PATH)"; exit 0; }
 MOD="$(cd .. && pwd)"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/ledgr-store.XXXXXX")
-cp "$MOD/store.js" "$MOD/config.js" "$MOD/branch.js" "$MOD/confluence.js" "$TMP/"
+cp "$MOD/store.js" "$MOD/config.js" "$MOD/branch.js" "$MOD/confluence.js" "$MOD/words.js" "$TMP/"
 echo '{"type":"module"}' >"$TMP/package.json"
 mkdir -p "$TMP/node_modules/herdr"
 echo '{"name":"herdr","type":"module","main":"index.js"}' >"$TMP/node_modules/herdr/package.json"

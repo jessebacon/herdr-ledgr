@@ -106,7 +106,11 @@ def hook_mode(input_file):
     th = threading.Thread(target=resolver, daemon=True)
     th.start()
     try:
-        res = X.extract(msg, cfg, rec, sid)
+        try:
+            whole = last_assistant.turn_text(transcript) if X.tool_declaration(sid, turn) else None
+        except Exception:
+            whole = None
+        res = X.extract(msg, cfg, rec, sid, turn=turn, turn_text=whole)
     finally:
         th.join(timeout=15)
         if not box["stopped"]:              # never leave a turn without its stop event
@@ -128,7 +132,7 @@ def hook_mode(input_file):
 def reinject_due(cfg, res):
     """The hybrid re-injection rule: the instruction is on, and the model (not a block) found a
     blocking ask in a message that carried no ledgr-asks block at all."""
-    return (cfg.get("instruct_block") is True and cfg.get("instruct_reinject") is not False
+    return (K.handoff(cfg) != "prose" and cfg.get("instruct_reinject") is not False
             and res.get("source") == "model" and not res.get("block_found")
             and any(a.get("level") == "blocking" for a in res.get("asks") or []))
 
@@ -138,7 +142,7 @@ def retry_mode(sid, turn, t):
     rec = C.read_json(C.path("sessions", sid + ".json"), {}) or {}
     t = t or rec.get("terminal") or C.terminal_id() or "unknown"
     msg = C.read_text(C.path("turns", sid, f"{turn}.md"))
-    res = X.extract(msg, cfg, rec, sid)
+    res = X.extract(msg, cfg, rec, sid, turn=turn)          # a tool-declared turn is re-settled, not re-extracted
     found = last_assistant.find(rec.get("transcript_path"), msg) if msg else {}
     S.asks(t, sid, turn=turn, prompt_id=rec.get("prompt_id") if int(rec.get("turn") or 0) == turn else None,
            message_uuid=found.get("uuid"), api_message_id=found.get("api_id"),

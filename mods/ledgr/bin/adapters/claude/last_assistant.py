@@ -47,6 +47,43 @@ def find(path, expected):
     return {}
 
 
+def turn_text(path):
+    """Every main-thread assistant text of the transcript's last turn (after the last real user
+    prompt: a user record whose content is text, not a tool result), joined by newlines; "" when
+    unreadable. The Stop hook checks declared quotes against it."""
+    if not path:
+        return ""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            f.seek(max(0, size - TAIL))
+            data = f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+    parts = []
+    for line in data.splitlines():
+        if '"user"' not in line and '"assistant"' not in line:
+            continue
+        try:
+            r = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(r, dict) or r.get("isSidechain"):
+            continue
+        msg = r.get("message") or {}
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if r.get("type") == "user":
+            prompt = isinstance(content, str) or (isinstance(content, list) and any(
+                isinstance(b, dict) and b.get("type") == "text" for b in content)
+                and not any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content))
+            if prompt and not r.get("isMeta"):
+                parts = []
+        elif r.get("type") == "assistant" and isinstance(content, list):
+            parts += [b["text"] for b in content
+                      if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str) and b["text"].strip()]
+    return "\n".join(parts)
+
+
 if __name__ == "__main__":
     with open(sys.argv[2], encoding="utf-8") as f:
         expected_text = f.read()

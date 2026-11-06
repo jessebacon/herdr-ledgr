@@ -240,7 +240,7 @@ export class Capture {
       .child(h_flex().gap(8).items_center()
         .child(div().flex_none().text_size(14).font_semibold().child(this.parent ? "Ask about this" : "Park a question"))
         .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(label))
-        .when(Boolean(rec), (el) => el.child(div().flex_none().px(5).rounded(4).bg(t.raised).text_size(10).text_color(t.muted).child(agentLabel(rec.agent))))
+        .when(Boolean(rec), (el) => el.child(div().flex_none().px(5).rounded(4).bg(t.raised).text_size(10).text_color(t.muted).child(agentLabel(rec.agent, rec.profile))))
         .child(div().flex_none().text_size(11).text_color(t.dim).child("Esc")))
       .child(h_flex().h(34).flex_none().px(10).items_center().rounded(9).border_1().border_color(t.accent).bg(t.background)
         .child(Input.new(this.input).flex_1().h_full().text_size(12.8).text_color(t.foreground)))

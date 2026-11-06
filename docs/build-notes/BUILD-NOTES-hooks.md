@@ -1,6 +1,6 @@
 # ledgr hooks half: build notes (2026-11-05)
 
-The Claude Code hooks, the identity map, the spool writer and the agent-ask extractor for the ledgr mod. The panel, capture box and chip (the `.js` files one level up) are the mod half and are documented in `BUILD-NOTES-mod.md`. The design is `~/Repos/ledgr/docs/design/Herdr ledger mod design.md` (the spec); section 11 of the spec lists where this build departs from it.
+The Claude Code hooks, the identity map, the spool writer and the agent-ask extractor for the ledgr mod. The panel, capture box and chip (the `.js` files in `mods/ledgr/`) are the mod half and are documented in `BUILD-NOTES-mod.md`. The design is `~/Repos/ledgr/docs/design/Herdr ledger mod design.md` (the spec); section 11 of the spec lists where this build departs from it.
 
 Standard library Python 3 (`/opt/homebrew/bin/python3`), system `/usr/bin/curl` and `/usr/bin/security`, bash 3.2. No Node and no pip packages. Every entry script sets `PATH` itself, so the hooks work from Herdr's GUI login-shell PATH. Python bytecode is cached in `ledgr-data/.pycache`, never in the mod folder, because a save under `mods/` reloads every copy of the mod.
 
@@ -12,7 +12,7 @@ bin/
     ledgr_core.py           paths, ids, atomic write (temp + rename), flock, log, passage hash, Keychain read, detached spawn
     ledgr_config.py         config.json defaults and loader (missing: created; invalid: left alone, defaults used)
     ledgr_spool.py          the spool-event writer and one builder per event type; the event contract is its docstring.
-                            Importable on its own (only ledgr_core), for the later MCP stdio server
+                            Importable on its own (only ledgr_core); the MCP server (bin/mcp/, 2026-11-06) uses it
     ledgr_map.py            session record + identity map writer for the four lifecycle events; owner-pid guard
     ledgr_asks.py           the one ask validator, shared by the block parser and every provider
     ledgr_landing.py        Phase 3: is a submitted prompt a staged confluence or answer sheet (marker line)?
@@ -20,7 +20,9 @@ bin/
     parse_block.py          the ledgr-asks fenced-block parser (also a CLI: parse_block.py < message)
     ledgr_extract.py        the extraction pipeline: block, provider, validate
     extract-system.txt      the extraction system prompt
-    asks-instruction.txt    the opt-in SessionStart instruction (printed only when instruct_block is true)
+    asks-instruction.txt    the opt-in SessionStart instruction (printed only when instruct_block is true);
+                            since 2026-11-06 asks-instruction-ledgr.txt, -both.txt, -off.txt, on by default
+                            ("Who owns the closing list" below)
   providers/                extraction providers, one signature: complete(system, user_text, schema, opts) -> result
     __init__.py             dispatch on config.extract.provider; key lookup; "no credential" result
     _http.py                result shape; curl POST with the key in a curl config on stdin, body in a 0600 temp file
@@ -49,7 +51,7 @@ bin/
 - Main conversation only: stdin with an `agent_id` (a subagent or teammate), or a `hook_event_name` other than the entry's own (such as `SubagentStop`), is ignored.
 - Owner guard: the map entry records the pid and command name of the agent process (the first non-shell ancestor of the hook). An event for the same terminal with a different session id, from a different pid, while the recorded owner is alive and still the same program, is ignored. `/clear` and `/resume` in the same process are accepted.
 - Writes are temp file + rename. The session record is idempotent per event (a repeated `prompt_id` does not count a second turn); a per-session `flock` serialises the turn counter and fails open after 3 s.
-- Stdout is empty for every hook, except SessionStart when `config.instruct_block` is true (default false).
+- Stdout is empty for every hook, except SessionStart when `config.instruct_block` is true (default false at this build; true since 2026-11-06, with the wording chosen by `asks.handoff` and the UserPromptSubmit reminders described below).
 - Per turn the spool gets `pending` (at once, from Stop part A), then `stop` carrying the message uuid once the transcript lookup finishes (retries at 0, 1, 2 and 4 s), then `asks`. There is no `settle` event.
 - Extraction: only a valid, non-empty `ledgr-asks` block skips the model; an empty or invalid block falls through to it. Every ask carries a `level` (blocking, needed, optional; see "Severity" below); the extractor returns asks of every level, and the mod decides which count (`extract.threshold`). The prompt lists the session's open and recently dismissed asks (from the mod's `snapshot.json`); a re-raised ask comes back with `repeat_of`.
 - Every ask carries `hash` (sha1 of the whitespace-collapsed quote, else text, first 12 hex chars, the same rule as `store.js` `passageHash`), `origin`, `repeat_of` (the Request id `rq_...`) and `repeat_of_handle` (`A5`). Events carry the turn's `passage_hash`; `message_uuid` is optional.
@@ -66,6 +68,8 @@ Config (`ledgr-data/config.json`, created by the first hook run):
   "branch": { "maxDepth": 2 }, "ui": { "foldAsksWhileWorking": false, "animations": true },
   "retention_days": 14 }
 ```
+
+(The defaults at this build. Since 2026-11-06: `instruct_block` true, `instruct_reinject` true, `asks.handoff` "ledgr"; `lib/ledgr_config.py` is authoritative.)
 
 Providers: `anthropic` (key: Keychain service `ledgr`, account `anthropic`, or `LEDGR_ANTHROPIC_KEY`); `openai-compatible` (set `extract.base_url` and `extract.model`; key optional, account `openai-compatible` or `LEDGR_OPENAI_COMPATIBLE_KEY`); `cli` (`claude -p`, no key). `cli_fallback: true` uses `cli` when the anthropic key is missing.
 
@@ -84,6 +88,8 @@ bash tests/test-hooks.sh                                      # spec 9.2 extende
 Offline runs point `LEDGR_KEYCHAIN_SERVICE` at a service that does not exist, so they never read the real key. `--live` reads the real key and prints latency, tokens and cost per fixture.
 
 ## Manual steps for Jesse
+
+(Steps 1 and 2 were done on 2026-11-05: model extraction works from 15:01, and the live fixture runs are under "Severity".)
 
 1. Fix the Keychain item. It was saved with account `anthripic`; the hooks read account `anthropic`, so every model call currently ends in "no credential". In Terminal:
    ```sh
@@ -118,7 +124,7 @@ Offline runs point `LEDGR_KEYCHAIN_SERVICE` at a service that does not exist, so
   `pipefail` so a failing test fails the run.
 - Confirmed live: a real `/compact` fires SessionStart `source: "compact"` with the same session id; a
   branch launched by the mod fires SessionStart `source: "fork"` with `LEDGR_PARENT` in the hook's
-  environment. Details: `../BUILD-NOTES-phase2.md`.
+  environment. Details: `BUILD-NOTES-phase2.md`.
 
 ## Phase 3 additions (2026-11-05)
 
@@ -150,7 +156,7 @@ Offline runs point `LEDGR_KEYCHAIN_SERVICE` at a service that does not exist, so
   code-fence forms ignored, inline and two-line lead-ins ignored, a lead-in + wrapped answer sheet)
   and a confluence prompt in the timing table (78 checks). `tests/test-store.sh` also parses the messages
   `confluence.js` composes with `ledgr_landing.detect`.
-- No settings change: UserPromptSubmit was already registered. Details: `../BUILD-NOTES-phase3.md`.
+- No settings change: UserPromptSubmit was already registered. Details: `BUILD-NOTES-phase3.md`.
 
 ## Severity (2026-11-05)
 
@@ -222,6 +228,69 @@ Offline runs point `LEDGR_KEYCHAIN_SERVICE` at a service that does not exist, so
 - Live, `--live status` (one call, 2274 in, 9 out, $0.00023, 1.1 s): zero asks. PASS. `statusask`
   not run live.
 
+### Profiles (2026-11-06)
+
+- `claude_hook.py` computes the session's config folder on every event: `CLAUDE_CONFIG_DIR`
+  (absolute, normalised: a trailing slash goes), else the folder above `projects/` in the transcript
+  path, else `~/.claude`; and `profile_of()`: "default" for a folder named `.claude`, else the name
+  without a leading `.claude-` (`~/.claude-work` is "work"), else the name as it is. Both go into
+  `fields` (agent-neutral names: another adapter may report its own, say `CODEX_HOME`).
+- `ledgr_map.handle` records `config_dir` and `profile` in `sessions/<sid>.json` and
+  `terminals/<t>.json` on any event that has them; `session_start` and `prompt` events carry them
+  (`ledgr_spool.py`, null when unknown). `pending`, `stop`, `asks` do not.
+- Tests (`test-hooks.sh`, "config folder and profile", 10): default (no env, no projects/ path),
+  both events carry it, pending does not, a folder without `.claude-` keeps its name, `~/.claude-work/`
+  from the env (record, map, events), work from the transcript path alone, a `.claude` folder from the
+  transcript path, and a record stripped of both (an older build) regaining them at its next prompt.
+
+### Who owns the closing list (2026-11-06)
+
+- `ledgr_config.handoff(cfg)`: "prose" when `instruct_block` is not true, else `asks.handoff`
+  ("ledgr" when missing or unknown). Wordings: `lib/asks-instruction-ledgr.txt` (~260 words with the
+  tool sentence), `-both.txt` (~195), `-off.txt` (two lines, printed once to a running session
+  switched to prose). `asks-instruction.txt` is gone.
+- `claude_hook.py`: SessionStart prints the mode's wording and records `instruct_mode` in the session
+  record (`ledgr_map.set_instruct_mode`). At a real prompt, a recorded mode other than the current
+  one prints the new wording once (a session with no `instruct_mode` counts as "both", the old
+  instruction; one first seen at a prompt, with no SessionStart, gets the wording there). The reminder
+  after a model-found blocker prints the mode's wording; `prose` never reminds.
+- `parse_block.py`: bullets or JSON (`form`), never both (`mixed`, rejected whole); bullet reasons
+  `ask N: missing level …`, `unknown level 'urgent'`, `unknown kind 'approve' …`, `missing text`,
+  `field … is neither a quoted passage nor options`, `line N: not a bullet`; the quote in "…" or
+  “…”, options split on `|`; `-`, `*` or `•` as the marker. Also read: a `<ledgr-asks>` …
+  `</ledgr-asks>` pair (Haiku wrote that once in `both` mode before the wording showed the fence).
+  `pointer` = the last `ledgr: N item(s) for you[, M blocking]` line of the prose; the extractor's
+  `asks` event carries `block_form` and `pointer`.
+- Tests: parse_block +18 (fixtures `bullets*.md`, 6 new); hooks "handoff modes" (16) and the
+  first-prompt case; installer `test_handoff`.
+- Live, Haiku through `claude -p` in a scratch folder with only the ledgr hooks (`--setting-sources
+  project,local --settings`), a scratch `LEDGR_DATA` and a fake terminal (nothing reached the live
+  store), the site plan prompt and a list-inducing one ("end with a checklist of everything you need
+  from me"): in `ledgr` mode every reply had no list in prose, one pointer line whose counts matched
+  the parsed block (3 / 2, 4 / 1, 4 / 1), and a bullet block read with `source=block`; in `both`
+  mode the prose checklist came back (9 numbered items) with the block too. The first `both` run
+  wrote `<ledgr-asks>` tags and fell back to the model (7 asks, reinject marked): fixed by showing the
+  fence in the wording and by reading the tag form. Invented quotes are dropped by the validator, as
+  for JSON. The throwaway transcripts stay under `~/.claude/projects/-private-tmp-…-scratchpad-lt-site/`.
+- Live on the owner's sessions: the deploy set `asks.handoff: ledgr`; the app (`claude-work`)
+  session got the ledgr wording at its next prompt (`handoff None->ledgr` in hook.log) and its next
+  reply ended with `ledgr: 2 items for you, 1 blocking` and a bullet block.
+
+### Declared by tool, settled at Stop (2026-11-06)
+
+- `ledgr_extract.tool_declaration(sid, turn)` reads `ledgr-data/mcp/<session>/<turn>.json` (bin/mcp).
+  When it exists and the reply has no valid non-empty block, `extract()` returns `source: "tool"`
+  before the under-40-characters skip (a reply can be the pointer line alone): no model call, no
+  reinject, `replaces_turn: true`, `quotes: "verified"`. `tool_asks()` validates the declared asks
+  again with the turn's text: `last_assistant.turn_text(transcript)` (every main-thread assistant text
+  since the last real user prompt; a tool_result record is not a prompt) plus the last message.
+  Options come from the declaration, else from the writer's item in `snapshot.json`; when neither has
+  them the key is left out and the writer keeps the item's own (the state file keeps text, level,
+  kind, hash, quote and repeat_of_handle only). `--retry` re-settles such a turn.
+- Tests (hooks, 6): a transcript whose quoted sentence comes before the tool call is verified, an
+  invented quote dropped, the final message's uuid used, no reinject, `source=tool` in hook.log.
+- `test-hooks.sh` timing: over 100 ms with a load average over 8 is a warning, not a failure.
+
 ## Confirmed live (2026-11-05)
 
 - The owner pid is the claude process: live map entries show t3 -> 4817 and t2 -> 60575, both `claude`, matching `~/.claude/sessions/<pid>.json` for those sessions.
@@ -230,7 +299,7 @@ Offline runs point `LEDGR_KEYCHAIN_SERVICE` at a service that does not exist, so
 
 ## Unconfirmed
 
-- The live Anthropic call (blocked by the Keychain account name). Request shape is from the claude-api skill: `thinking: {type: "disabled"}` with `output_config.effort: "low"` and `output_config.format` on `claude-haiku-5-5`, `anthropic-version: 2026-10-21`, nullable fields as `anyOf`.
+- The live Anthropic call (blocked by the Keychain account name; confirmed later on 2026-11-05 once the item was fixed, see "Severity"). Request shape is from the claude-api skill: `thinking: {type: "disabled"}` with `output_config.effort: "low"` and `output_config.format` on `claude-haiku-5-5`, `anthropic-version: 2026-10-21`, nullable fields as `anyOf`.
 - `cli` provider: where `--output-format json` puts the structured result (read from `structured_output`, else `result`), and whether `--setting-sources local` keeps user-level hooks out.
 - `openai-compatible` provider: built to the chat-completions shape; not run against a server.
 - Hook timing: medians 36 to 82 ms per hook at load averages of 12 to 39 (target 100 ms).

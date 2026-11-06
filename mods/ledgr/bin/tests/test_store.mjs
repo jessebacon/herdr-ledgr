@@ -9,6 +9,8 @@ if (!dir) { console.error("usage: test_store.mjs <module folder>"); process.exit
 const { Store, passageHash, norm, levelOf, isSuggestion, thresholdOf, LEVELS } = await import(`${dir}/store.js`);
 const B = await import(`${dir}/branch.js`);
 const CF = await import(`${dir}/confluence.js`);
+const CFG = await import(`${dir}/config.js`);
+const WORDS = await import(`${dir}/words.js`);
 const fsm = await import("node:fs");
 let checks = 0, keep2;
 const A = new Proxy(assert, { get: (t, k) => (...a) => { checks++; return t[k](...a); } });
@@ -475,4 +477,100 @@ A.deepEqual(fa.slice(0, 2), ["/usr/bin/env", "CLAUDE_CONFIG_DIR=/Users/x/.claude
 A.equal(B.claudeArgv({ id: "br_x", label: "L", preamble: "P" }, { parentSessionId: R, anchorTurn: 1, forkTurn: 2, depth: 1, configDir: null }, { id: "rq_1" }, "/opt/claude")[1].startsWith("LEDGR_PARENT="), true);
 const sev = checks - phase1 - phase2 - phase3;
 
-console.log(`OK: store, ${checks} checks (${phase1} phase 1, ${phase2} phase 2, ${phase3} phase 3, ${sev} severity and resume), 0 failure(s)`);
+// ── Profiles: which Claude config a session belongs to (CLAUDE_CONFIG_DIR) ──
+A.equal(CFG.agentLabel("claude-code"), "claude"); A.equal(CFG.agentLabel("claude-code", "default"), "claude", "the default profile adds nothing");
+A.equal(CFG.agentLabel("claude-code", null), "claude"); A.equal(CFG.agentLabel("claude", "work"), "claude · work");
+A.equal(CFG.agentLabel("claude-code", "work"), "claude · work"); A.equal(CFG.agentLabel("codex", " work "), "codex · work");
+A.equal(CFG.agentLabel("claude-code", "a-very-long-profile-name"), "claude · a-very-long-prof", "16 characters at most");
+st = Store.fromText(null);
+const PM = "cccccccc-0000-0000-0000-00000000000a", PD = "cccccccc-0000-0000-0000-00000000000b", MDIR = "/Users/x/.claude-work";
+const mev = (type, p, sid, term) => ({ v: 1, id: `m${++n}`, type, at: (at += 1000), terminal: term, session_id: sid, ...p });
+st.apply(mev("session_start", { agent: "claude-code", source: "startup", cwd: "/w", session_name: "app", turn: 0, config_dir: MDIR, profile: "work" }, PM, "t70"));
+st.apply(mev("session_start", { agent: "claude-code", source: "startup", cwd: "/h", session_name: "homebase", turn: 0, config_dir: "/Users/x/.claude", profile: "default" }, PD, "t71"));
+A.equal(st.d.sessions[PM].profile, "work"); A.equal(st.d.sessions[PM].configDir, MDIR);
+A.equal(CFG.agentLabel(st.d.sessions[PM].agent, st.d.sessions[PM].profile), "claude · work", "an work session reads claude · work");
+A.equal(CFG.agentLabel(st.d.sessions[PD].agent, st.d.sessions[PD].profile), "claude", "the default session reads claude");
+st.apply(mev("prompt", { turn: 1, prompt_id: "m1", local: false, prompt_head: "go", refs: [] }, PM, "t70"));
+A.equal(st.d.sessions[PM].profile, "work", "an event without a profile keeps the recorded one");
+const PO = "cccccccc-0000-0000-0000-00000000000c";
+st.apply(mev("session_start", { agent: "claude-code", source: "startup", cwd: "/w", session_name: "older", turn: 0 }, PO, "t72"));
+A.equal(st.d.sessions[PO].profile, undefined, "a session from before profiles has none");
+A.equal(CFG.agentLabel(st.d.sessions[PO].agent, st.d.sessions[PO].profile), "claude");
+st.apply(mev("prompt", { turn: 1, prompt_id: "o1", local: false, prompt_head: "go", refs: [], config_dir: MDIR, profile: "work" }, PO, "t72"));
+A.equal(st.d.sessions[PO].profile, "work", "...and picks it up at its next prompt"); A.equal(st.d.sessions[PO].configDir, MDIR);
+st.apply(mev("prompt", { turn: 2, prompt_id: "o2", local: true, prompt_head: "/btw x", refs: [], config_dir: MDIR, profile: "work" }, PO, "t72"));
+A.equal(st.d.sessions[PO].profile, "work", "a local prompt carries it too");
+A.ok(st.applyMap({ terminal: "t73", session_id: "cccccccc-0000-0000-0000-00000000000d", agent: "claude-code", updated_at: at, config_dir: MDIR, profile: "work", turn: 1 }));
+A.equal(st.d.sessions["cccccccc-0000-0000-0000-00000000000d"].profile, "work", "the identity map entry seeds it");
+A.equal(Store.fromText(st.toText()).d.sessions[PM].profile, "work", "the profile survives a save");
+// The branch manifest's Parent line names the profile; Branch and Resume prefer the recorded folder.
+const pmItem = { id: "rq_m1", handle: "Q1", direction: "human_to_agent", text: "why?", kind: "question", anchor: { sessionId: PM, turn: 1 }, status: "open" };
+st.d.items[pmItem.id] = pmItem;
+let mm = B.manifest(st, pmItem, { now: at });
+A.equal(mm.parentProfile, "work"); A.equal(mm.configDir, MDIR, "the recorded config folder");
+A.match(Object.fromEntries(B.manifestLines(mm)).Parent, /^app \(claude · work\) · pane t70 \(session cccccccc\), depth 0$/);
+const pdItem = { ...pmItem, id: "rq_d1", anchor: { sessionId: PD, turn: 0 } };
+st.d.items[pdItem.id] = pdItem;
+mm = B.manifest(st, pdItem, { now: at });
+A.match(Object.fromEntries(B.manifestLines(mm)).Parent, /^homebase \(claude\) · pane t71 /, "the default profile: claude alone");
+A.equal(mm.configDir, null, "the default folder adds no CLAUDE_CONFIG_DIR");
+A.match(Object.fromEntries(B.manifestLines({ ...mm, parentAgent: undefined, parentProfile: undefined })).Parent, /^homebase · pane t71 /, "a manifest frozen without an agent: no label");
+A.equal(B.configDirOf({ configDir: "/Users/x/.claude-work/", transcriptPath: `/Users/x/.claude-work/projects/-w/${R}.jsonl` }), "/Users/x/.claude-work", "recorded beats derived");
+A.equal(B.configDirOf({ configDir: "/Users/x/.claude", profile: "default", transcriptPath: `/Users/x/.claude-work/projects/-w/${R}.jsonl` }), null, "recorded default: no env");
+A.equal(B.configDirOf({ configDir: "", transcriptPath: `/Users/x/.claude-work/projects/-w/${R}.jsonl` }), "/Users/x/.claude-work", "no recorded folder: derived from the transcript path");
+A.deepEqual(B.resumeArgs({ sessionId: R, cwd: "/w", configDir: MDIR, profile: "work" }, "/opt/claude").slice(-6), ["--", "/usr/bin/env", `CLAUDE_CONFIG_DIR=${MDIR}`, "/opt/claude", "--resume", R]);
+A.equal(B.transcriptPathOf({ sessionId: R, cwd: "/w", configDir: MDIR }, "/Users/x"), `${MDIR}/projects/-w/${R}.jsonl`, "no recorded transcript: under the recorded folder");
+// asks.handoff, as the hooks resolve it (bin/lib/ledgr_config.py handoff()).
+A.equal(CFG.handoffOf(CFG.DEFAULTS), "ledgr", "the default is ledgr");
+A.equal(CFG.handoffOf({ instruct_block: true, asks: { handoff: "both" } }), "both");
+A.equal(CFG.handoffOf({ instruct_block: true, asks: { handoff: " Prose " } }), "prose");
+A.equal(CFG.handoffOf({ instruct_block: false, asks: { handoff: "ledgr" } }), "prose", "instruct_block false is prose");
+A.equal(CFG.handoffOf({ instruct_block: true, asks: { handoff: "bogus" } }), "ledgr", "unknown: ledgr");
+A.equal(CFG.handoffOf({ instruct_block: true }), "ledgr", "missing asks: ledgr");
+const prof = checks - phase1 - phase2 - phase3 - sev;
+
+// ── Asks declared by tool (bin/mcp declare_asks: source "tool") ─────────
+st = Store.fromText(null);
+const KS = "dddddddd-0000-0000-0000-00000000000a", KT = "t80";
+const kev = (type, p) => ({ v: 1, id: `k${++n}`, type, at: (at += 1000), terminal: KT, session_id: KS, ...p });
+st.apply(kev("session_start", { agent: "claude-code", source: "startup", cwd: "/w", session_name: "tool", turn: 0 }));
+st.apply(kev("prompt", { turn: 1, prompt_id: "k1", local: false, prompt_head: "go", refs: [] }));
+const kAsk = (text, level, extra = {}) => ({ text, kind: "decide", level, options: [], recommended: null, blocking: level === "blocking",
+  quote: null, repeat_of: null, repeat_of_handle: null, hash: passageHash(text), origin: "tool", quote_verified: null, ...extra });
+st.apply(kev("asks", { turn: 1, prompt_id: "k1", message_uuid: null, passage_hash: null, source: "tool", provider: "mcp", replaces_turn: false, tool_call: 1,
+  quotes: "unverified", asks: [kAsk("Choose the retry policy", "blocking", { options: ["fast", "safe"], recommended: "safe", quote: "I stopped here.", quote_verified: false, hash: passageHash("I stopped here.") }),
+    kAsk("Paste the staging token", "needed", { kind: "provide" }), kAsk("Pick a release name", "needed")] }));
+const kv = (h) => st.byHandle(KS, h);
+A.equal(kv("A1").origin, "tool"); A.equal(WORDS.originWords(kv("A1").origin), "declared by the agent (tool)", "the panel's words for a tool ask");
+A.equal(kv("A1").anchor.quoteSource, "tool_unverified", "a quote not yet checked"); A.deepEqual(kv("A1").options, ["fast", "safe"]);
+A.equal(st.d.sessions[KS].surfaced, false, "mid-turn: the chip does not surface while the agent works");
+A.equal(st.chips()[KT].o, "tool", "the chip knows the asks were declared by tool");
+st.apply(kev("act", { item: kv("A3").id, action: "draft", arg: "maybe 'harbor'" }));
+// A second call of the same turn: the whole list. A2 is withdrawn (untouched: it goes), A3 is withdrawn but drafted (stays).
+st.apply(kev("asks", { turn: 1, prompt_id: "k1", source: "tool", provider: "mcp", replaces_turn: true, tool_call: 2, quotes: "unverified",
+  asks: [kAsk("Choose the retry policy", "blocking", { options: ["fast", "safe"], recommended: "safe", quote: "I stopped here.", quote_verified: false, hash: passageHash("I stopped here.") }),
+    kAsk("Confirm the cutover window", "needed", { kind: "confirm" })] }));
+A.equal(kv("A1").text, "Choose the retry policy", "a re-declared ask keeps its handle");
+A.equal(kv("A2"), null, "replaces_turn: an untouched ask the new list no longer has is dropped");
+A.ok(kv("A3"), "...one the person drafted an answer for stays"); A.equal(kv("A4").text, "Confirm the cutover window", "a new one gets the next handle");
+// The turn ends: pending, then the Stop hook's re-emit (verified quotes, the message uuid, no options key: the item keeps its own).
+st.apply(kev("pending", { turn: 1, passage_hash: "pp" }));
+A.ok(st.d.sessions[KS].pending, "pending set at Stop");
+const kSettle = { turn: 1, prompt_id: "k1", message_uuid: "uuid-tool-1", passage_hash: "pp", source: "tool", provider: "mcp", replaces_turn: true, quotes: "verified",
+  asks: [{ ...kAsk("Choose the retry policy", "blocking", { quote: "I stopped here.", quote_verified: true, hash: passageHash("I stopped here.") }) },
+    { ...kAsk("Confirm the cutover window", "needed", { kind: "confirm" }) }] };
+delete kSettle.asks[0].options; delete kSettle.asks[0].recommended; delete kSettle.asks[1].options; delete kSettle.asks[1].recommended;
+st.apply(kev("asks", kSettle));
+A.equal(kv("A1").anchor.quoteSource, "tool", "settled: the quote checked against the turn's text");
+A.equal(kv("A1").anchor.uuid, "uuid-tool-1", "settled: the message uuid"); A.deepEqual(kv("A1").options, ["fast", "safe"], "options kept when the re-emit has none");
+A.equal(kv("A1").recommended, "safe"); A.equal(st.d.sessions[KS].pending, undefined, "the turn's own asks event clears pending");
+A.equal(st.d.sessions[KS].surfaced, true, "the turn ended with tool asks: the chip surfaces");
+A.equal(Object.values(st.d.items).filter((it) => it.anchor?.sessionId === KS).length, 3, "no duplicates after the settle (A1, A3, A4)");
+const kQuoteless = { ...kSettle, id: undefined, asks: [{ ...kSettle.asks[0], quote: null, quote_verified: null, hash: passageHash("Choose the retry policy") }, kSettle.asks[1]] };
+st.apply(kev("asks", kQuoteless));
+A.equal(Object.values(st.d.items).filter((it) => it.anchor?.sessionId === KS).length, 3, "a quote dropped at Stop (unverified) still matches its item");
+st.apply(kev("asks", { turn: 1, source: "tool", provider: "mcp", replaces_turn: true, tool_call: 3, asks: [] }));
+A.equal(kv("A1"), null, "an empty later declaration clears the turn's untouched tool asks"); A.ok(kv("A3"), "...the drafted one stays");
+const toolChecks = checks - phase1 - phase2 - phase3 - sev - prof;
+
+console.log(`OK: store, ${checks} checks (${phase1} phase 1, ${phase2} phase 2, ${phase3} phase 3, ${sev} severity and resume, ${prof} profiles and handoff, ${toolChecks} tool asks), 0 failure(s)`);

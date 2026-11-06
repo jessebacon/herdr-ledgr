@@ -15,4 +15,7 @@ __pycache__/
 # Runtime data lives in <Herdr home>/ledgr-data, never here
 ledgr-data/
 
+# The maintainer's exported design conversation, kept local (never in the repo)
+docs/history/
+
 .DS_Store

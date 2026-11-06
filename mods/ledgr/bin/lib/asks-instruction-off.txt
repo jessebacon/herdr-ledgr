@@ -1,0 +1,2 @@
+ledgr no longer owns the closing list: ignore the earlier ledgr-asks instruction. List what you need
+from the user in your reply as you normally would, with no ledgr-asks block and no "ledgr:" line.

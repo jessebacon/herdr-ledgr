@@ -256,8 +256,82 @@ def test_settings_list():
         shutil.rmtree(root)
 
 
+def test_handoff():
+    """asks.handoff: the answer is written to config.json; prose turns the master switch off."""
+    root, ctx, st = scratch()
+    try:
+        p = os.path.join(ctx.data, "config.json")
+        write(p, '{"v": 1, "instruct_block": true, "extract": {"threshold": "needed"}}\n')
+        base = {"provider": "anthropic", "model": None, "base_url": None, "threshold": "needed", "animations": True,
+                "fold_asks_while_working": False}
+        for hand, ib in (("prose", False), ("both", True), ("ledgr", True)):
+            changes = []
+            quiet(L.apply_config, ctx, {**base, "asks_handoff": hand}, changes)
+            cfg = json.loads(read(p))
+            ok(cfg["asks"]["handoff"] == hand and cfg["instruct_block"] is ib, f"handoff {hand}: asks.handoff and instruct_block {ib}")
+            ok(any(f"closing list {hand}" in c for c in changes), f"handoff {hand}: named in the change line")
+        quiet(L.apply_config, ctx, {**base, "asks_handoff": "bogus"}, [])
+        ok(json.loads(read(p))["asks"]["handoff"] == "ledgr", "an unknown answer writes the default, ledgr")
+        ok([v for v, _ in L.HANDOFFS] == ["ledgr", "both", "prose"] and L.DEFAULTS["asks_handoff"] == "ledgr", "three choices, ledgr first and default")
+    finally:
+        shutil.rmtree(root)
+
+
+def test_mcp():
+    """The MCP server: `claude mcp add --scope user` per config folder (a fake claude here), and the
+    allow entries; idempotent; a declined folder is left alone. Nothing under the real home."""
+    root, ctx, st = scratch()
+    calls = []
+    saved = (L.run, L.find_claude, L.hook_python)
+    def fake_run(args, env=None, timeout=60, cwd=None, inp=None):
+        if args[:2] == ["/fake/claude", "mcp"]:
+            calls.append((args[2], (env or {}).get("CLAUDE_CONFIG_DIR"), list(args)))
+            cj = os.path.join((env or {})["CLAUDE_CONFIG_DIR"], ".claude.json")
+            cfg = json.loads(read(cj)) if os.path.exists(cj) else {}
+            if args[2] == "add":
+                cfg.setdefault("mcpServers", {})["ledgr"] = {"type": "stdio", "command": args[-4], "args": args[-3:], "env": {}}
+            elif args[2] == "remove":
+                cfg.get("mcpServers", {}).pop("ledgr", None)
+            write(cj, json.dumps(cfg))
+            return 0, "", ""
+        return saved[0](args, env=env, timeout=timeout, cwd=cwd, inp=inp)
+    try:
+        L.run, L.find_claude, L.hook_python = fake_run, (lambda: "/fake/claude"), (lambda: ("/opt/py3", "3.15.0"))
+        work = os.path.join(root, "home", ".claude-work", "settings.json")
+        other = os.path.join(root, "home", ".claude-x", "settings.json")
+        write(work, '{\n  "model": "opus",\n  "permissions": {"allow": ["Bash(ls:*)"]}\n}\n')
+        write(other, "{}\n")
+        ctx.settings_all = [work, other]
+        ans = {"mcp": True, "agents": ["claude"], "hooks": True, "_declined": [], "_mcp_declined": [other]}
+        warn, changes = [], []
+        quiet(L.apply_mcp, ctx, st, ans, changes, warn)
+        add = [c for c in calls if c[0] == "add"]
+        ok(len(add) == 1 and add[0][1] == os.path.dirname(work), "one claude mcp add, with CLAUDE_CONFIG_DIR set to that folder")
+        ok(add and add[0][2][1:] == ["mcp", "add", "--scope", "user", "--transport", "stdio", "ledgr", "--", "/opt/py3", "-I", "-B", L.mcp_script(ctx)],
+           "the exact argv from the MCP README (installed path, the hooks' python3)")
+        ok(L.mcp_registered(ctx, work) == "ok" and L.mcp_registered(ctx, other) is None, "registered for the chosen folder only")
+        allow = json.loads(read(work))["permissions"]["allow"]
+        ok(allow == ["Bash(ls:*)"] + L.MCP_TOOLS and json.loads(read(work))["model"] == "opus", "the three allow entries added, the rest kept")
+        ok(read(work).endswith(b"}\n") and read(other) == b"{}\n", "a final newline; the declined folder's settings untouched")
+        ok(warn == [], "no warnings")
+        calls.clear(); changes.clear()
+        quiet(L.apply_mcp, ctx, st, ans, changes, warn)
+        ok(calls == [] and changes == [] and json.loads(read(work))["permissions"]["allow"].count(L.MCP_TOOLS[0]) == 1, "a second run changes nothing")
+        argv, d, line = L.mcp_command(ctx, work)
+        ok(line.startswith("CLAUDE_CONFIG_DIR=") and " claude mcp add --scope user --transport stdio ledgr -- /opt/py3 -I -B " in line, "the line shown and printed by --check")
+        ok(L.config_env(os.path.expanduser("~/.claude/settings.json")) is None and L.mcp_user_json(os.path.expanduser("~/.claude/settings.json")) == os.path.expanduser("~/.claude.json"),
+           "the default folder: no CLAUDE_CONFIG_DIR, servers in ~/.claude.json (paths only; nothing read)")
+        ok(L.perms_missing(other) == L.MCP_TOOLS, "perms_missing lists all three when none are there")
+        st.d["mcp"] = []
+        quiet(L.apply_mcp, ctx, st, {**ans, "mcp": False}, changes, warn)
+        ok(calls == [], "mcp false: nothing run")
+    finally:
+        L.run, L.find_claude, L.hook_python = saved
+        shutil.rmtree(root)
+
+
 if __name__ == "__main__":
-    for t in (test_dump, test_settings_write, test_mend_newline, test_restore_original, test_retire, test_settings_list):
+    for t in (test_dump, test_settings_write, test_mend_newline, test_restore_original, test_retire, test_settings_list, test_handoff, test_mcp):
         t()
     print(f"setup: {PASS} passed, {FAIL} failed" + ("" if FAIL else "  OK"))
     sys.exit(1 if FAIL else 0)

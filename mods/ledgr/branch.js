@@ -13,7 +13,9 @@
 // the preamble say so.
 //
 // SOURCE OF TRUTH: mods/ledgr/branch.js. A host in another mod imports a byte-identical copy from mods/<name>/ledgr/branch.js
-// (Herdr refuses imports from outside a mod's folder).
+// (Herdr refuses imports from outside a mod's folder). Its one import, config.js, is an engine file too.
+
+import { agentLabel } from "./config.js";
 
 export const DEFAULT_MAX_DEPTH = 2;
 export const CACHE_WINDOW_MIN = 5;      // Anthropic's default prompt-cache lifetime
@@ -75,7 +77,7 @@ export function manifest(st, item, opts = {}) {
   else if (ps.state === "ended") refused = "the parent session has ended";
   return {
     parentSessionId: sid, parentName: ps?.sessionName || ps?.repo || shortSid(sid), parentTerminal: ps?.terminal ?? null,
-    parentAgent: ps?.agent ?? null, cwd: ps?.cwd ?? "", configDir: configDirOf(ps),
+    parentAgent: ps?.agent ?? null, parentProfile: ps?.profile ?? null, cwd: ps?.cwd ?? "", configDir: configDirOf(ps),
     anchorTurn, forkTurn, later: Math.max(0, forkTurn - anchorTurn),
     parentWorking: ps?.state === "working",
     compactedAfter, compactionsKnown: comps.length,
@@ -92,7 +94,8 @@ export function manifest(st, item, opts = {}) {
 // (times are as at the launch), else the confirmation before launch.
 export function manifestLines(m, { frozen = false } = {}) {
   const out = [];
-  out.push(["Parent", `${m.parentName} · ${m.parentTerminal ? `pane ${m.parentTerminal}` : "no pane"} (session ${shortSid(m.parentSessionId)}), depth ${m.parentDepth}`]);
+  const who = m.parentAgent ? ` (${agentLabel(m.parentAgent, m.parentProfile)})` : "";
+  out.push(["Parent", `${m.parentName}${who} · ${m.parentTerminal ? `pane ${m.parentTerminal}` : "no pane"} (session ${shortSid(m.parentSessionId)}), depth ${m.parentDepth}`]);
   out.push(["Depth", `${m.depth} of branch.maxDepth ${m.maxDepth}${m.depth > m.maxDepth ? " — refused" : ""}`]);
   const later = m.later === 0
     ? "no later turns: the question was parked at the last turn"
@@ -152,8 +155,12 @@ export const branchEnv = (br, m) => `LEDGR_BRANCH=${br.id}:${m.depth}:${m.forkTu
 
 // A session started with CLAUDE_CONFIG_DIR (a second account: `claude-work`) keeps its transcript
 // under <that folder>/projects/…, and only a claude with the same CLAUDE_CONFIG_DIR can resume or fork
-// it. The folder, from the recorded transcript path; null for ~/.claude (the default) or unknown.
+// it. The folder the hooks recorded (configDir), else the one above projects/ in the recorded
+// transcript path; null for ~/.claude (the default: profile "default", or any folder named .claude)
+// or unknown.
 export function configDirOf(s) {
+  const rec = typeof s?.configDir === "string" && s.configDir ? s.configDir.replace(/\/+$/, "") : null;
+  if (rec) return s?.profile === "default" || /(^|\/)\.claude$/.test(rec) ? null : rec;
   const m = /^(.+)\/projects\/[^/]+\/[^/]+\.jsonl$/.exec(String(s?.transcriptPath ?? ""));
   return m && !/\/\.claude$/.test(m[1]) ? m[1] : null;
 }
@@ -185,11 +192,12 @@ export function resumeArgs(s, claudePath = "claude") {
     "--label", `ledgr.resume=${s?.sessionId}`, "--", ...(dir ? ["/usr/bin/env", ...configEnv(dir)] : []), claudePath, "--resume", String(s?.sessionId)];
 }
 
-// Where Claude Code keeps a session's transcript: the recorded path, else
-// ~/.claude/projects/<cwd with every non-alphanumeric as "-">/<session id>.jsonl.
+// Where Claude Code keeps a session's transcript: the recorded path, else <config folder (the
+// recorded one, else ~/.claude)>/projects/<cwd with every non-alphanumeric as "-">/<session id>.jsonl.
 export function transcriptPathOf(s, homeDir) {
   if (s?.transcriptPath) return s.transcriptPath;
-  return `${homeDir}/.claude/projects/${String(s?.cwd ?? "").replace(/[^A-Za-z0-9]/g, "-")}/${s?.sessionId}.jsonl`;
+  const cfg = typeof s?.configDir === "string" && s.configDir ? s.configDir.replace(/\/+$/, "") : `${homeDir}/.claude`;
+  return `${cfg}/projects/${String(s?.cwd ?? "").replace(/[^A-Za-z0-9]/g, "-")}/${s?.sessionId}.jsonl`;
 }
 
 // The live word for a branch: Herdr's agent status for its terminal (a sub-agent without a pane

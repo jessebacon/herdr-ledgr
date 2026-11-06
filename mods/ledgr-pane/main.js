@@ -6,7 +6,7 @@
 //
 // ledgr-pane: a clone of Herdr's shipped `pane` header (0.1.13), plus the ledgr chip (ledgr spec
 // 6.5). Optional: ledgr works without it. It only reads shared state and runs no writer.
-// The chip reads shared("ledgr.chips")[terminal] = { s, q, a, st, t, ag, b }, written only by
+// The chip reads shared("ledgr.chips")[terminal] = { s, q, a, st, t, ag, b, o }, written only by
 // the ledgr writer: hidden with nothing open; "collecting" (dim "? 2") while the agent
 // works and questions were parked this turn; "blocking" (`blocked` colour, "1 blocking · 2 asks")
 // while an ask the agent stopped on is open (`b` of the `a` asks); "surfaced" (accent "2 parked ·
@@ -51,6 +51,8 @@ function ledgrChip(p) {
   return c && (c.q || c.a || c.p != null) ? c : null;
 }
 
+// How the asks arrived (the chip's `o`), the words the ledgr panel uses (mods/ledgr/words.js originWords).
+const ORIGIN = { tool: "declared by the agent (tool)", extract_block: "declared by the agent", extract_model: "found by the extractor" };
 const loud = (c) => Boolean(c) && (c.st === "surfaced" || (c.st === "blocking" && c.b > 0));
 
 // Where ledgr's panel lives (ledgr's config.js panelPlace; a mod cannot import another mod's files).
@@ -135,7 +137,7 @@ export default class Pane extends View {
       .cursor_pointer()
       .hover((s) => s.bg(t.hover))
       .gap(4)
-      .tooltip(`ledgr: ${c.q} parked, ${c.a} asked of you${c.b ? ` (${c.b} blocking: the agent waits on ${c.b === 1 ? "it" : "them"})` : ""} · turn ${c.t ?? "?"}${pending ? ` · extracting turn ${c.p}` : ""}`)
+      .tooltip(`ledgr: ${c.q} parked, ${c.a} asked of you${c.b ? ` (${c.b} blocking: the agent waits on ${c.b === 1 ? "it" : "them"})` : ""}${c.a && ORIGIN[c.o] ? `, ${ORIGIN[c.o]}` : ""} · turn ${c.t ?? "?"}${pending ? ` · extracting turn ${c.p}` : ""}`)
       .on_click((_e, cx) => {
         cx.stop_propagation();
         showLedgrPanel();

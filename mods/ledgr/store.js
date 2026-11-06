@@ -156,6 +156,7 @@ export class Store {
     s.cwd = rec.cwd ?? s.cwd;
     s.repo = rec.repo ?? s.repo;
     s.transcriptPath = rec.transcript_path ?? s.transcriptPath;
+    this.setProfile(s, rec);
     if (num(rec.turn) > s.turn) s.turn = num(rec.turn);
     if (rec.parent_session_id && !s.parentSessionId) this.setLineage(s, { parent_session_id: rec.parent_session_id, branch_id: rec.branch_id,
       item_id: rec.parent_item, anchor_turn: rec.anchor_turn, fork_turn: rec.fork_turn, depth: rec.depth });
@@ -166,6 +167,14 @@ export class Store {
       this.d.terminals[rec.terminal] = { sessionId: rec.session_id, agent: rec.agent ?? s.agent, updatedAt: num(rec.updated_at) };
     }
     return true;
+  }
+
+  // The agent's config folder and profile, when the hooks report them (session_start, prompt and the
+  // map entry; a Claude Code with CLAUDE_CONFIG_DIR=~/.claude-work is "work", ~/.claude "default").
+  // A session recorded before profiles existed picks them up at its next such event.
+  setProfile(s, r) {
+    if (typeof r?.config_dir === "string" && r.config_dir) s.configDir = r.config_dir;
+    if (typeof r?.profile === "string" && r.profile) s.profile = r.profile;
   }
 
   // ── events (spec 2.5, 3.3) ───────────────────────────────────────────
@@ -195,6 +204,7 @@ export class Store {
         if (!cur || at >= num(cur.updatedAt)) this.d.terminals[ev.terminal] = { sessionId: sid, agent: ev.agent ?? s.agent, updatedAt: at };
       }
       if (ev.agent) s.agent = ev.agent;
+      this.setProfile(s, ev);
       if (!s.sessionName && ev.session_name) s.sessionName = ev.session_name;
       if (!s.cwd && ev.cwd) s.cwd = ev.cwd;
       if (String(s.sessionId).startsWith("herdr:")) s.turnSource = "herdr-status";
@@ -291,9 +301,24 @@ export class Store {
     if (ti.retry) ti.retry = { ...ti.retry, state: ev.source === "error" ? "failed" : "done", note: ti.retry.note ?? ev.error ?? null };
     if (uuid) ti.uuid = uuid;
     if (uuid) for (const it of this.itemsOf(s.sessionId)) if (it.anchor && num(it.anchor.turn) === turn && !it.anchor.uuid) it.anchor.uuid = uuid;
-    if (s.pending && num(s.pending.turn) <= turn) delete s.pending;
+    // A declare_asks call (source "tool", bin/mcp) arrives mid-turn with its call number; the turn's
+    // own asks event (the Stop hook's, which re-emits the declaration with verified quotes and the
+    // message uuid) has none and settles the turn like a block's.
+    const midTurn = ev.source === "tool" && num(ev.tool_call, 0) > 0;
+    if (!midTurn && s.pending && num(s.pending.turn) <= turn) delete s.pending;
     if (ev.source === "skip" || ev.source === "error" || !Array.isArray(ev.asks)) return;
-    const origin = ev.source === "block" ? "extract_block" : "extract_model";
+    const tool = ev.source === "tool";
+    const origin = tool ? "tool" : ev.source === "block" ? "extract_block" : "extract_model";
+    // replaces_turn: a later declaration of the same turn is the turn's whole list. This turn's tool
+    // asks it no longer names go, unless the person has touched them (not open, promoted, answered
+    // or drafted); one it still names keeps its handle (matched below by turn and text, then key).
+    if (tool && ev.replaces_turn === true) {
+      const keep = new Set(ev.asks.map((a) => norm(squash(a?.text))));
+      for (const it of this.itemsOf(s.sessionId)) {
+        if (isAgentAsk(it) && it.origin === "tool" && num(it.createdTurn) === turn && it.status === "open" && it.promoted !== true
+          && !it.answer && !it.draft && !keep.has(norm(it.text))) delete this.d.items[it.id];
+      }
+    }
     let created = 0;
     ev.asks.forEach((a, i) => {
       const text = squash(a?.text).slice(0, LIMITS.text);
@@ -301,7 +326,10 @@ export class Store {
       const quote = str(a.quote) ? String(a.quote).slice(0, LIMITS.quote) : null;
       const hash = str(a.hash) ?? (quote ? passageHash(quote) : passageHash(text));
       const key = `${s.sessionId}|a|${norm(text)}`;
-      const options = Array.isArray(a.options) ? a.options.filter((o) => typeof o === "string").slice(0, 8) : [];
+      // No `options` key at all (the Stop hook's re-emit of a declaration that did not keep them):
+      // an existing item keeps its options and recommendation.
+      const hasOpts = Array.isArray(a.options);
+      const options = hasOpts ? a.options.filter((o) => typeof o === "string").slice(0, 8) : [];
       // The hooks' validator always sends a level; an older event has only `blocking`.
       const level = LEVELS.includes(a.level) ? a.level : a.blocking === true ? "blocking" : "needed";
       const fields = {
@@ -309,12 +337,25 @@ export class Store {
         recommended: options.includes(a.recommended) ? a.recommended : null,
         blocking: level === "blocking",
       };
+      if (!hasOpts) { delete fields.options; delete fields.recommended; }
+      // Quote source: the block's, the model's, or the tool's ("tool_unverified" until the Stop hook
+      // has checked the quote against the turn's text).
+      const quoteSource = tool ? (a.quote_verified === false ? "tool_unverified" : "tool") : ev.source === "block" ? "block" : "model";
       const anchor = { sessionId: s.sessionId, turn, promptId: ev.prompt_id ?? null, uuid, apiMessageId: ev.api_message_id ?? null,
-        quote, quoteSource: ev.source === "block" ? "block" : "model", hash, settled: true };
+        quote, quoteSource, hash, settled: true };
       const mine = this.itemsOf(s.sessionId).filter(isAgentAsk);
       // Same turn and passage: the same item (a replayed or re-run extraction).
-      const same = mine.find((it) => num(it.anchor?.turn) === turn && it.anchor?.hash === hash && norm(it.text) === norm(text));
-      if (same) { Object.assign(same, fields); same.updatedAt = at; return; }
+      // A tool ask declared again (or settled at Stop) keeps its item whatever its quote became.
+      const same = mine.find((it) => num(it.anchor?.turn) === turn && norm(it.text) === norm(text)
+        && (it.anchor?.hash === hash || (tool && it.origin === "tool")));
+      if (same) {
+        Object.assign(same, fields); same.updatedAt = at;
+        if (tool) {
+          same.anchor = { ...same.anchor, ...anchor, uuid: uuid ?? same.anchor?.uuid ?? null, promptId: anchor.promptId ?? same.anchor?.promptId ?? null };
+          if (!midTurn && same.status === "open" && this.counts(same)) created++;   // the turn ended with it: surface the chip
+        }
+        return;
+      }
       // The newest item with this key decides (an older one may be resolved, a newer dismissed).
       const byKey = mine.filter((it) => it.key === key).sort((x, y) => num(y.createdAt) - num(x.createdAt))[0] ?? null;
       // repeat_of (a Request id) / repeat_of_handle ("A5") from the extractor: the same request
@@ -346,9 +387,10 @@ export class Store {
         repeatOf: again ? again.id : rid ?? undefined,
         origin, terminal: ev.terminal ?? s.terminal ?? undefined, createdTurn: turn, createdAt: at, updatedAt: at, seq: i,
       };
+      if (!hasOpts) Object.assign(this.d.items[id], { options: [], recommended: null });
       if (this.counts(this.d.items[id])) created++;   // a new suggestion alone does not surface the chip
     });
-    if (created && s.state !== "working") s.surfaced = true;
+    if (created && s.state !== "working" && !midTurn) s.surfaced = true;
   }
 
   // The turn ended and extraction is running (hooks contract: pending, then stop up to ~4 s
@@ -745,7 +787,9 @@ export class Store {
   // `a` counts open asks at or above extract.threshold (suggestions do not count); `b` the open
   // blocking ones among them. `st`: "collecting" (working, questions parked this turn), else
   // "blocking" (an open blocking ask, agent not working), else "surfaced" or "seen".
-  // `p`: the turn whose asks are being extracted (a pending event under 30 s old).
+  // `p`: the turn whose asks are being extracted (a pending event under 30 s old). `o`: how the
+  // counted asks arrived when they all arrived one way ("tool": declare_asks, "extract_block",
+  // "extract_model"), for the chip's tooltip.
   chips(now = Date.now()) {
     const out = {};
     for (const [t, m] of Object.entries(this.d.terminals)) {
@@ -757,7 +801,9 @@ export class Store {
       if (!q && !a && p === null) continue;
       const parked = mine.filter((it) => isHuman(it) && num(it.createdAt) >= num(s.promptAt)).length;
       const st = s.state === "working" && parked ? "collecting" : b && s.state !== "working" ? "blocking" : s.surfaced ? "surfaced" : "seen";
-      out[t] = { s: s.sessionId, q, a, st, t: s.turn, ag: agentLabel(m.agent ?? s.agent), ...(b ? { b } : {}), ...(p !== null ? { p } : {}) };
+      const via = [...new Set(mine.filter(isAgentAsk).map((it) => it.origin).filter(Boolean))];
+      out[t] = { s: s.sessionId, q, a, st, t: s.turn, ag: agentLabel(m.agent ?? s.agent), ...(b ? { b } : {}), ...(p !== null ? { p } : {}),
+        ...(via.length === 1 ? { o: via[0] } : {}) };
     }
     return out;
   }

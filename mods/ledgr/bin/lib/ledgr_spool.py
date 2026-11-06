@@ -7,9 +7,11 @@ Envelope (every event): {v: 1, id: uuid, type, at: ms, terminal, session_id} + p
 
 type            when                                  payload
 session_start   session starts, resumes, clears       agent, source, model, cwd, transcript_path,
-                                                      session_name, repo, turn
+                                                      session_name, repo, turn, config_dir|null,
+                                                      profile|null
 prompt          a prompt is submitted                 turn, prompt_id, local, prompt_head (2,000
-                                                      chars), refs ["A5", "Q3"]
+                                                      chars), refs ["A5", "Q3"], config_dir|null,
+                                                      profile|null
 pending         at once when a turn ends              turn, passage_hash
 stop            when the turn's message id is known   turn, prompt_id, text_path, text_head (400
                 (or the lookup gave up)               chars), passage_hash, message_uuid|null,
@@ -60,15 +62,18 @@ def emit(etype, terminal, sid, payload, at=None):
     return ev["id"]
 
 
-def session_start(t, sid, *, agent, source, model, cwd, transcript_path, session_name, repo, turn, at=None):
+def session_start(t, sid, *, agent, source, model, cwd, transcript_path, session_name, repo, turn,
+                  config_dir=None, profile=None, at=None):
     return emit("session_start", t, sid, {"agent": agent, "source": source, "model": model, "cwd": cwd,
                                           "transcript_path": transcript_path, "session_name": session_name,
-                                          "repo": repo, "turn": turn}, at)
+                                          "repo": repo, "turn": turn, "config_dir": config_dir,
+                                          "profile": profile}, at)
 
 
-def prompt(t, sid, *, turn, prompt_id, local, prompt_head, refs, at=None):
+def prompt(t, sid, *, turn, prompt_id, local, prompt_head, refs, config_dir=None, profile=None, at=None):
     return emit("prompt", t, sid, {"turn": turn, "prompt_id": prompt_id, "local": local,
-                                   "prompt_head": prompt_head[:2000], "refs": refs}, at)
+                                   "prompt_head": prompt_head[:2000], "refs": refs,
+                                   "config_dir": config_dir, "profile": profile}, at)
 
 
 def pending(t, sid, *, turn, passage_hash, at=None):

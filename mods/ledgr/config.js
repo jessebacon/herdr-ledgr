@@ -13,6 +13,10 @@ export const DEFAULTS = {
   v: 1,
   instruct_block: true,
   instruct_reinject: true,
+  // Who owns the closing list the agent gives you (handoffOf): "ledgr" (blocking and needed items only
+  // in the ledgr-asks block; the reply ends with one pointer line, "ledgr: N items for you, M
+  // blocking"), "both" (the prose list as usual plus the block), "prose" (no instruction, extractor only).
+  asks: { handoff: "ledgr" },
   extract: { mode: "block-first", provider: "anthropic", model: "claude-haiku-5-5", base_url: null,
     audit_rate: 0, cli_fallback: false, max_chars: 60000, timeout_s: 20,
     // The mod's: asks at or above this level (optional < needed < blocking) are open rows and count on
@@ -73,12 +77,38 @@ export async function loadConfig() {
   }
 }
 
-// Agent kind -> the short label drawn on each session group ("claude", "codex").
-export function agentLabel(agent) {
-  if (!agent) return "agent";
+// The effective asks.handoff, as the hooks read it (bin/lib/ledgr_config.py handoff()): "prose" when
+// instruct_block, the master switch, is not true; else asks.handoff, "ledgr" when missing or unknown.
+export const HANDOFF_MODES = ["ledgr", "both", "prose"];
+export function handoffOf(cfg) {
+  if (cfg?.instruct_block !== true) return "prose";
+  const m = String(cfg?.asks?.handoff ?? "").trim().toLowerCase();
+  return HANDOFF_MODES.includes(m) ? m : "ledgr";
+}
+
+// The mode as a person reads it, for the asks lane's tooltip.
+export const HANDOFF_WORDS = {
+  ledgr: "closing list: ledgr (the agent lists blocking and needed items only here; its reply ends with one line, \"ledgr: N items for you\")",
+  both: "closing list: both (the agent lists its items in the reply and declares them here too)",
+  prose: "closing list: prose (no instruction; the extractor finds the asks in each reply)",
+};
+
+// Agent kind -> the short label drawn on each session group ("claude", "codex"). With the session's
+// config profile (the hooks record it: a Claude Code started with CLAUDE_CONFIG_DIR=~/.claude-work is
+// "work") it reads "claude · work"; the default profile, or none recorded, adds nothing. One argument
+// gives the bare kind, which the writer also uses to find an adapter's folder.
+export function agentLabel(agent, profile) {
+  const p = profileWord(profile);
+  if (!agent) return p ? `agent · ${p}` : "agent";
   const a = String(agent).toLowerCase();
-  if (a === "claude-code" || a === "claude") return "claude";
-  return a.replace(/[^a-z0-9-]/g, "").slice(0, 12) || "agent";
+  const base = a === "claude-code" || a === "claude" ? "claude" : a.replace(/[^a-z0-9-]/g, "").slice(0, 12) || "agent";
+  return p ? `${base} · ${p}` : base;
+}
+
+// A recorded profile as shown: trimmed, at most 16 characters; null for "default" or none.
+export function profileWord(profile) {
+  const p = String(profile ?? "").replace(/[\u0000-\u001f]/g, "").trim().slice(0, 16);
+  return p && p.toLowerCase() !== "default" ? p : null;
 }
 
 // Running in the app, not in `herdr-app check`? check refuses reads outside the mod's folder, and

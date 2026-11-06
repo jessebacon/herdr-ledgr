@@ -38,6 +38,10 @@ MIN_HERDR = (0, 1, 13)
 MIN_PY = (3, 9)
 HOOKS = [("SessionStart", "session-start.sh"), ("UserPromptSubmit", "user-prompt-submit.sh"), ("Stop", "stop.sh")]
 HOOK_MARK = "mods/ledgr/bin/adapters/"
+# ledgr's MCP server (mods/ledgr/bin/mcp/README.md): registered with Claude Code at user scope, once per
+# chosen config folder, plus these allow entries in that folder's settings file so a call never prompts.
+MCP_NAME = "ledgr"
+MCP_TOOLS = ["mcp__ledgr__declare_asks", "mcp__ledgr__open_asks", "mcp__ledgr__parked_questions"]
 AGENTS = [("claude", "Claude Code", True), ("codex", "Codex", False), ("gemini", "Gemini CLI", False),
           ("opencode", "OpenCode", False)]
 PROVIDERS = [("anthropic", "Anthropic API (Claude Haiku; an API key in the Keychain)"),
@@ -46,6 +50,11 @@ PROVIDERS = [("anthropic", "Anthropic API (Claude Haiku; an API key in the Keych
              ("none", "no model: asks come only from a fenced ledgr-asks block the agent writes")]
 DEFAULT_MODEL = {"anthropic": "claude-haiku-5-5", "openai-compatible": "", "cli": "haiku", "none": "claude-haiku-5-5"}
 THRESHOLDS = [("blocking", "blocking only"), ("needed", "blocking + needed (default)"), ("optional", "everything")]
+# asks.handoff in config.json: who owns the closing list the agent gives you.
+HANDOFFS = [("ledgr", "ledgr (default): the agent keeps blocking and needed items out of its reply and ends with one line, "
+                      "\"ledgr: N items for you, M blocking\"; the list lives in the panel, the terminal's last screen stays the work's"),
+            ("both", "both: the reply lists them as usual and the agent declares them to ledgr as well; more lines in the terminal"),
+            ("prose", "prose: no instruction in the agent's context; ledgr's extractor reads each reply (one model call per turn)")]
 MOD_KEYS = {"cmd-enter": "ledgr.btw", "tab": "ledgr.tab", "shift-tab": "ledgr.backtab"}
 CAPTURE_ALTS = ["cmd-j", "cmd-alt-j", "cmd-ctrl-j", "cmd-shift-k"]
 TOGGLE_ALTS = ["cmd-shift-j", "cmd-alt-shift-j", "cmd-ctrl-shift-j", "cmd-alt-l"]
@@ -608,6 +617,11 @@ def derive(ctx, st, f):
         if "foldAsksWhileWorking" in ui:
             a["fold_asks_while_working"] = ui["foldAsksWhileWorking"] is True
         a["instruct_block"] = cfg.get("instruct_block") is True
+        h = (cfg.get("asks") or {}).get("handoff") if isinstance(cfg.get("asks"), dict) else None
+        if cfg.get("instruct_block") is False:
+            a["asks_handoff"] = "prose"
+        elif h in [v for v, _ in HANDOFFS]:
+            a["asks_handoff"] = h
     keys, _, _ = load_json(os.path.join(ctx.home, "keys.json")) if os.path.exists(os.path.join(ctx.home, "keys.json")) else (None, None, None)
     g = (keys or {}).get("global") or {}
     for k, v in g.items():
@@ -682,10 +696,10 @@ def merge(base, over):
 
 DEFAULTS = {
     "agents": ["claude"], "provider": "anthropic", "model": None, "base_url": None, "api_key": "prompt",
-    "instruct_block": True, "threshold": "needed", "animations": True, "fold_asks_while_working": False,
+    "instruct_block": True, "asks_handoff": "ledgr", "threshold": "needed", "animations": True, "fold_asks_while_working": False,
     "keys": {"capture": "cmd-j", "toggle": "cmd-shift-j", "toggle_command": None, "replace_conflicts": False},
     "layout": {"name": None, "clone_from": None, "panel": "stack", "panel_stack": "panel-body", "host": "status", "chip": "ledgr-pane"},
-    "overlay": None, "hooks": True, "run_tests": True, "claude_settings": None,
+    "overlay": None, "hooks": True, "run_tests": True, "claude_settings": None, "mcp": None,
 }
 
 
@@ -866,12 +880,17 @@ def gather(ctx, st, f, a, file_answers, flags):
         if ans["api_key"] == "skip" and prov == "anthropic":
             f["warn"].append(f"No API key in the Keychain for {prov}: extraction reports 'no credential' until you run ./install.sh again or "
                              f"`security add-generic-password -s ledgr -a {prov} -w`.")
-    ib = ans.get("instruct_block")
-    ans["instruct_block"] = ask.yesno("Ask Claude to declare its asks in a ledgr-asks block at the end of a reply?",
-                                      "The primary channel: the agent says what it needs instead of the extractor guessing. Adds a ~120-word "
-                                      "instruction to each session's context (at start, clear and compact, plus one reminder after a missed "
-                                      "blocker); the extractor stays the fallback.",
-                                      True if ib is None else bool(ib))
+    # Who owns the closing list (asks.handoff). instruct_block stays the master switch: "prose" writes it
+    # off, and an older answers file or flag that turns instruct_block off (with no asks_handoff) means prose.
+    given = {**(file_answers or {}), **(flags or {})}
+    hand = "prose" if given.get("instruct_block") is False and not given.get("asks_handoff") else ans.get("asks_handoff")
+    ans["asks_handoff"] = ask.choose("Who owns the closing list the agent gives you?",
+                                     "If ledgr is installed, let it be authoritative: the end of a reply is the terminal's most valuable "
+                                     "screen. ledgr and both add a ~200 to 260-word instruction to each session's context (at start, clear and "
+                                     "compact, plus one reminder after a missed blocker); the extractor stays the fallback. Changeable "
+                                     "later in ledgr-data/config.json (asks.handoff); running sessions follow at their next prompt.",
+                                     HANDOFFS, hand if hand in [v for v, _ in HANDOFFS] else "ledgr")
+    ans["instruct_block"] = ans["asks_handoff"] != "prose"
     ans["threshold"] = ask.choose("Which asks count on the chip and as open rows?", "Asks below the line are kept as folded suggestions.", THRESHOLDS, ans.get("threshold") or "needed")
     ans["animations"] = ask.yesno("Animations?", "Rows fade in and out and the chip pulses once on a change; no reduced-motion setting reaches a mod.", ans.get("animations") is not False)
     ans["fold_asks_while_working"] = ask.yesno("Fold the asks lane while the agent works?", "Off leaves every fold to you; on is the old automatic fold.", bool(ans.get("fold_asks_while_working")))
@@ -956,13 +975,41 @@ def gather(ctx, st, f, a, file_answers, flags):
             for ev, old, new in fix:
                 say(f"    {ev}: {old}  ->  {new}  (the mod moved)")
             if ask.yesno(f"Add them to {tilde(path)}?", "Claude Code runs them at session start, at each prompt and at each turn's end; each exits "
-                         "in milliseconds and prints nothing to the model but the ledgr-asks instruction (instruct_block).", want):
+                         "in milliseconds and prints nothing to the model but the ledgr-asks instruction (asks.handoff ledgr or both).", want):
                 yes = True
             else:
                 ans["_declined"].append(path)
         ans["hooks"] = yes
     else:
         ans["hooks"] = False
+    # The MCP server: the exact command and allow entries, folder by folder, before anything is written.
+    # A run with --yes registers it only when the answers or --mcp say so, or it is registered already.
+    ans["_mcp_declined"] = []
+    files = [p for p in ctx.settings_all if p not in ans["_declined"]] if ans["agents"] and ans["hooks"] else []
+    have = any(mcp_registered(ctx, p) == "ok" for p in files)
+    want = ans.get("mcp") if isinstance(ans.get("mcp"), bool) else (have or not ctx.yes)
+    if files and os.path.exists(os.path.join(REPO, "mods", MOD, "bin", "mcp", "ledgr_mcp.py")):
+        ans["mcp"] = ask.yesno("Register ledgr's MCP server with Claude Code so agents can declare asks without printing a block?",
+                               "The agent calls ledgr's declare_asks tool instead of writing a ledgr-asks block at the end of its reply, "
+                               "so the terminal's last screen stays the work's; the block stays the fallback. Registered at user scope "
+                               "in each chosen Claude config folder (claude mcp add), with three allow entries so a call never prompts.", want)
+        if ans["mcp"]:
+            for path in files:
+                argv, d, line = mcp_command(ctx, path)
+                miss = perms_missing(path)
+                if mcp_registered(ctx, path) == "ok" and not miss:
+                    continue
+                say(f"\n  MCP server for {tilde(os.path.dirname(path))}: ledgr runs, exactly:")
+                if mcp_registered(ctx, path) != "ok":
+                    say(f"    {line}")
+                if miss:
+                    say(f'    and adds to {tilde(path)}: "permissions": {{"allow": [ ..., {", ".join(json.dumps(x) for x in miss)} ]}}')
+                if not ask.yesno(f"Do that for {tilde(os.path.dirname(path))}?", "The server reads and writes only ledgr-data; it "
+                                 "starts with each Claude Code session of that folder and offers three tools (declare_asks, open_asks, "
+                                 "parked_questions).", True):
+                    ans["_mcp_declined"].append(path)
+    else:
+        ans["mcp"] = False
     return ans
 
 
@@ -1111,7 +1158,11 @@ def apply_config(ctx, ans, changes):
         ex["model"] = ans.get("model") or DEFAULT_MODEL[prov]
         ex["base_url"] = ans.get("base_url") if prov == "openai-compatible" else None
     ex["threshold"] = ans["threshold"]
-    new["instruct_block"] = bool(ans["instruct_block"])
+    hand = ans.get("asks_handoff") if ans.get("asks_handoff") in [v for v, _ in HANDOFFS] else "ledgr"
+    new["instruct_block"] = hand != "prose"
+    if not isinstance(new.get("asks"), dict):
+        new["asks"] = {}
+    new["asks"]["handoff"] = hand
     ui = new.setdefault("ui", {})
     ui["animations"] = bool(ans["animations"])
     ui["foldAsksWhileWorking"] = bool(ans["fold_asks_while_working"])
@@ -1124,7 +1175,7 @@ def apply_config(ctx, ans, changes):
         if raw is not None:
             ctx.backup(p)
         write_atomic(p, dump(new, style))
-        changes.append(f"ledgr-data/config.json: {'created' if raw is None else 'updated'} (provider {prov}, threshold {ans['threshold']})")
+        changes.append(f"ledgr-data/config.json: {'created' if raw is None else 'updated'} (provider {prov}, threshold {ans['threshold']}, closing list {hand})")
 
 
 def apply_keys(ctx, st, ans, changes):
@@ -1440,6 +1491,113 @@ def apply_hooks_to(ctx, st, ans, path, changes):
     changes.append(f"{tilde(path)}: {len(todo)} hook entr{'y' if len(todo) == 1 else 'ies'} added" + (f", {len(fix)} repointed" if fix else ""))
 
 
+# ── MCP server ────────────────────────────────────────────────────────────────────────────────
+def mcp_script(ctx):
+    return os.path.join(ctx.mods, MOD, "bin", "mcp", "ledgr_mcp.py")
+
+
+def config_env(settings_path):
+    """The CLAUDE_CONFIG_DIR a `claude` command needs for the config folder of a settings file:
+    None for ~/.claude (the default), else that folder."""
+    d = os.path.dirname(os.path.abspath(settings_path))
+    return None if os.path.normpath(d) == os.path.normpath(expand("~/.claude")) else d
+
+
+def mcp_user_json(settings_path):
+    """Where Claude Code keeps that folder's user-scope MCP servers: ~/.claude.json for ~/.claude,
+    else <folder>/.claude.json."""
+    d = config_env(settings_path)
+    return expand("~/.claude.json") if d is None else os.path.join(d, ".claude.json")
+
+
+def mcp_command(ctx, settings_path, py=None):
+    """The exact registration for one config folder: (argv, CLAUDE_CONFIG_DIR or None, the line to show)."""
+    import shlex
+    py = py or hook_python()[0] or "/usr/bin/python3"
+    argv = [find_claude() or "claude", "mcp", "add", "--scope", "user", "--transport", "stdio", MCP_NAME,
+            "--", py, "-I", "-B", mcp_script(ctx)]
+    d = config_env(settings_path)
+    line = (f"CLAUDE_CONFIG_DIR={shlex.quote(d)} " if d else "") + " ".join(shlex.quote(a) for a in ["claude"] + argv[1:])
+    return argv, d, line
+
+
+def mcp_registered(ctx, settings_path):
+    """'ok' when the folder's user-scope config has a `ledgr` server pointing at this install's
+    script, 'other' when it points elsewhere, None when there is none (read from the JSON; no claude call)."""
+    try:
+        cfg, _, _ = load_json(mcp_user_json(settings_path))
+    except (ValueError, OSError):
+        return None
+    srv = ((cfg or {}).get("mcpServers") or {}).get(MCP_NAME) if isinstance(cfg, dict) else None
+    if not isinstance(srv, dict):
+        return None
+    return "ok" if mcp_script(ctx) in [srv.get("command")] + list(srv.get("args") or []) else "other"
+
+
+def perms_missing(path):
+    """Which of MCP_TOOLS the settings file does not allow yet (a "mcp__ledgr" or "mcp__ledgr__*" entry allows all)."""
+    try:
+        sett, _, _ = load_json(path) if os.path.exists(path) else (None, None, None)
+    except ValueError:
+        return list(MCP_TOOLS)
+    allow = (((sett or {}).get("permissions") or {}).get("allow") or []) if isinstance(sett, dict) else []
+    if "mcp__ledgr" in allow or "mcp__ledgr__*" in allow:
+        return []
+    return [x for x in MCP_TOOLS if x not in allow]
+
+
+def claude_env(d):
+    env = dict(os.environ)
+    env.pop("CLAUDE_CONFIG_DIR", None)
+    if d:
+        env["CLAUDE_CONFIG_DIR"] = d
+    return env
+
+
+def apply_mcp(ctx, st, ans, changes, warn):
+    """Registers the MCP server and adds the allow entries, per chosen settings file the person agreed to."""
+    if not ans.get("mcp") or not ans["agents"] or not ans.get("hooks"):
+        return
+    done = list(st.d.get("mcp") or [])
+    for path in ctx.settings_all:
+        if path in (ans.get("_declined") or []) or path in (ans.get("_mcp_declined") or []):
+            continue
+        argv, d, line = mcp_command(ctx, path)
+        state = mcp_registered(ctx, path)
+        if state == "ok":
+            say(f"  MCP server: already registered for {tilde(os.path.dirname(path))}")
+        elif not find_claude():
+            warn.append(f"Claude Code not found: register ledgr's MCP server yourself: {line}")
+        else:
+            env = claude_env(d)
+            ctx.backup(mcp_user_json(path))
+            if state == "other":
+                run([argv[0], "mcp", "remove", "--scope", "user", MCP_NAME], env=env, timeout=60)
+            rc, out, err = run(argv, env=env, timeout=60)
+            if rc == 0:
+                changes.append(f"{tilde(mcp_user_json(path))}: MCP server ledgr registered, user scope ({line})")
+            else:
+                warn.append(f"claude mcp add failed for {tilde(os.path.dirname(path))} ({(err or out).strip()[:160]}); run it yourself: {line}")
+        if mcp_registered(ctx, path) == "ok" and tilde(path) not in done:
+            done.append(tilde(path))
+        missing = perms_missing(path)
+        if missing:
+            try:
+                sett, style, _ = load_json(path) if os.path.exists(path) else (None, None, None)
+            except ValueError:
+                raise SystemExit(f"{path} is not valid JSON; nothing written.")
+            new = json.loads(json.dumps(sett or {}))
+            perms = new.setdefault("permissions", {})
+            perms["allow"] = list(perms.get("allow") or []) + missing
+            st.pristine(path, lambda b: HOOK_MARK.encode() in b or b"mcp__ledgr__" in b)
+            ctx.backup(path)
+            text = dump(new, style)
+            write_atomic(path, text)
+            st.wrote(path, text)
+            changes.append(f"{tilde(path)}: permissions.allow += {', '.join(missing)}")
+    st.d["mcp"] = done
+
+
 def mend_newline(ctx, st, path, changes):
     """A JSON file ledgr itself wrote last without a final newline (install.sh before this fix kept a
     missing one) gets it back. A file someone else has written since is left alone."""
@@ -1574,13 +1732,15 @@ def cmd_install(ctx, args, flags):
     head("Plan")
     say(f"  mods        ledgr {f['repo_version']}" + (", ledgr-pane" if lay.get("chip") == CHIP else "") +
         (f", overlay {', '.join(ov.get('mods') or [])} from {tilde(ov['_dir'])}" if ov else ""))
-    say(f"  config      provider {ans['provider']}{' ' + ans['model'] if ans['provider'] != 'none' and ans.get('model') else ''}; threshold {ans['threshold']}; animations {'on' if ans['animations'] else 'off'}; fold while working {'on' if ans['fold_asks_while_working'] else 'off'}")
+    say(f"  config      provider {ans['provider']}{' ' + ans['model'] if ans['provider'] != 'none' and ans.get('model') else ''}; closing list {ans['asks_handoff']}; threshold {ans['threshold']}; animations {'on' if ans['animations'] else 'off'}; fold while working {'on' if ans['fold_asks_while_working'] else 'off'}")
     say(f"  keys        {ans['keys']['capture']} park a question; {ans['keys']['toggle']} -> {ans['keys']['toggle_command']}" +
         (f"; replaces {', '.join(f'{s}:{c}' for s, c in ans['keys']['replaced'])}" if ans['keys']['replaced'] else ""))
     say(f"  layout      {('layouts/' + lay['name'] + '.json') if lay.get('name') else 'none'}" +
         (f" (cloned from {lay['clone_from']})" if lay.get("clone_from") else "") +
         (f"; panel {lay.get('panel')}; host {lay.get('host')}; chip {lay.get('chip')}" if lay.get("name") else ""))
     say(f"  hooks       {'Claude Code: SessionStart, UserPromptSubmit, Stop in ' + ', '.join(tilde(p) for p in ctx.settings_all if p not in ans['_declined']) if ans['agents'] and ans['hooks'] else 'none'}")
+    mfiles = [p for p in ctx.settings_all if p not in ans["_declined"] and p not in ans["_mcp_declined"]] if ans.get("mcp") else []
+    say(f"  MCP server  {'ledgr (claude mcp add, user scope) and its allow entries for ' + ', '.join(tilde(os.path.dirname(p)) for p in mfiles) if mfiles else 'not registered (./install.sh --mcp on offers it)'}")
     retiring = retired_mods(ctx, st, {MOD} | ({CHIP} if lay.get("chip") == CHIP else set()) | set((ov or {}).get("mods") or []) | set(host_mods(ctx)))
     if retiring:
         say(f"  retires     {', '.join('mods/' + m for m in retiring)} (an earlier install deployed it; removed once no layout uses it)")
@@ -1619,6 +1779,7 @@ def cmd_install(ctx, args, flags):
     apply_config(ctx, ans, changes)
     apply_keys(ctx, st, ans, changes)
     apply_hooks(ctx, st, ans, changes)
+    apply_mcp(ctx, st, ans, changes, f["warn"])
     retire_mods(ctx, st, ans, deployed, changes)
     st.d["toggle_command"] = ans["keys"]["toggle_command"]
     st.d["version"] = f["repo_version"]
@@ -1666,7 +1827,10 @@ def cmd_check(ctx, args):
     cfg = read_cfg(ctx)
     ex = cfg.get("extract") or {}
     prov = "none" if ex.get("mode") == "block-only" else ex.get("provider") or "anthropic"
-    say(f"  config.json     {'ok' if cfg else 'missing (the first hook run creates it)'}; provider {prov}; threshold {ex.get('threshold', 'needed')}")
+    hm = (cfg.get("asks") or {}).get("handoff") if isinstance(cfg.get("asks"), dict) else None
+    hm = "prose" if cfg and cfg.get("instruct_block") is not True else hm if hm in [v for v, _ in HANDOFFS] else "ledgr"
+    say(f"  config.json     {'ok' if cfg else 'missing (the first hook run creates it)'}; provider {prov}; threshold {ex.get('threshold', 'needed')}; "
+        f"closing list {hm} (asks.handoff{', instruct_block off' if cfg and cfg.get('instruct_block') is not True else ''})")
     ov = overlay_manifest(st.d["answers"].get("overlay")) if st.d["answers"].get("overlay") else None
     mods = [m for m in (MOD, CHIP) if os.path.isdir(os.path.join(ctx.mods, m))] + host_mods(ctx)
     mods = list(dict.fromkeys(mods + [m for m in (ov or {}).get("mods") or [] if os.path.isdir(os.path.join(ctx.mods, m))]))
@@ -1697,6 +1861,20 @@ def cmd_check(ctx, args):
         say(f"  hooks in        {tilde(p)}: {'SessionStart, UserPromptSubmit, Stop registered' if not missing else 'NOT registered: ' + ', '.join(missing)}")
         if missing:
             bad.append(f"hooks missing in {tilde(p)}")
+    chose = st.d.get("answers", {}).get("mcp") is True
+    for p in files:
+        reg, miss = mcp_registered(ctx, p), perms_missing(p)
+        say(f"  MCP server      {tilde(os.path.dirname(p))}: "
+            + {"ok": "ledgr registered (user scope)", "other": "ledgr registered at ANOTHER path"}.get(reg, "not registered")
+            + f"; allow entries {'present' if not miss else 'missing: ' + ', '.join(miss)}")
+        if reg != "ok" or miss:
+            _, _, line = mcp_command(ctx, p)
+            if reg != "ok":
+                say(f"                  register: {line}")
+            if miss:
+                say(f'                  allow: add {", ".join(json.dumps(x) for x in miss)} to "permissions.allow" in {tilde(p)}')
+            if chose:
+                bad.append(f"MCP server or its allow entries missing for {tilde(os.path.dirname(p))}")
     for p, why in f.get("claude_configs") or []:
         if p not in files and not hooks_in(p):
             say(f"  ! {tilde(p)} ({why}) has no ledgr hooks: sessions started with that CLAUDE_CONFIG_DIR do not join (./install.sh offers it)")
@@ -1710,6 +1888,22 @@ def cmd_check(ctx, args):
                 except OSError:
                     pass
     say(f"  hooks fired     last activity under ledgr-data: {ago(newest)}" + ("  (start a Claude session in a Herdr terminal to see it change)" if not newest else ""))
+    # How the last turns' asks arrived (log/hook.log): declared by the agent (a block, or the MCP tool:
+    # source=tool counts like block), extracted by the model, skipped, or failed.
+    srcs = []
+    try:
+        with open(os.path.join(ctx.data, "log", "hook.log"), encoding="utf-8", errors="replace") as fh:
+            for ln in fh.readlines()[-20000:]:
+                m = re.search(r" extract \S+ turn=\d+ source=(\w+)", ln)
+                if m:
+                    srcs.append(m.group(1))
+    except OSError:
+        pass
+    srcs = srcs[-200:]
+    if srcs:
+        n = lambda k: srcs.count(k)  # noqa: E731
+        say(f"  extraction      last {len(srcs)} turns: {n('block') + n('tool')} declared by the agent (block {n('block')}, tool {n('tool')}), "
+            f"{n('model')} extracted by the model, {n('skip')} skipped, {n('error')} failed")
     w = f["shared"].get("ledgr.writer")
     if isinstance(w, dict) and w.get("id"):
         say(f"  writer          held by {w.get('by')} (claimed {ago((w.get('at') or 0) / 1000)})")
@@ -1811,8 +2005,10 @@ def cmd_uninstall(ctx, args):
     say(f"  your current choices: {tilde(out)}")
     say(f"  reinstall later with: ./install.sh --yes --answers {tilde(out)}")
     ov = overlay_manifest(a.get("overlay")) if a.get("overlay") else None
-    sett_files = [p for p in dict.fromkeys(ctx.settings_all + [expand(x) for x in as_list(st.d.get("claude_settings"))]
-                                           + [p for p, _ in f.get("claude_configs") or []]) if hooks_in(p)]
+    cand = list(dict.fromkeys(ctx.settings_all + [expand(x) for x in as_list(st.d.get("claude_settings"))]
+                              + [p for p, _ in f.get("claude_configs") or []]))
+    sett_files = [p for p in cand if hooks_in(p) or len(perms_missing(p)) < len(MCP_TOOLS)]
+    mcp_files = [p for p in cand if mcp_registered(ctx, p) == "ok"]
     lays = []
     for name, shipped in f["layouts"]:
         p = os.path.join(ctx.home, "layouts", name + ".json")
@@ -1820,7 +2016,9 @@ def cmd_uninstall(ctx, args):
         if not shipped and (b"ledgr" in b or (ov and ov.get("chip") and f'"{ov["chip"]}"'.encode() in b)):
             lays.append((name, p))
     say("  removes: " + ", ".join(filter(None, [
-        ("the Claude Code hooks in " + ", ".join(tilde(p) for p in sett_files)) if sett_files else None, "ledgr's key bindings",
+        ("the Claude Code hooks and MCP allow entries in " + ", ".join(tilde(p) for p in sett_files)) if sett_files else None,
+        ("the MCP server registration (claude mcp remove) for " + ", ".join(tilde(os.path.dirname(p)) for p in mcp_files)) if mcp_files else None,
+        "ledgr's key bindings",
         ("ledgr blocks in " + ", ".join(f"layouts/{n}.json" for n, _ in lays)) if lays else None,
         "mods/ledgr" + (", mods/ledgr-pane" if os.path.isdir(os.path.join(ctx.mods, CHIP)) else ""),
         ("overlay mods " + ", ".join(ov.get("mods") or []) + " (back to their originals)") if ov else None])))
@@ -1828,10 +2026,26 @@ def cmd_uninstall(ctx, args):
     if not ask.yesno("Uninstall ledgr?", "Every file is backed up first.", True):
         raise SystemExit("Nothing changed.")
     notes = []
-    # 2. hooks, in every Claude settings file that has them
+    # 2a. the MCP server registration, per config folder (Claude Code's own command)
+    for path in mcp_files:
+        argv, d, line = mcp_command(ctx, path)
+        ctx.backup(mcp_user_json(path))
+        rc, out, err = run([argv[0], "mcp", "remove", "--scope", "user", MCP_NAME], env=claude_env(d), timeout=60)
+        notes.append(f"{tilde(os.path.dirname(path))}: MCP server ledgr " + ("removed" if rc == 0 else
+                     f"NOT removed ({(err or out).strip()[:120]}); run: " + ("CLAUDE_CONFIG_DIR=" + d + " " if d else "") + "claude mcp remove --scope user ledgr"))
+    # 2b. hooks and the MCP allow entries, in every Claude settings file that has them
     for path in sett_files:
         sett, style, _ = load_json(path)
         new = json.loads(json.dumps(sett))
+        perms = new.get("permissions") if isinstance(new.get("permissions"), dict) else None
+        if perms is not None and isinstance(perms.get("allow"), list):
+            perms["allow"] = [x for x in perms["allow"] if x not in MCP_TOOLS]
+            pr0 = st.original(st.rec(path))
+            orig = json.loads(pr0.decode("utf-8")) if pr0 else {}
+            if not perms["allow"] and "allow" not in (orig.get("permissions") or {}):
+                del perms["allow"]
+            if not perms and "permissions" not in orig:
+                del new["permissions"]
         hooks = new.get("hooks") or {}
         for ev in list(hooks):
             hooks[ev] = [e for e in hooks[ev] if not any(HOOK_MARK in (h.get("command") or "") for h in e.get("hooks") or [])]
@@ -1971,9 +2185,11 @@ def main(argv):
     ap.add_argument("--base-url")
     ap.add_argument("--api-key", choices=["keep", "prompt", "skip"], help="what to do about the Keychain item (the key itself: prompt, or LEDGR_API_KEY with --yes)")
     ap.add_argument("--threshold", choices=[t for t, _ in THRESHOLDS])
+    ap.add_argument("--asks-handoff", choices=[v for v, _ in HANDOFFS], help="who owns the closing list: ledgr, both or prose")
     ap.add_argument("--animations", choices=["on", "off"])
     ap.add_argument("--fold-while-working", choices=["on", "off"])
     ap.add_argument("--instruct-block", choices=["on", "off"])
+    ap.add_argument("--mcp", choices=["on", "off"], help="register ledgr's MCP server with Claude Code (user scope) and add its allow entries")
     ap.add_argument("--capture-key")
     ap.add_argument("--toggle-key")
     ap.add_argument("--replace-conflicts", action="store_true")
@@ -1994,10 +2210,10 @@ def main(argv):
     if args.check:
         args.command = "check"
     flags = {}
-    for k in ("provider", "model", "base_url", "threshold", "api_key"):
+    for k in ("provider", "model", "base_url", "threshold", "api_key", "asks_handoff"):
         if getattr(args, k) is not None:
             flags[k] = getattr(args, k)
-    for k, fk in (("animations", "animations"), ("fold_while_working", "fold_asks_while_working"), ("instruct_block", "instruct_block")):
+    for k, fk in (("animations", "animations"), ("fold_while_working", "fold_asks_while_working"), ("instruct_block", "instruct_block"), ("mcp", "mcp")):
         if getattr(args, k) is not None:
             flags[fk] = getattr(args, k) == "on"
     keys = {}

@@ -1,7 +1,7 @@
 {
   "$comment": "What ledgr can know about a Claude Code session, and how (bin/adapters/README.md). true/false, or the mechanism. The panel reads it to say how this agent's asks arrive.",
   "agent": "claude-code",
-  "identity": "hooks SessionStart + UserPromptSubmit (HC_TERMINAL_ID -> session_id, transcript_path, cwd, turn)",
+  "identity": "hooks SessionStart + UserPromptSubmit (HC_TERMINAL_ID -> session_id, transcript_path, cwd, turn; config_dir and profile from CLAUDE_CONFIG_DIR)",
   "turn_signal": "hook Stop",
   "instruction": "SessionStart hook stdout (startup, resume, clear, compact) plus one UserPromptSubmit reminder after a missed blocker",
   "turn_text": "Stop hook last_assistant_message (uuid from the transcript JSONL)",

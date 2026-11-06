@@ -97,5 +97,50 @@ check("no valid items: found, invalid, 'no valid items'", r["found"] and not r["
 r = parse_block.parse(load("oldtag.md"))
 check("old ledger-asks tag is not recognised", not r["found"], r)
 
+# The readable bullet form (2026-11-06): `- level · kind · text [· "quote"] [· options: a | b]`.
+r = parse_block.parse(load("bullets.md"))
+check("bullets: found, valid, form bullets, 3 asks", r["found"] and r["valid"] and r["form"] == "bullets" and len(r["asks"]) == 3, r)
+b0, b1, b2 = (r["asks"] + [{}, {}, {}])[:3]
+check("bullets: level, kind, text, quote, options", b0.get("level") == "blocking" and b0.get("kind") == "decide"
+      and b0.get("text") == "Choose the default template" and b0.get("options") == ["compact", "detailed"]
+      and b0.get("quote") == "Pick the default template before I wire the export: compact or detailed." and b0.get("blocking") is True, b0)
+check("bullets: no quote, no options", b1.get("quote") is None and b1.get("options") == [] and b1.get("kind") == "provide", b1)
+check("bullets: '*' marker and options without a quote", b2.get("kind") == "review" and b2.get("options") == ["now", "after the export"], b2)
+check("bullets: origin extract_block, hash like JSON asks", b0.get("origin") == "extract_block"
+      and b0.get("hash") == hashlib.sha1(re.sub(r"\s+", " ", b0["quote"]).strip().encode()).hexdigest()[:12], b0)
+check("bullets: nothing rejected, block removed from prose", r["rejected"] == [] and "ledgr-asks" not in r["prose"], (r["rejected"], r["prose"]))
+check("bullets: pointer line read (3 items, 1 blocking)", r["pointer"] == {"line": "ledgr: 3 items for you, 1 blocking", "items": 3, "blocking": 1}, r["pointer"])
+
+r = parse_block.parse(load("bullets_curly.md"))
+c0, c1 = (r["asks"] + [{}, {}])[:2]
+check("curly quotes: kept and verified against the prose", r["valid"] and c0.get("quote") == "The cutover runs Saturday at 06:00.", c0)
+check("options before the quote: both read; optional level", c1.get("options") == ["Friday", "Saturday morning"]
+      and c1.get("quote") == "Everything else is staged." and c1.get("level") == "optional", c1)
+check("pointer without blocking: 'ledgr: 2 items for you'", r["pointer"] == {"line": "ledgr: 2 items for you", "items": 2, "blocking": 0}, r["pointer"])
+
+r = parse_block.parse(load("bullets_missing_level.md"))
+check("missing level: that bullet rejected with a reason, the other kept",
+      r["valid"] and [a["text"] for a in r["asks"]] == ["Restart the worker on PRODAPP"]
+      and len(r["rejected"]) == 1 and r["rejected"][0].startswith("ask 1: missing level"), r)
+check("pointer 'ledgr: 1 item for you'", r["pointer"] and r["pointer"]["items"] == 1 and r["pointer"]["blocking"] == 0, r["pointer"])
+
+r = parse_block.parse(load("bullets_bad_level.md"))
+rj = " | ".join(r["rejected"])
+check("bad level: 'urgent' rejected, 'Blocking' read as blocking",
+      r["valid"] and [(a["text"], a["level"]) for a in r["asks"]] == [("Approve release 1.17", "blocking")] and "ask 1: unknown level 'urgent'" in rj, (r["asks"], rj))
+check("bad kind, a quote where the text goes, two quotes: each rejected with its reason",
+      "ask 3: unknown kind 'approve'" in rj and "ask 4: missing text" in rj and "ask 5: field" in rj, rj)
+check("a stray line is reported, not fatal", "line 1: not a bullet" in rj, rj)
+check("no pointer line: null", r["pointer"] is None, r["pointer"])
+
+r = parse_block.parse(load("bullets_mixed.md"))
+check("JSON mixed with bullets: found, invalid, whole block rejected",
+      r["found"] and not r["valid"] and r["asks"] == [] and "mixes a JSON array and bullets" in (r["error"] or "") and r["form"] == "mixed", r)
+r = parse_block.parse(load("bullets_xml.md"))
+check("<ledgr-asks> ... </ledgr-asks> (XML tags, seen live from Haiku): read like a fence",
+      r["found"] and r["valid"] and len(r["asks"]) == 2 and "<ledgr-asks>" not in r["prose"] and r["asks"][1]["options"] == ["tomllib", "tomlkit"], r)
+r = parse_block.parse(load("valid.md"))
+check("JSON blocks still parse (form json)", r["valid"] and r["form"] == "json" and r["pointer"] is None, r["form"])
+
 print(f"\n{'OK' if not fails else 'FAILED'}: parse_block, {fails} failure(s)")
 sys.exit(1 if fails else 0)

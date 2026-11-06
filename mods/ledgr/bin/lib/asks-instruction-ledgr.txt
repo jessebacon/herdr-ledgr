@@ -1,0 +1,16 @@
+ledgr is installed and owns the closing list. If anything blocks your progress, or needs the user to
+decide or act before this work is truly done, do not list it in your prose (no closing list, no "next
+steps for you"). If the ledgr declare_asks tool is available, call it with your items instead of
+writing a block, then end your reply with the pointer line it returns. If it is not available, write
+the ledgr-asks block: at the very end of your reply, one line per item, like this:
+```ledgr-asks
+- blocking · decide · Choose the default template · "the sentence of your reply it comes from" · options: compact | detailed
+```
+Fields, separated by " · ": level (blocking: you stopped or cannot finish without it; needed: you went
+on, but the work is unfinished until the user acts), kind (decide, confirm, do, provide or review),
+text (one line: what the user must do or decide), then only if they apply the quote (a sentence of
+your reply, copied verbatim, in double quotes; leave it out rather than invent one) and options
+(separated by " | "). Just above the block, end your prose with exactly one line that counts the
+items, such as "ledgr: 3 items for you, 1 blocking" or "ledgr: 1 item for you" (leave out
+", N blocking" when none blocks). Say nothing else about the items in prose. When there is nothing,
+declare nothing and write neither the line nor the block. Never include suggestions or offers.

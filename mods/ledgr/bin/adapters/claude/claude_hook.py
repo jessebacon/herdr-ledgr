@@ -3,9 +3,11 @@
 Claude-specific parts: the hook field names (hooks.md "Common input fields", "SessionStart input",
 "UserPromptSubmit input", "Stop input"), main-conversation-only filtering (an `agent_id` on stdin
 means a subagent or teammate; a hook_event_name other than the one this entry handles, such as
-SubagentStop, is ignored), the local slash commands that do not start a turn, the session-name
-fallback from <config>/sessions/<pid>.json (<config> is CLAUDE_CONFIG_DIR, else ~/.claude), and the
-ledgr-asks instruction on stdout (Claude Code
+SubagentStop, is ignored), the local slash commands that do not start a turn, the session's config
+folder and profile (<config> is CLAUDE_CONFIG_DIR, else the folder above projects/ in the transcript
+path, else ~/.claude; profile "default" for ~/.claude, else the folder's name without ".claude-", so
+~/.claude-work is "work"; recorded on every event, carried by session_start and prompt), the session-name
+fallback from <config>/sessions/<pid>.json, and the ledgr-asks instruction on stdout (Claude Code
 adds a SessionStart or UserPromptSubmit hook's stdout to the session's context).
 Branch lineage (Phase 2) is agent-agnostic and lives in lib/ledgr_map: a SessionStart with source
 "fork" in a process carrying LEDGR_PARENT (the ledgr branch launcher's `env` prefix) records it and
@@ -17,10 +19,16 @@ answers_landed, 1 ms or more after the prompt event so the mod applies it after 
 The Claude-specific part is the paste wrapper: Claude Code puts pasted text between
 <pasted_content id="..."> and </pasted_content id="..."> lines, so a lead-in the person types before
 pasting does not hide the marker. Any other prompt is untouched; landing prints nothing.
-The instruction (lib/asks-instruction.txt, config instruct_block, default on) is printed at every
-SessionStart (startup, resume, clear, compact), and once more at the next real prompt after a turn
-whose blocking ask only the extractor's model found, the message having no ledgr-asks block (config
-instruct_reinject, default on; claude_extract.py marks the session). Nothing else is ever printed.
+The instruction is the wording for the session's handoff mode (ledgr_config.handoff: asks.handoff
+"ledgr" -> lib/asks-instruction-ledgr.txt, "both" -> lib/asks-instruction-both.txt, "prose" or
+instruct_block false -> nothing). It is printed at every SessionStart (startup, resume, clear,
+compact); once more at the next real prompt after a turn whose blocking ask only the extractor's
+model found, the message having no ledgr-asks block (config instruct_reinject, default on;
+claude_extract.py marks the session); and once at the next real prompt after the mode changed since
+the session last got its wording (the record's instruct_mode; a session from before the modes counts
+as "both"). A switch to "prose" prints lib/asks-instruction-off.txt once to a session that had a
+wording, so it stops; a session that starts in "prose" never gets anything. Nothing else is ever
+printed.
 Exit status for the shell entry: 0 handled,
 10 ignored (stop.sh starts the extractor only on 0). Never raises.
 """
@@ -55,9 +63,20 @@ def config_dir(transcript_path=None):
     transcript path, else ~/.claude."""
     d = os.environ.get("CLAUDE_CONFIG_DIR")
     if d:
-        return os.path.expanduser(d)
+        return os.path.abspath(os.path.expanduser(d))
     m = re.match(r"^(.+)/projects/[^/]+/[^/]+\.jsonl$", transcript_path or "")
-    return m.group(1) if m else os.path.join(C.HOME, ".claude")
+    return os.path.normpath(m.group(1)) if m else os.path.join(C.HOME, ".claude")
+
+
+def profile_of(cfg_dir):
+    """The config folder's short name: "default" for ~/.claude (any folder named .claude), else its
+    name without a leading ".claude-" (~/.claude-work -> "work"), else its name as it is."""
+    if not cfg_dir:
+        return None
+    n = os.path.basename(os.path.normpath(cfg_dir))
+    if n == ".claude":
+        return "default"
+    return n[len(".claude-"):] if n.startswith(".claude-") and len(n) > len(".claude-") else (n or None)
 
 
 def session_name_fallback(sid, cfg_dir=None):
@@ -113,32 +132,44 @@ def run(event, agent):
         return False
     cfg = K.load()
     fields = {k: inp.get(k) for k in FIELDS}
+    tp = inp.get("transcript_path") if isinstance(inp.get("transcript_path"), str) else None
+    cdir = config_dir(tp)
+    fields.update(config_dir=cdir, profile=profile_of(cdir))
     if event == "UserPromptSubmit":
         p = inp.get("prompt") if isinstance(inp.get("prompt"), str) else ""
         fields["local"] = bool(LOCAL_CMD.match(p))
     if event == "SessionStart":
-        tp = inp.get("transcript_path") if isinstance(inp.get("transcript_path"), str) else None
-        fields["session_name_fallback"] = lambda s: session_name_fallback(s, config_dir(tp))
+        fields["session_name_fallback"] = lambda s: session_name_fallback(s, cdir)
     rec = M.handle(event, sid, t, agent or AGENT, fields)
     if rec is None:
         return False
+    mode = K.handoff(cfg)
     if event == "UserPromptSubmit" and not fields.get("local"):
         landing(t, sid, rec, fields.get("prompt") if isinstance(fields.get("prompt"), str) else "")
-        if rec.get("reinject_pending") is not None and M.take_reinject(sid):
-            if cfg.get("instruct_block") is True and cfg.get("instruct_reinject") is not False and instruct():
-                C.log(f"{t} reinject {sid} turn={rec.get('turn')} (after turn {rec.get('reinject_pending')})")
+        due = rec.get("reinject_pending") is not None and M.take_reinject(sid) \
+            and mode != "prose" and cfg.get("instruct_reinject") is not False
+        last = rec.get("instruct_mode")
+        switched = (last or "both") != mode and not (last is None and mode == "prose")
+        if (due or switched) and instruct("off" if mode == "prose" else mode):
+            C.log(f"{t} {'reinject' if due else 'handoff ' + str(last) + '->' + mode} {sid} turn={rec.get('turn')}"
+                  + (f" (after turn {rec.get('reinject_pending')})" if due else ""))
+        if switched or last is None:
+            M.set_instruct_mode(sid, mode)
     if event == "SessionStart":
         M.prune(C.path("spool"), SPOOL_DAYS * 86400)
         M.prune(C.path("tmp"), 86400)
         M.prune(C.path("locks"), SPOOL_DAYS * 86400)
-        if cfg.get("instruct_block") is True and instruct() and rec.get("reinject_pending") is not None:
+        if mode != "prose" and instruct(mode) and rec.get("reinject_pending") is not None:
             M.take_reinject(sid)                    # the instruction is in context again already
+        if rec.get("instruct_mode") != mode:
+            M.set_instruct_mode(sid, mode)
     return True
 
 
-def instruct():
-    """Print the ledgr-asks instruction (it becomes model context). True when printed."""
-    txt = C.read_text(os.path.join(C.LIB, "asks-instruction.txt"))
+def instruct(mode):
+    """Print the ledgr-asks wording for a handoff mode ("ledgr", "both"; "off" revokes an earlier
+    one). It becomes model context. True when printed."""
+    txt = C.read_text(os.path.join(C.LIB, f"asks-instruction-{mode}.txt"))
     if not txt:
         return False
     sys.stdout.write(txt)
