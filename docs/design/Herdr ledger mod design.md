@@ -719,7 +719,7 @@ Rule: on open, the box reads the clipboard. If it holds text of 3 to 600 charact
 2. writes `/btw About "<first 120 characters of the quote>": <question>` (or `/btw <question>` with no quote) to the clipboard;
 3. focuses the agent's pane with `pane.focus {terminal}` (`AGENTS.md:555`, `AGENTS.md:561-562`) and closes the box.
 
-Jesse then presses Cmd-V and Enter. The ledger does not type it for him by default: `hc send` pastes and then presses Enter (`hc send --help`), and if Claude's prompt already holds a draft, the paste would join the draft and submit both. `config.btw.autoSend: true` switches to `hc(["send", "--if", "idle", t, text])` for people who never keep drafts. The `/btw` answer is not saved anywhere the ledger can read, so the item stays `open` with a "/btw" badge until Jesse resolves it.
+Jesse then presses Cmd-V and Enter. The ledger does not type it for him by default: `hc send` pastes and then presses Enter (`hc send --help`), and if Claude's prompt already holds a draft, the paste would join the draft and submit both. A `config.btw.autoSend` switch to `hc(["send", "--if", "idle", t, text])`, for people who never keep drafts, was never built; the key sat unread in the defaults and was removed on 2026-11-07. The `/btw` answer is not saved anywhere the ledger can read, so the item stays `open` with a "/btw" badge until Jesse resolves it.
 
 ### 5.6 Linking human questions to the conversation
 
@@ -869,7 +869,7 @@ What Herdr can and cannot do:
 
 The button is disabled while the agent is `working` or `blocked`, so keystrokes never land in a permission prompt.
 
-**Superseded 2026-11-06.** Steps 3 and 4 and the disabled state are gone: ledgr sends no keystrokes to any terminal and opens no find bar (`bin/tests/test_no_keystrokes.py`, `tests/test_nav.mjs`). Go to anchor opens the row on its whole message with the passage marked, focuses the pane, copies the slice, and the status line says how to search (in Claude: ctrl+o, `/`, ⌘V, Enter). Reason: `ctrl+o` is a toggle (`app:toggleTranscript`, keybindings.md), so the same two keys enter the transcript viewer or leave it and drop `/` into the prompt, depending on a screen state the mod cannot see; Jesse reported a stray "detailed transcript" toggle. `config.nav.autoSearch` is unused.
+**Superseded 2026-11-06.** Steps 3 and 4 and the disabled state are gone: ledgr sends no keystrokes to any terminal and opens no find bar (`bin/tests/test_no_keystrokes.py`, `tests/test_nav.mjs`). Go to anchor opens the row on its whole message with the passage marked, focuses the pane, copies the slice, and the status line says how to search (in Claude: ctrl+o, `/`, ⌘V, Enter). Reason: `ctrl+o` is a toggle (`app:toggleTranscript`, keybindings.md), so the same two keys enter the transcript viewer or leave it and drop `/` into the prompt, depending on a screen state the mod cannot see; Jesse reported a stray "detailed transcript" toggle. `config.nav.autoSearch` was never read and was removed on 2026-11-07.
 
 ### 6.7 Performance rules
 
@@ -889,7 +889,7 @@ From a ledger item, "Branch" runs, through `hc(args)` (`herdr.d.ts:15-16`):
 
 ```bash
 hc run --bg --json --parent t3 --outlive-parent --no-notify \
-  --name br-q7-3f2a --cwd "~/Projects/app" \
+  --name br-q7-3f2a --cwd ~/Projects/app \
   --label ledgr.branch=br_<uuid> --label ledgr.parent_session=88c36d53-35d6-4ccd-8fa6-2c260f89cc18 \
   -- claude --resume 88c36d53-35d6-4ccd-8fa6-2c260f89cc18 --fork-session -n "Q7: TLS 1.0 still flagged" "<preamble>"
 ```
@@ -1042,7 +1042,7 @@ Introduced by this design and also untested:
 | Q2 | Tell Claude to emit the `ledgr-asks` block through the SessionStart hook? It adds about 150 tokens of context per session, a visible code block on turns that ask something, and trunk-model output cost | Off, `audit_rate` 0 (design review 2026-11-05). The model path covers every turn; turn the block on to save model calls |
 | Q3 | Ledger as a fourth child of the `panel-body` stack, or its own column so it can sit beside Files or Changes? | Stack child. It is read at the end of a turn, when switching away from Files costs little; revisit after two weeks |
 | Q4 | Open the panel automatically at Stop when new agent asks arrive? | No. The chip expands; the panel opens on click |
-| Q5 | Type `/btw` into Claude automatically on Cmd-Enter? | No. Clipboard and focus; `btw.autoSend` exists for people who never keep drafts |
+| Q5 | Type `/btw` into Claude automatically on Cmd-Enter? | No. Clipboard and focus; ledgr types nothing into a terminal (a `btw.autoSend` key, reserved for this and never read, was removed on 2026-11-07) |
 | Q6 | (Removed with the Things feed, Section 7) | |
 | Q7 | How long do closed items stay in the store? | 14 days, then `archive/<yyyy-mm>.jsonl` |
 | Q8 | Number turns from the transcript for sessions that started before the hooks? | No. Start at 0 (`turn_base: "ledgr"`); numbering is a reading aid |
@@ -1083,8 +1083,6 @@ The Phase 1 inventory as built on the maintainer's machine. Since 0.1.0 the chip
   "extract": { "mode": "block-first", "provider": "anthropic", "model": "claude-haiku-5-5", "base_url": null,
                "audit_rate": 0, "cli_fallback": false, "max_chars": 60000, "timeout_s": 20 },
   "surface": { "openPanelOnAsks": false },
-  "btw": { "autoSend": false },
-  "nav": { "autoSearch": false },
   "branch": { "maxDepth": 2 },
   "retention_days": 14
 }
@@ -1092,7 +1090,7 @@ The Phase 1 inventory as built on the maintainer's machine. Since 0.1.0 the chip
 
 The hooks create the file with these values at their first run and never overwrite it; a missing or invalid file means these defaults.
 
-The defaults as written on 2026-11-05. Current ones (2026-11-06; `bin/lib/ledgr_config.py` and `mods/ledgr/config.js` are authoritative, the README's Configuration table describes each): `instruct_block` true, `instruct_reinject` true, `asks.handoff` "ledgr", `extract.threshold` "needed", `ui` `{foldAsksWhileWorking: false, animations: true}` plus `ui.panel` from the installer; the rest as above.
+The defaults as written on 2026-11-05, less two keys removed on 2026-11-07: `btw.autoSend` and `nav.autoSearch` (both `false`) were reserved for typing into a terminal and read by nothing, since ledgr sends no keystrokes (5.5, 6.6). Current ones (2026-11-06; `bin/lib/ledgr_config.py` and `mods/ledgr/config.js` are authoritative, the README's Configuration table describes each): `instruct_block` true, `instruct_reinject` true, `asks.handoff` "ledgr", `extract.threshold` "needed", `ui` `{foldAsksWhileWorking: false, animations: true}` plus `ui.panel` from the installer; the rest as above.
 
 ## 11. Build notes: hooks half (2026-11-05)
 

@@ -37,8 +37,6 @@ DEFAULT_CONFIG = {
                                         # are kept as suggestions. Read again when the file changes
     },
     "surface": {"openPanelOnAsks": False},
-    "btw": {"autoSend": False},
-    "nav": {"autoSearch": False},
     "branch": {"maxDepth": 2},
     "ui": {"foldAsksWhileWorking": False,     # the panel's: True = the asks lane folds while the agent works
            "animations": True,                # the panel's and chip's: False = no motion at all

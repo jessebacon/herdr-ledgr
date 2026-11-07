@@ -36,6 +36,7 @@ A [Herdr](https://herdr.dev) mod for long conversations with coding agents.
 From a clone of this repo:
 
 ```sh
+git clone https://github.com/jessebacon/herdr-ledgr.git && cd herdr-ledgr
 ./install.sh
 ```
 
@@ -110,7 +111,6 @@ The installer asks whether to register it, and then runs `claude mcp add --scope
 | `spaces.disabled` | the Herdr space ids where ledgr is off: no instruction or extraction for a session there, no chip, no ⌘J, the panel says so; items are kept. The session menu writes it; a value here replaces the list whole | `[]` |
 | `surface.openPanelOnAsks` | show the panel when a turn ends with new asks and it is hidden | `false` |
 | `retention_days` | closed items older than this move from `store.json` to `ledgr-data/archive/<yyyy-mm>.jsonl` (checked once a day) | `14` |
-| `btw.autoSend`, `nav.autoSearch` | reserved: kept in the defaults, read by nothing (ledgr presses no keys in a terminal) | `false` |
 | `v` | the file's format version | `1` |
 
 ## Branching and confluence

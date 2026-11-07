@@ -273,7 +273,7 @@ Offline runs point `LEDGR_KEYCHAIN_SERVICE` at a service that does not exist, so
   wrote `<ledgr-asks>` tags and fell back to the model (7 asks, reinject marked): fixed by showing the
   fence in the wording and by reading the tag form. Invented quotes are dropped by the validator, as
   for JSON. The throwaway transcripts stay under `~/.claude/projects/-private-tmp-…-scratchpad-lt-site/`.
-- Live on the owner's sessions: the deploy set `asks.handoff: ledgr`; the app (`claude-work`)
+- Live on the owner's sessions: the deploy set `asks.handoff: ledgr`; the `claude-work`
   session got the ledgr wording at its next prompt (`handoff None->ledgr` in hook.log) and its next
   reply ended with `ledgr: 2 items for you, 1 blocking` and a bullet block.
 

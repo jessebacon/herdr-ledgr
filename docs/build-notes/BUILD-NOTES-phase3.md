@@ -169,7 +169,7 @@ Not touched: `mods/my-tabs/main.js`, `mods/my-pane/*`, `keys.json`, `layouts/cus
 
 ## 5. Live test (scratch only)
 
-Scratch repo `/private/tmp/claude-501/-Users-you-Projects-app/88c36d53-35d6-4ccd-8fa6-2c260f89cc18/scratchpad/ledgr-p3/repo`
+Scratch repo `<scratchpad>/ledgr-p3/repo` (a Claude Code session scratchpad)
 (git). Model: Haiku for every test session. Nothing was sent to t1g, t2, t3 or t4. Evidence in the same
 folder: `evidence-store.json`, `evidence-decisions.md`, `evidence-hooklog.txt`, `captured/` (the raw
 `confluence_landed`, `answers_landed` and `close_branch` events), `confluence-staged.txt`,

@@ -24,8 +24,6 @@ export const DEFAULTS = {
     // config.json changes (writer.js watchConfig, panel.js watchStore).
     threshold: "needed" },
   surface: { openPanelOnAsks: false },
-  btw: { autoSend: false },
-  nav: { autoSearch: false },
   branch: { maxDepth: 2 },
   // The panel's own preferences. foldAsksWhileWorking: true brings back the Phase 1 behaviour (the
   // ASKED OF YOU lane folds while the agent works and opens at the end of each turn); false (the

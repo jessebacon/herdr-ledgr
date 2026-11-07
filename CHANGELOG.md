@@ -4,7 +4,25 @@
 
 First public shape of the mod. Built on Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311.
 
-### Off per space, Clear all questions, room between pastes (2026-11-07)
+### Ready for the public repo (2026-11-07)
+
+- `preview.png` retaken on the tool path from a throwaway `claude --model haiku` session in a neutral
+  folder: the reply ends with the pointer line and no block, the panel shows the three asks
+  "declared by the agent (tool)", the chip reads `2 blocking`. `docs/preview-recipe.md` describes
+  that state as the current one and keeps the block path for a machine without the server. Found on
+  the way: the pointer line `declare_asks` returns counts only items at or above `extract.threshold`
+  (with `blocking`, "2 items for you" for three declared); the frame's "3 items" line is the model's
+  own wording.
+- Personal paths are gone from the design doc, the research report and the primitives note (`~`
+  paths and neutral example folders; `file://` links became code paths), and from the build notes;
+  the one employer and project name left in notes and a test fixture are neutral now. The exported
+  conversation stays gitignored.
+- The two config keys nothing read, `btw.autoSend` and `nav.autoSearch`, are removed from the
+  defaults, the README table and the design doc (Section 5.5, 6.6, Q5, Appendix B).
+- README: the clone line; the public repository is `github.com/jessebacon/herdr-ledgr` (topic
+  `herdr-mod`).
+
+### e9bc29a: off per space, Clear all questions, room between pastes
 
 - Off per space (Jesse: "enable/disable per space"; he chose the full version). `config.json`
   `spaces.disabled` lists Herdr space ids (default `[]`; names change, ids do not; defaults in
