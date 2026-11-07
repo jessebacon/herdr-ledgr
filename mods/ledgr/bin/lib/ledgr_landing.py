@@ -16,8 +16,14 @@ Where the marker may stand:
     code fence the person typed does not count; nor does a block whose first line is a fence.
   - Unwrapped (agents or sessions that do not mark pastes): the marker is the first non-empty line of
     the prompt, or the second when the first is a single lead-in line of at most 200 characters.
-Anything else is not a landing and returns None: a marker after text on the same line, after two or
-more lines of text, inside a code fence, with a different case, a double space or a trailing word.
+  - After a message (several pasted into one prompt, such as two answer sheets): the next line that
+    is neither empty nor a paste wrapper line, or the one after it when that line is a single lead-in.
+Anything else is not a landing: a marker after text on the same line, after two or more lines of text,
+inside a code fence, with a different case, a double space or a trailing word.
+Where a message ends: at a pasted block's closing line, at the next marker line, or, for an answer
+sheet (its answers are one line each, confluence.js answersSheet), at the first empty line after its
+A<n>: lines that is not followed by another A<n>: line, so text typed below a sheet is not part of it.
+detect_all() returns every message in prompt order; detect() the first, or None.
 The prompt is never changed. Agent-agnostic and pure (no files, no imports beyond re): the adapter
 supplies the wrapper syntax.
 """
@@ -32,6 +38,7 @@ MAX_SCAN = 40_000
 MAX_ANSWER = 400
 MAX_HANDLES = 60
 MAX_LEAD_IN = 200
+MAX_MESSAGES = 20
 
 
 def _lines(prompt):
@@ -78,15 +85,51 @@ def _parse(first, rest):
     return None
 
 
-def _from_block(body):
-    """A pasted block: its first non-empty line must be the marker."""
-    k = next((i for i, line in enumerate(body) if line.strip()), None)
-    return None if k is None else _parse(body[k].strip(), body[k + 1:])
+def _is_marker(s):
+    return bool(CONFLUENCE.match(s) or ANSWERS.match(s))
 
 
-def _pasted(lines, opener, closer):
-    """The first pasted block (outside any fence the person typed) that is a ledgr message."""
-    fence, i = False, 0
+def _end(lines, bound, k):
+    """The index just past the message whose marker is lines[k] (see the module doc)."""
+    sheet = bool(ANSWERS.match(lines[k].strip()))
+    fence, seen, n = False, False, len(lines)
+    for j in range(k + 1, n):
+        if bound[j]:
+            return j
+        s = lines[j].strip()
+        if FENCE.match(s):
+            fence = not fence
+        elif fence:
+            continue
+        elif _is_marker(s):
+            return j
+        elif sheet and HANDLE.match(s):
+            seen = True
+        elif sheet and seen and not s:
+            nxt = next((x for x in range(j + 1, n) if bound[x] or lines[x].strip()), None)
+            if nxt is None or bound[nxt] or not HANDLE.match(lines[nxt].strip()):
+                return j
+    return n
+
+
+def _next(lines, bound, j):
+    """The marker line of a message that follows one ending at j, or None."""
+    n = len(lines)
+    idx = [x for x in range(j, n) if lines[x].strip() and not bound[x]][:2]
+    if not idx:
+        return None
+    first = lines[idx[0]].strip()
+    if _is_marker(first):
+        return idx[0]
+    if len(idx) < 2 or FENCE.match(first) or len(first) > MAX_LEAD_IN:
+        return None
+    return idx[1] if _is_marker(lines[idx[1]].strip()) else None
+
+
+def _block_starts(lines, opener, closer):
+    """The marker line of every pasted block (outside any fence the person typed) whose first
+    non-empty line is a marker."""
+    out, fence, i = [], False, 0
     while i < len(lines):
         s = lines[i].strip()
         if opener.match(s):
@@ -94,43 +137,65 @@ def _pasted(lines, opener, closer):
             while j < len(lines) and not closer.match(lines[j].strip()):
                 j += 1
             if not fence:
-                hit = _from_block(lines[i + 1:j])
-                if hit:
-                    return hit
+                k = next((x for x in range(i + 1, j) if lines[x].strip()), None)
+                if k is not None and _is_marker(lines[k].strip()):
+                    out.append(k)
             i = j + 1
             continue
         if FENCE.match(s):
             fence = not fence
         i += 1
-    return None
+    return out
 
 
-def _unwrapped(lines):
-    """The marker as the first non-empty line, or the second after a one-line lead-in."""
-    idx = [i for i, line in enumerate(lines) if line.strip()][:2]
+def _unwrapped(lines, bound):
+    """Candidates for the prompt's first message: its first non-empty line, then the second after a
+    one-line lead-in (paste wrapper lines are skipped)."""
+    idx = [i for i, line in enumerate(lines) if line.strip() and not bound[i]][:2]
     if not idx:
-        return None
+        return []
     first = lines[idx[0]].strip()
-    hit = _parse(first, lines[idx[0] + 1:])
-    if hit or len(idx) < 2 or FENCE.match(first) or len(first) > MAX_LEAD_IN:
-        return hit
-    return _parse(lines[idx[1]].strip(), lines[idx[1] + 1:])
+    if len(idx) < 2 or FENCE.match(first) or len(first) > MAX_LEAD_IN:
+        return idx[:1]
+    return idx
+
+
+def detect_all(prompt, wrapper=None):
+    """Every ledgr message in the prompt, in order: {"kind": "confluence", "branch_id", "item_id",
+    "conclusion_head"} or {"kind": "answers", "for_session", "handles": [...], "answers": {handle:
+    text}}. [] when there is none. wrapper: (opening-line regex, closing-line regex) of the agent's
+    pasted blocks, or None."""
+    if not isinstance(prompt, str):
+        return []
+    head = prompt[:MAX_SCAN]
+    if "ledgr confluence " not in head and "ledgr answers " not in head:
+        return []                                             # fast path: most prompts end here
+    lines = _lines(prompt)
+    opener, closer = wrapper if wrapper else (None, None)
+    bound = [bool(wrapper) and bool(opener.match(x.strip()) or closer.match(x.strip())) for x in lines]
+    found, tried = {}, set()
+
+    def take(k):
+        """Parse the message at k; follow the chain of messages after it."""
+        while k is not None and k not in tried and len(found) < MAX_MESSAGES:
+            tried.add(k)
+            e = _end(lines, bound, k)
+            hit = _parse(lines[k].strip(), lines[k + 1:e])
+            if not hit:
+                return False
+            found[k] = hit
+            k = _next(lines, bound, e)
+        return True
+
+    for k in _unwrapped(lines, bound):
+        if k in tried or take(k):
+            break
+    for k in (_block_starts(lines, opener, closer) if wrapper else []):
+        take(k)
+    return [found[k] for k in sorted(found)]
 
 
 def detect(prompt, wrapper=None):
-    """{"kind": "confluence", "branch_id", "item_id", "conclusion_head"} or
-    {"kind": "answers", "for_session", "handles": [...], "answers": {handle: text}} or None.
-    wrapper: (opening-line regex, closing-line regex) of the agent's pasted blocks, or None."""
-    if not isinstance(prompt, str):
-        return None
-    head = prompt[:MAX_SCAN]
-    if "ledgr confluence " not in head and "ledgr answers " not in head:
-        return None                                           # fast path: most prompts end here
-    lines = _lines(prompt)
-    if wrapper:
-        opener, closer = wrapper
-        hit = _pasted(lines, opener, closer)
-        if hit:
-            return hit
-        lines = [line for line in lines if not (opener.match(line.strip()) or closer.match(line.strip()))]
-    return _unwrapped(lines)
+    """The first ledgr message in the prompt (detect_all), or None."""
+    hits = detect_all(prompt, wrapper)
+    return hits[0] if hits else None

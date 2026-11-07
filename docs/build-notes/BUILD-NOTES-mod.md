@@ -640,3 +640,124 @@ everything else (Go to anchor, Copy for prompt, `/btw`, Ask for a conclusion: `s
   `focused()` named the target at 24 ms, `terminal.paste` succeeded, and `hc read` showed the probe
   text once, not submitted. A raw-byte probe received exactly `ESC[200~ … \n … ESC[201~`: a line break
   stays inside the bracketed paste rather than arriving as a bare Enter.
+
+## 17. Off per space, Clear all questions, a blank line after a staged message (2026-11-07)
+
+Jesse: "enable/disable per space" (he chose the full version: the hooks and the MCP server go quiet
+too; their side is in `BUILD-NOTES-hooks.md` "Off per space"), "clear all questions" (scope: "shown
+session, skip branched and rejoining questions"), and "when pasting an answer, you should add an empty
+line. When I'm trying to paste multiple answers, they run together".
+
+Files: `config.js`, `store.js`, `writer.js` (all three engine files: the overlay's `my-tabs` copy
+follows at the next `install.sh`), `panel.js`, `capture.js`, `nav.js`, `words.js`; the spool
+docstring (`bin/lib/ledgr_spool.py`) lists the new mod-written event.
+
+### 17.1 Off per space
+
+- Config: `spaces: {disabled: []}` in `config.js` `DEFAULTS` and `ledgr_config.py` `DEFAULT_CONFIG`
+  (Herdr space ids, `sp` + 32 hex; names change, ids do not). An array, so a `config.json` value
+  replaces the default whole. `test-store.sh` checks that the two defaults agree.
+- `config.js` helpers: `disabledSpaces(cfg)` (strings only, each once), `spaceOff(cfg, space)` (a null
+  space is never off), `withSpaceOff(cfg, space, off)` (a new list, the others kept in order),
+  `terminalSpace(t)` (live: the `agents()` entry's `space`, else the `terminals()` entry's
+  `herdr.space` label; null when unknown or when either call throws).
+- Where a terminal's space comes from (`store.js` `spaceOf(t, s, live)`), in order: the terminal
+  mapping's `space` (`d.terminals[t].space`, from the hooks' map record or events), else the session's
+  `space`, else `live(t)` (the writer and the panel pass `terminalSpace`), else null, which is on.
+  `isOff(t, s, live)` is true only when that space is in `spacesOff` (a `Set` the writer fills from
+  `spaces.disabled`; empty means nothing is looked up).
+- Store: `setSpace(s, r)` takes `space` from a `session_start` or `prompt` event, or a map record,
+  only when the key is present (`hasSpace`); `spaceField(r, cur)` carries it onto the terminal mapping
+  and keeps the old value when the new record has no key. `noteSpace(rec)` takes only the space from
+  an identity-map record, onto the mapping and its session, and says whether anything changed.
+  `chips(now, live)` skips every terminal for which `isOff` holds; items are never touched.
+- Writer: `applyConfig` sets `live.spacesOff` and publishes `shared("ledgr.ui")` as `{animations,
+  panel, off}` (`off` is the list, for the capture box before it has read `config.json`).
+  `chipKey()` (threshold plus the sorted list) decides whether a config change republishes the chips,
+  both in `watchConfig` and in the minute's safety net. `watchConfig` now also reacts to
+  `ledgr-data/terminals/<t>.json` (not dotfiles, which are temp files): `refreshSpaces(paths)` reads
+  those records (all of them, through `readMap()`, when the watch names only the root) and calls
+  `noteSpace`; a change commits the store. `offEvent(ev)`: an `asks` event from a session whose
+  terminal is in an off space does not set `newAsks`, so `surface.openPanelOnAsks` never opens the
+  panel for it. `publish()` passes `terminalSpace` to `chips()`.
+- Panel (`panel.js`):
+  - `offState(st, s)` returns `{space, here}` or null. Demo: `demoOff`. With a session shown: its
+    space (`sessionSpace`: recorded, else live) off gives the off state (`here` when the focused space
+    is the same or unknown); a session pinned or picked from the menu (`override`) in an on space
+    shows its lanes. Otherwise the focused pane's space (`focused().space`) decides.
+  - Off: the header adds an `off` pill (`dim`); the list holds `offView` instead of `body`, the footer
+    is hidden, nothing is marked seen and no branch messages are pumped. `offView`: "ledgr is off in
+    this space" (or "ledgr is off in <name>" when it is not the focused space), a dim line (no chips,
+    no ⌘J, no instruction or extraction; items kept), the primary button "ledgr on in this space"
+    (`space-on`), and a line pointing at the session menu.
+  - `spaceSwitch(t)`: the session menu's first row, only when Herdr names a focused space (always in
+    the demo): `spaceToggleWords(isOff)` ("ledgr off in this space", or "ledgr on in this space" in
+    `accent`), the space's name beside it (`spaceName`: `spaces()` by id, else `space <first 10
+    characters of the id>`), a tooltip saying what goes and that items are kept. Session rows in an
+    off space read "off" instead of "N open".
+  - `setSpaceOff(space, off, cx)` updates `this.cfg` at once, then `saveConfig(edit, ok, fail, cx)`:
+    the threshold menu's read, edit, `writeTextFile(…, cur)` compare-and-swap, now one helper for
+    both (`setThreshold` uses it too); a file that is not a JSON object is left alone and the panel
+    re-reads it. Flash on: "ledgr is off in <name>: no chips, no ⌘J, no instruction or extraction for
+    its agents. Their items are kept; the session menu turns it on again." Off: "ledgr is on in <name>
+    again." Demo: memory only, "(demo) … not saved."
+  - Commands: `space:off`, `space:on`, `space:toggle` (the focused pane's space).
+- Capture (`capture.js`): the box's space is the item's terminal's (Ask about this), else
+  `focused().space`, else the focused terminal's live space. `off` is decided first from
+  `shared("ledgr.ui").off`, then from `config.json` once read (the file decides). Off: `offBox`
+  replaces the form (title, `OFF_HERE`, "Nothing is parked. The ledgr panel's session menu (›) turns
+  it on again for this space.", an Esc hint), the keyboard goes to the box itself (`focusBox`), Esc,
+  Enter or a click closes it, `park()` closes without writing, and no quote validation runs. Sessions
+  in an off space (recorded space, else live) are dropped from the target list for every box.
+- Words (`words.js`): `OFF_HERE` ("ledgr is off in this space"), `spaceToggleWords(off, here)`.
+- Known: a branch launched into an off space records lineage (hooks) but sends no `branch_started`;
+  the capture box over an off pane stays until dismissed.
+
+### 17.2 Clear all questions
+
+- Event: `{type: "clear_questions", session_id, keep: ["branched", "rejoin_pending"]}` (plus `id`,
+  `at`, `terminal: null` from `post`), in `OWN_EVENTS`, so it never creates a session and is dropped
+  for a forgotten or unknown one.
+- `store.js` `isBranched(it)`: `it.rejoin`, status `rejoin_pending`, or a branch record for the item
+  that is not `refused` or `failed`. `clearable(sid)`: `{clear, kept}` over the session's parked
+  questions; `clear` is open or deferred without a branch, `kept` is open, deferred or
+  `rejoin_pending` with one. `on_clear_questions` dismisses each of `clear` through `setStatus`, then
+  sets `dismissedBy: "clear"` and `clearedAt`, and records `s.lastClear = {at, cleared, kept}`.
+  Branched and `rejoin_pending` questions are kept whatever `keep` says. `setStatus` deletes
+  `dismissedBy` and `clearedAt` on every change, so Reopen drops them. Closed, the archive and the
+  snapshot treat a cleared item as any dismissed one.
+- Panel: `clearButton(t, st, s)` in the YOUR QUESTIONS lane head (`laneHead`'s `extra`
+  slot): idle `clearLabel(n)` "Clear 3" (`dim`, hover `foreground`), null when nothing is
+  clearable; armed for `CLEAR_ARM_MS` (4000) `clearConfirm(n, kept)` "Clear 3 questions? 1 branched
+  kept" (semibold, `blocked` on a `blocked` tint); then "Clearing 3…" until `store.json` has ingested
+  the event (at most 15 s). `clearQuestions(s, cx)` arms, then posts and sets the status line to
+  `clearedWords(n, kept)` "3 questions cleared, 1 branched kept"; with nothing to clear it says so.
+  The panel overlays its own pending `clear_questions` (`localActs`) so the rows move at once; the
+  demo applies it to the fixture store and saves nothing. Closed rows add the badge
+  `dismissedByWords("clear")` "cleared". Command `clear-questions` (a click: twice to clear).
+
+### 17.3 A blank line after a staged message
+
+- `nav.js` `promptText(text)`: trailing line breaks become exactly `"\n\n"`; nothing else changes, so
+  the marker stays the first line. `stageIntoPrompt` writes `promptText(text)` to the clipboard,
+  pasted or not (also with `ui.pasteIntoPrompt` off and for every reason nothing is pasted), and its
+  clipboard check compares with CRLF as LF and trailing whitespace ignored, so a clipboard that
+  dropped or kept the trailing breaks still counts as ledgr's text. Demo copies use `promptText` too.
+  `stageText` (Go to anchor, Copy for prompt, `/btw`) is unchanged, as is the stored conclude message.
+- The landing parser reads a message with its blank line the same (`test-store.sh`), and two staged
+  messages in one prompt land as two events (`ledgr_landing.detect_all`, hooks notes).
+
+### 17.4 Tests
+
+- `test_store.mjs`, 574 checks: the config helpers (default, the list as read, the switch, a
+  terminal's live space, `loadConfig` replacing the list whole), the capture box's rule, the recorded
+  space on sessions and mappings from map records and events, `chips()` leaving out a terminal in an
+  off space (recorded, else live), `noteSpace` moving a terminal out of an off space, a null recorded
+  space decided live; Clear all: what is cleared and kept (branched, `rejoin_pending`, a failed
+  launch counting as none), the marks, Reopen dropping them, a second clear, the event dropped for
+  an unknown or forgotten session, Closed, the archive and the snapshot. `test-store.sh`'s stub
+  `herdr` gains `agents()`, `terminals()` and `readTextFile()` answering from `globalThis.__herdr`.
+- `test_nav.mjs`, 256 checks: `promptText` (one empty line, CRLF and repeated breaks, idempotent, two
+  pastes one blank line apart), every staged clipboard ending with it, the clipboard check taking the
+  text with or without its trailing breaks.
+- `test_no_keystrokes.py` 313, unchanged. `herdr-app check mods/ledgr` passes.

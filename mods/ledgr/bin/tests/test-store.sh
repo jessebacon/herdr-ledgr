@@ -12,7 +12,17 @@ cp "$MOD/store.js" "$MOD/config.js" "$MOD/branch.js" "$MOD/confluence.js" "$MOD/
 echo '{"type":"module"}' >"$TMP/package.json"
 mkdir -p "$TMP/node_modules/herdr"
 echo '{"name":"herdr","type":"module","main":"index.js"}' >"$TMP/node_modules/herdr/package.json"
-echo 'export const appHome = () => "/tmp/nowhere"; export const readTextFile = async () => null; export const layout = () => null; export const run = () => {}; export const shared = () => null;' >"$TMP/node_modules/herdr/index.js"
+# agents(), terminals() and readTextFile() answer from globalThis.__herdr (config.js terminalSpace, loadConfig).
+cat >"$TMP/node_modules/herdr/index.js" <<'JS'
+const H = () => globalThis.__herdr ?? {};
+export const appHome = () => "/tmp/nowhere";
+export const readTextFile = async (p) => H().files?.[p] ?? null;
+export const layout = () => null;
+export const run = () => {};
+export const shared = () => null;
+export const agents = () => H().agents ?? [];
+export const terminals = () => H().terminals ?? [];
+JS
 OUT=$("$NODE" tests/test_store.mjs "$TMP" 2>&1); rc=$?
 # Phase 3: the hooks' parser (lib/ledgr_landing.py) must read what confluence.js composes.
 if [ "$rc" = 0 ]; then
@@ -28,12 +38,20 @@ assert a and a["kind"] == "answers" and a["for_session"] == "aaaaaaaa-3333-0000-
 assert a["answers"] == {"A1": "a, as you recommended.", "A2": "after the reboot"}, a
 o = L.detect(open(f"{d}/msg-answer-one.txt").read())   # lead-in line, then one ask's sheet (Copy answer)
 assert o and o["kind"] == "answers" and o["handles"] == ["A2"] and o["answers"] == {"A2": "after the reboot"}, o
-# The hooks' config defaults agree with config.js on the panel's paste switch (ui.pasteIntoPrompt).
+# A staged message ends with one empty line (nav.js promptText): the parser reads it the same.
+assert L.detect(open(f"{d}/msg-confluence.txt").read() + "\n\n") == c
+assert L.detect(open(f"{d}/msg-answers.txt").read() + "\n\n") == a
+assert L.detect(open(f"{d}/msg-answer-one.txt").read() + "\n\n") == o
+# The hooks' config defaults agree with config.js on the panel's paste switch (ui.pasteIntoPrompt)
+# and on the spaces where ledgr is off (spaces.disabled, none by default).
 import ledgr_config as K
 assert K.DEFAULT_CONFIG["ui"]["pasteIntoPrompt"] is True, K.DEFAULT_CONFIG["ui"]
+assert K.DEFAULT_CONFIG["spaces"] == {"disabled": []}, K.DEFAULT_CONFIG.get("spaces")
+merged = K.deep_merge(K.defaults(), {"spaces": {"disabled": ["spA"]}})
+assert merged["spaces"]["disabled"] == ["spA"], merged["spaces"]
 PY
 fi
 # The store's summary line last (run-all.sh shows the last line), with the parser check on it.
-if [ "$rc" = 0 ]; then echo "${OUT%, 0 failure(s)}; landing parser reads both messages, 0 failure(s)"; else echo "$OUT"; echo "FAIL: store or landing parser"; fi
+if [ "$rc" = 0 ]; then echo "${OUT%, 0 failure(s)}; landing parser reads both messages (and with their blank line), 0 failure(s)"; else echo "$OUT"; echo "FAIL: store or landing parser"; fi
 rm -rf "$TMP"
 exit $rc

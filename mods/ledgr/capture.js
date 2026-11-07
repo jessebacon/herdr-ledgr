@@ -8,15 +8,20 @@
 // normalized) in this session's saved turn text (ledgr-data/turns/<sid>/*.md) or, while the
 // agent is working, in `hc read <terminal>` taken when the box opens. Otherwise the question is
 // stored without it, and a second field takes a quote pasted by hand (quoteSource "typed").
+//
+// Spaces (2026-11-07): over a pane in a space where ledgr is off (config.json spaces.disabled) the box
+// parks nothing and says "ledgr is off in this space"; Esc, Enter or a click closes it. The writer's
+// shared("ledgr.ui").off answers before config.json is read; the file decides. Sessions in such a
+// space are not offered as targets either.
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import * as fs from "fs/promises";
-import { props, closeOverlay, focused, agents, panes, run, theme, setShared, hc, readTextFile } from "herdr";
-import { LIMITS, agentLabel, dataDir } from "./config.js";
+import { props, closeOverlay, focused, agents, panes, run, theme, shared, setShared, hc, readTextFile } from "herdr";
+import { LIMITS, agentLabel, dataDir, loadConfig, spaceOff, terminalSpace } from "./config.js";
 import { readMap, writeEvent } from "./spool.js";
 import { passageHash, newId } from "./store.js";
 import { btwText, isLive } from "./nav.js";
-import { paneWords } from "./words.js";
+import { paneWords, OFF_HERE } from "./words.js";
 
 const squash = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
 // Fullscreen Claude renders **bold** and `code` without their marks, so a copied passage lacks
@@ -35,6 +40,9 @@ export class Capture {
     this.records = [];
     this.at = 0;
     this.terminal = p.terminal ?? focused()?.terminal ?? null;
+    // The space the box was opened over: the item's terminal's ("Ask about this"), else the focused one.
+    this.space = p.terminal ? terminalSpace(p.terminal) : (focused()?.space ?? terminalSpace(this.terminal));
+    this.off = spaceOff({ spaces: { disabled: shared("ledgr.ui")?.off } }, this.space);
     this.field = "q";
     this.input = InputState.new({ placeholder: "Park a question about what you are reading…", value: p.prefill ?? "" });
     if (p.prefill) this.input.set_selected_range({ start: p.prefill.length, end: p.prefill.length });
@@ -43,9 +51,10 @@ export class Capture {
     this.quoteInput = InputState.new({ placeholder: "Quote (optional): paste the passage by hand" });
     this.quoteInput.on("submit", (e, cx) => this.park(cx, Boolean(e?.secondary)));
     this.quoteInput.on("focus", () => { this.field = "quote"; });
-    this.input.focus();
-    cx.timer.after(600, () => { if (!this.done && this.field === "q") this.input.focus(); });
     this.handle = cx.focus_handle();
+    if (this.off) cx.timer.after(0, () => this.focusBox());
+    else this.input.focus();
+    cx.timer.after(600, () => { if (!this.done && !this.off && this.field === "q") this.input.focus(); });
 
     // The clipboard is the bridge for a selection (spec 5.4): fullscreen Claude copies on
     // mouse release. A candidate is 3-600 characters; it starts checked if it also differs
@@ -73,14 +82,24 @@ export class Capture {
 
     this.validation = null;
     cx.spawn(async (cx) => {
+      this.cfg = await loadConfig();
+      const was = this.off;
+      this.off = spaceOff(this.cfg, this.space);
+      if (this.off && !was) this.focusBox();
       const recs = await readMap();
-      this.records = this.targets(recs);
+      // A session in a space where ledgr is off is no target (its space as recorded, else live).
+      this.records = this.targets(recs).filter((r) => !spaceOff(this.cfg, (typeof r.space === "string" && r.space) || terminalSpace(r.terminal)));
       const want = p.session ? this.records.findIndex((r) => r.session_id === p.session) : this.records.findIndex((r) => r.terminal === this.terminal);
       this.at = Math.max(0, want);
       this.loaded = true;
-      this.validate(cx);
+      if (!this.off) this.validate(cx);
       cx.notify();
     });
+  }
+
+  // Off: the keyboard goes to the box itself (Esc, Enter close it); there is no field to type in.
+  focusBox() {
+    try { this.handle.focus(); } catch { /* a click closes it too */ }
   }
 
   // Sessions to park against: the focused terminal's first, then live agent sessions by recency.
@@ -157,6 +176,7 @@ export class Capture {
 
   park(cx, btw) {
     if (this.done || this.saving) return;
+    if (this.off) { this.close(); return; }   // ledgr is off in this space: nothing is parked
     const text = squash(this.input.value()).slice(0, LIMITS.text);
     const rec = this.target();
     this.saving = true;
@@ -214,15 +234,32 @@ export class Capture {
 
   showQuoteField() { return this.quoteState !== "ok" && this.quoteState !== "checking"; }
 
+  // ledgr is off in this space: one status line, nothing to type, nothing parked.
+  offBox(t, key) {
+    return v_flex().id("ledgr-capture").track_focus(this.handle).cursor_pointer()
+      .on_key_down((e, cx) => { if (e.key === "escape" || e.key === "enter") { this.close(); cx.stop_propagation(); } })
+      .on_click(() => this.close())
+      .size_full().min_h(0).p(16).gap(8).bg(t.popover).text_color(t.foreground).text_size(12.5)
+      .child(h_flex().gap(8).items_center()
+        .child(div().flex_none().text_size(14).font_semibold().child(this.parent ? "Ask about this" : "Park a question"))
+        .child(div().flex_1())
+        .child(div().flex_none().text_size(11).text_color(t.dim).child("Esc")))
+      .child(div().text_size(12.5).text_color(t.muted).child(OFF_HERE))
+      .child(div().text_size(11).text_color(t.dim).child("Nothing is parked. The ledgr panel's session menu (›) turns it on again for this space."))
+      .child(div().flex_1())
+      .child(h_flex().gap(12).items_center().child(key("Esc", "close")));
+  }
+
   render() {
     const t = theme();
+    const key = (k, what) => h_flex().gap(4).items_center()
+      .child(div().px(5).rounded(4).border_1().border_color(t.border).text_size(10.5).text_color(t.muted).child(k))
+      .child(div().text_size(11).text_color(t.dim).child(what));
+    if (this.off) return this.offBox(t, key);
     const rec = this.target();
     const label = rec
       ? `${rec.session_name || rec.repo || "unnamed"} · ${paneWords(rec.terminal, "no pane")} · turn ${rec.turn ?? 0}${this.working(rec) ? " (working)" : ""}`
       : this.loaded ? "no session" : "…";
-    const key = (k, what) => h_flex().gap(4).items_center()
-      .child(div().px(5).rounded(4).border_1().border_color(t.border).text_size(10.5).text_color(t.muted).child(k))
-      .child(div().text_size(11).text_color(t.dim).child(what));
     const ok = this.quoteState === "ok";
     const quoteRow = this.cand && (ok || this.quoteState === "checking")
       ? h_flex().id("cap-quote").gap(8).items_start().cursor_pointer()

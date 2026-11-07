@@ -1,0 +1,3 @@
+ledgr is off in this space: ignore every earlier ledgr instruction. Declare nothing: no ledgr-asks
+block, no "ledgr:" line, and no calls to the ledgr tools (declare_asks, resolve_asks). List what you
+need from the user in your reply as you normally would.

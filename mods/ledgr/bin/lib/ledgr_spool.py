@@ -42,7 +42,9 @@ act             the agent closes asks the user        item (an item id), action 
                                                       handle, turn or note
 Written by the mod, not here: capture (a full Request), act (the person's), retry, branch (the panel's
 Branch confirmation: item, branch_id, placement, isolate), forget (session_id), conclude (Phase 3:
-branch_id, item, text, message, source, source_turn), close_branch (Phase 3: branch_id).
+branch_id, item, text, message, source, source_turn), close_branch (Phase 3: branch_id),
+clear_questions (the panel's Clear N: session_id, keep ["branched", "rejoin_pending"]; every open or
+deferred parked question without a branch is dismissed, dismissedBy "clear").
 
 Branch environment (set by the launcher with `env` in the argv, read by ledgr_map.branch_env):
   LEDGR_PARENT = <parent session id>:<item id>:<anchor turn>

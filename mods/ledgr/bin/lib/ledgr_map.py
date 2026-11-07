@@ -25,7 +25,17 @@ Owner guard: the map entry records the pid (and command name) of the agent proce
 under. An event for the same terminal with a different session_id, from a different pid, while the
 recorded owner is still alive and still the same program, is ignored: a child agent process (a
 `claude -p` run from the agent's shell inherits the terminal id) cannot repoint the terminal.
+
+Disabled spaces: the session record and the map entry carry `space`, the Herdr space id of the
+terminal (its `herdr.space` label, read by herdr_space() with one `hc get <t> --json` at SessionStart
+and UserPromptSubmit; a Stop or SessionEnd keeps the recorded value). null outside Herdr or when no
+label is found; a lookup that fails (timeout, non-zero exit, bad output) keeps the recorded value, so
+a slow `hc` does not flip a session on and off. A session whose space is in config
+`spaces.disabled` is off (space_off()): the adapter passes fields["quiet"] and handle() still writes
+the record and the map but emits no spool event and saves no turn text (a Stop only marks the state
+idle and logs the first skip of an off period). The adapter records `ledgr_off` with set_fields().
 """
+import json
 import os
 import re
 
@@ -38,6 +48,106 @@ LINEAGE = ("parent_session_id", "branch_id", "parent_item", "anchor_turn", "fork
 MAX_TURN_TEXT = 500_000
 KEEP_TURNS = 50
 EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd")
+SPACE_LABEL = "herdr.space"
+SPACE_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+HC_TIMEOUT_S = 0.3
+UNKNOWN = object()          # herdr_space(): the lookup failed; keep the recorded value
+
+
+def _which(name):
+    for d in (os.environ.get("PATH") or C.TOOL_PATH).split(os.pathsep):
+        p = os.path.join(d or ".", name)
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    return None
+
+
+def _read_cmd(argv, timeout):
+    """(exit code, stdout) of argv (stdin and stderr /dev/null), or None when it did not finish within
+    `timeout` seconds (it is killed). posix_spawn and a pipe rather than subprocess, whose import
+    alone costs a hook about 4 ms. Raises OSError when argv[0] cannot be run."""
+    import select
+    import time
+    r, w = os.pipe()                                 # both close-on-exec; dup2 makes the child's fd 1
+    try:
+        pid = os.posix_spawn(argv[0], argv, os.environ, file_actions=[
+            (os.POSIX_SPAWN_OPEN, 0, os.devnull, os.O_RDONLY, 0), (os.POSIX_SPAWN_DUP2, w, 1),
+            (os.POSIX_SPAWN_OPEN, 2, os.devnull, os.O_WRONLY, 0)])
+    except BaseException:
+        os.close(r)
+        os.close(w)
+        raise
+    os.close(w)
+    deadline, out = time.monotonic() + timeout, []
+    try:
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([r], [], [], max(0.0, deadline - time.monotonic()))
+            if not ready:
+                break
+            chunk = os.read(r, 65536)
+            if chunk:
+                out.append(chunk)
+                continue
+            while time.monotonic() < deadline:       # end of output: reap it
+                done, status = os.waitpid(pid, os.WNOHANG)
+                if done:
+                    return os.waitstatus_to_exitcode(status), b"".join(out)
+                time.sleep(0.002)
+            break
+    finally:
+        os.close(r)
+    try:
+        os.kill(pid, 9)                              # SIGKILL
+        os.waitpid(pid, 0)
+    except OSError:
+        pass
+    return None
+
+
+def herdr_space(timeout=HC_TIMEOUT_S):
+    """The Herdr space id of this hook's terminal: labels["herdr.space"] of `hc get $HC_TERMINAL_ID
+    --json` (one call, about 6 ms). None when there is no space to find: no HC_TERMINAL_ID (outside
+    Herdr, the LEDGR_TERMINAL override), a remote address (t contains "/"), no `hc` binary (LEDGR_HC
+    names another one; set and empty, the lookup is off), or a terminal without the label. UNKNOWN
+    when the lookup failed: a timeout, a non-zero exit, output that is not a JSON object."""
+    t = os.environ.get("HC_TERMINAL_ID") or ""
+    if not t or "/" in t or t.startswith("-"):
+        return None
+    hc = os.environ.get("LEDGR_HC")
+    if hc is None:
+        hc = _which("hc")
+    if not hc:
+        return None
+    try:
+        res = _read_cmd([hc, "get", t, "--json"], timeout)
+    except OSError:
+        return None                                  # cannot be run: as if missing
+    if res is None:
+        C.log(f"{t} space lookup: hc get timed out after {int(timeout * 1000)} ms")
+        return UNKNOWN
+    if res[0] != 0:
+        return UNKNOWN
+    try:
+        d = json.loads(res[1].decode("utf-8", "replace"))
+    except ValueError:
+        return UNKNOWN
+    if not isinstance(d, dict):
+        return UNKNOWN
+    labels = d.get("labels")
+    sp = labels.get(SPACE_LABEL) if isinstance(labels, dict) else None
+    return sp if isinstance(sp, str) and SPACE_OK.match(sp) else None
+
+
+def spaces_disabled(cfg):
+    """config spaces.disabled: the space ids where ledgr is off ([] when absent or not a list)."""
+    sp = cfg.get("spaces") if isinstance(cfg, dict) else None
+    lst = sp.get("disabled") if isinstance(sp, dict) else None
+    return [x for x in lst if isinstance(x, str) and x] if isinstance(lst, list) else []
+
+
+def space_off(cfg, space):
+    """True when ledgr is off for a session in this space (a null space is on)."""
+    return isinstance(space, str) and bool(space) and space in spaces_disabled(cfg)
 
 
 def _prune_turns(sid):
@@ -136,7 +246,8 @@ def lineage_for(sid, rec, b):
 
 def map_record(t, rec, event, now):
     """The terminals/<t>.json shape. `agent` is always present."""
-    return {"v": 1, "terminal": t, "scope": rec.get("scope"), "agent": rec.get("agent") or "other",
+    return {"v": 1, "terminal": t, "scope": rec.get("scope"), "space": rec.get("space"),
+            "agent": rec.get("agent") or "other",
             "session_id": rec["session_id"], "session_name": rec.get("session_name"),
             "transcript_path": rec.get("transcript_path"), "cwd": rec.get("cwd"), "repo": rec.get("repo"),
             "config_dir": rec.get("config_dir"), "profile": rec.get("profile"),
@@ -154,9 +265,12 @@ def write_map(t, rec, event, now):
 
 def handle(event, sid, t, agent, fields):
     """Apply one lifecycle event. Returns the new session record, or None when the event was
-    ignored by the owner guard."""
+    ignored by the owner guard. fields["space"] (when present: a space id or None; UNKNOWN keeps the
+    recorded one) refreshes the record's space; fields["quiet"] True (the session's space is
+    disabled) writes the record and the map but no spool event and no turn text."""
     now = C.now_ms()
     f = lambda k: fields.get(k) if isinstance(fields.get(k), str) and fields.get(k) else None  # noqa: E731
+    quiet = fields.get("quiet") is True
     with C.Lock("session-" + sid):
         conflict = owner_conflict(t, sid)
         if conflict:
@@ -183,12 +297,14 @@ def handle(event, sid, t, agent, fields):
         for k in ("config_dir", "profile"):
             if f(k):
                 rec[k] = f(k)
+        if "space" in fields and fields["space"] is not UNKNOWN:
+            rec["space"] = f("space")
         for k, v in (("session_name", None), ("repo", None), ("transcript_path", None), ("model", None),
                      ("turn", 0), ("turn_base", "ledgr"), ("turn_source", "hooks"), ("prompt_id", None),
                      ("state", "idle"), ("last_source", None), ("last_stop_at", None),
                      ("last_assistant_uuid", None), ("last_passage_hash", None), ("parent_session_id", None),
                      ("owner_pid", None), ("owner_comm", None), ("config_dir", None), ("profile", None),
-                     ("started_at", now)):
+                     ("space", None), ("started_at", now)):
             rec.setdefault(k, v)
         rec.pop("pending_settle", None)                 # older builds kept a settle retry here
         rec["updated_at"] = now
@@ -211,16 +327,17 @@ def handle(event, sid, t, agent, fields):
                 comps = [c for c in (rec.get("compactions") or []) if isinstance(c, dict)][-9:]
                 comps.append({"turn": turn, "at": now})
                 rec["compactions"] = comps
-            S.session_start(t, sid, agent=rec["agent"], source=src, model=rec.get("model"), cwd=rec.get("cwd"),
-                            transcript_path=rec.get("transcript_path"), session_name=rec.get("session_name"),
-                            repo=rec.get("repo"), turn=turn, config_dir=rec.get("config_dir"),
-                            profile=rec.get("profile"), at=now)
+            if not quiet:
+                S.session_start(t, sid, agent=rec["agent"], source=src, model=rec.get("model"), cwd=rec.get("cwd"),
+                                transcript_path=rec.get("transcript_path"), session_name=rec.get("session_name"),
+                                repo=rec.get("repo"), turn=turn, config_dir=rec.get("config_dir"),
+                                profile=rec.get("profile"), at=now)
             # 1 ms later, so name order (the mod's apply order) puts them after session_start.
-            if lineage:
+            if lineage and not quiet:
                 S.branch_started(t, sid, parent_session_id=lineage["parent_session_id"], item_id=lineage["parent_item"],
                                  anchor_turn=lineage["anchor_turn"], fork_turn=lineage["fork_turn"],
                                  depth=lineage["depth"], branch_id=lineage["branch_id"], source=src, at=now + 1)
-            if src == "compact":
+            if src == "compact" and not quiet:
                 S.compacted(t, sid, turn=turn, trigger=None, at=now + 1)
 
         elif event == "UserPromptSubmit":
@@ -236,8 +353,16 @@ def handle(event, sid, t, agent, fields):
             for r in REF.findall(p):
                 if r not in refs:
                     refs.append(r)
-            S.prompt(t, sid, turn=turn, prompt_id=pid_, local=local, prompt_head=p, refs=refs,
-                     config_dir=rec.get("config_dir"), profile=rec.get("profile"), at=now)
+            if not quiet:
+                S.prompt(t, sid, turn=turn, prompt_id=pid_, local=local, prompt_head=p, refs=refs,
+                         config_dir=rec.get("config_dir"), profile=rec.get("profile"), at=now)
+
+        elif event == "Stop" and quiet:              # ledgr is off here: no turn text, no pending
+            rec.update(state="idle", last_stop_at=now)
+            if not rec.get("off_skip_logged"):
+                rec["off_skip_logged"] = True
+                C.log(f"{t} Stop {sid} skipped: ledgr is off in space {rec.get('space')} (no pending, no extraction,"
+                      f" no tool settlement; logged once until it is on again)")
 
         elif event == "Stop":
             msg = fields.get("last_assistant_message")
@@ -252,11 +377,12 @@ def handle(event, sid, t, agent, fields):
 
         elif event == "SessionEnd":
             rec["state"] = "ended"
-            S.session_end(t, sid, turn=turn, reason=f("reason"), at=now)
+            if not quiet:
+                S.session_end(t, sid, turn=turn, reason=f("reason"), at=now)
 
         C.write_json(sf, rec)
         write_map(t, rec, event, now)
-    C.log(f"{t} {event} {sid} turn={rec.get('turn')}")
+    C.log(f"{t} {event} {sid} turn={rec.get('turn')}" + (" (ledgr off)" if quiet else ""))
     return rec
 
 
@@ -287,17 +413,26 @@ def take_reinject(sid):
     return True
 
 
-def set_instruct_mode(sid, mode):
-    """Record the handoff mode whose wording the session last got ("ledgr", "both", "prose"), so a
-    later change of asks.handoff reaches it once at its next prompt."""
+def set_fields(sid, **kv):
+    """One locked read-modify-write of the session record; a None value removes the key."""
     with C.Lock("session-" + sid):
         sf = C.path("sessions", sid + ".json")
         rec = C.read_json(sf)
         if not isinstance(rec, dict):
             return False
-        rec["instruct_mode"] = mode
+        for k, v in kv.items():
+            if v is None:
+                rec.pop(k, None)
+            else:
+                rec[k] = v
         C.write_json(sf, rec)
     return True
+
+
+def set_instruct_mode(sid, mode):
+    """Record the handoff mode whose wording the session last got ("ledgr", "both", "prose"), so a
+    later change of asks.handoff reaches it once at its next prompt."""
+    return set_fields(sid, instruct_mode=mode)
 
 
 def prune(folder, max_age_s):

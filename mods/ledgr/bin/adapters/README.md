@@ -35,7 +35,15 @@ Without `instruction` but with `turn_text`, the extractor is the only channel.
 - The block grammar and the levels: `lib/parse_block.py`, `lib/ledgr_asks.py` (blocking, needed,
   optional; `extract.threshold` applies to declared and extracted asks alike).
 - The extractor and its providers: `lib/ledgr_extract.py`, `providers/`.
-- The landing markers: `lib/ledgr_landing.py` (`ledgr confluence …`, `ledgr answers …`).
+- The landing markers: `lib/ledgr_landing.py` (`ledgr confluence …`, `ledgr answers …`); `detect_all`
+  finds every message in a prompt (two answer sheets pasted together land as two events).
+- Disabled spaces (config `spaces.disabled`): `lib/ledgr_map.py` `herdr_space()` reads the terminal's
+  `herdr.space` label with one `hc get $HC_TERMINAL_ID --json` (300 ms limit; a failed lookup keeps the
+  recorded space) and `space_off()` compares it. An adapter passes `fields["space"]` at its start and
+  prompt events and `fields["quiet"]` when the session is off, so `handle()` writes the map (with
+  `space`) but no spool event; it prints `lib/asks-instruction-space-off.txt` once on an on-to-off
+  change, its mode's wording on off-to-on (recorded as `ledgr_off` with `set_fields()`), skips landing
+  while off, and starts no extraction for a turn that began off or whose space is off now.
 - The store, the writer, the panel, the chip.
 
 ## Sketches (not built)

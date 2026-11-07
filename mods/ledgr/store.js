@@ -34,6 +34,17 @@
 // again: settled at that turn's asks event, settleAnswered); none: the person closed it. The chip's
 // blocking state no longer yields to working: an open blocking ask is "blocking" while the agent works
 // too (`w: 1` marks a working session), so a prompt or a permission wait never hides it.
+//
+// Spaces (2026-11-07): config.json spaces.disabled lists the Herdr spaces where ledgr is off. The
+// hooks record a terminal's space as `space` (identity map, session_start and prompt events, when
+// they send it); the store keeps it on the session and on the terminal mapping. chips() leaves out
+// every terminal whose space is off (`spacesOff`, set by the writer): the recorded space, else the
+// live one the caller passes (config.js terminalSpace). Items are kept, only hidden.
+//
+// Clear all questions (2026-11-07): {type: "clear_questions", session_id, keep: ["branched",
+// "rejoin_pending"]} (the panel's Clear N) dismisses every open or deferred parked question of the
+// session that has no branch, with `dismissedBy: "clear"` and `clearedAt`; branched and rejoin_pending
+// questions always stay. Reopen works per item (setStatus drops both marks).
 import { createHash, randomUUID } from "crypto";
 import { LIMITS, agentLabel } from "./config.js";
 import { DEFAULT_MAX_DEPTH, manifest, preamble, branchName, branchLabel, depthOf } from "./branch.js";
@@ -44,7 +55,7 @@ const OPEN_STATES = new Set(["open", "answered", "deferred", "rejoin_pending"]);
 const AGENT = "agent_to_human", HUMAN = "human_to_agent";
 const ASK_KINDS = new Set(["decide", "confirm", "do", "provide", "review"]);
 const Q_KINDS = new Set(["question", "note", "bookmark"]);
-const OWN_EVENTS = new Set(["act", "retry", "branch", "forget", "conclude", "close_branch", "resume"]);
+const OWN_EVENTS = new Set(["act", "retry", "branch", "forget", "conclude", "close_branch", "resume", "clear_questions"]);
 
 export const isAgentAsk = (it) => it?.direction === AGENT;
 export const isHuman = (it) => it?.direction === HUMAN;
@@ -101,6 +112,10 @@ export function passageHash(passage) {
 export const newId = (prefix) => `${prefix}_${randomUUID()}`;
 const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
 const str = (v) => (typeof v === "string" && v ? v : null);
+// A record or event that says which space its terminal is in (`space`: an id, or null for unknown).
+const hasSpace = (r) => Boolean(r) && typeof r === "object" && Object.prototype.hasOwnProperty.call(r, "space");
+// A terminal mapping's `space` field: the event's (or record's) when it carries one, else the old one's.
+const spaceField = (r, cur) => (hasSpace(r) ? { space: str(r.space) } : cur?.space !== undefined ? { space: cur.space } : {});
 
 export class Store {
   constructor(data) {
@@ -112,6 +127,8 @@ export class Store {
     this.maxDepth = DEFAULT_MAX_DEPTH;
     // extract.threshold from config.json (thresholdOf); the writer sets it and re-reads it on change.
     this.threshold = DEFAULT_THRESHOLD;
+    // config.json spaces.disabled (config.js disabledSpaces); the writer sets it, chips() reads it.
+    this.spacesOff = new Set();
   }
 
   // An open item that counts: on the chip, for "surfaced", in the lanes' "N open" (not a suggestion).
@@ -142,6 +159,37 @@ export class Store {
   branchesOf(sid) { return Object.values(this.d.branches).filter((b) => b.parentSessionId === sid).sort((a, b) => num(b.createdAt) - num(a.createdAt)); }
   branchesFor(itemId) { return Object.values(this.d.branches).filter((b) => b.requestId === itemId).sort((a, b) => num(b.createdAt) - num(a.createdAt)); }
   branchOfSession(sid) { return Object.values(this.d.branches).find((b) => b.sessionId === sid) ?? null; }
+  // A parked question with a branch: a branch record that started or is starting (not refused, not
+  // failed), or a confluence staged. Clear all questions never clears one.
+  isBranched(it) {
+    return Boolean(it?.rejoin) || it?.status === "rejoin_pending"
+      || this.branchesFor(it?.id).some((b) => b.status !== "refused" && b.status !== "failed");
+  }
+  // The parked questions Clear all would dismiss (open or deferred, no branch) and the ones it keeps
+  // (open, deferred or rejoin_pending, with a branch): { clear: [items], kept: [items] }.
+  clearable(sid) {
+    const clear = [], kept = [];
+    for (const it of this.itemsOf(sid)) {
+      if (!isHuman(it)) continue;
+      const active = it.status === "open" || it.status === "deferred";
+      if (this.isBranched(it)) { if (active || it.status === "rejoin_pending") kept.push(it); }
+      else if (active) clear.push(it);
+    }
+    return { clear, kept };
+  }
+  // The space terminal t (session s) is in: what the hooks recorded (the terminal's, else the
+  // session's), else what `live(t)` says (config.js terminalSpace); null when unknown.
+  spaceOf(t, s, live = null) {
+    const rec = str(this.d.terminals[t]?.space) ?? str(s?.space);
+    if (rec) return rec;
+    try { return t && live ? str(live(t)) : null; } catch { return null; }
+  }
+  // Is ledgr off for terminal t (session s): its space is in spaces.disabled.
+  isOff(t, s, live = null) {
+    if (!this.spacesOff.size) return false;
+    const sp = this.spaceOf(t, s, live);
+    return Boolean(sp) && this.spacesOff.has(sp);
+  }
   isForgotten(sid) { return Boolean(sid && this.d.forgotten[sid]); }
   sessionForTerminal(t) { return this.d.terminals[t]?.sessionId ?? null; }
 
@@ -169,6 +217,7 @@ export class Store {
     s.repo = rec.repo ?? s.repo;
     s.transcriptPath = rec.transcript_path ?? s.transcriptPath;
     this.setProfile(s, rec);
+    this.setSpace(s, rec);
     if (num(rec.turn) > s.turn) s.turn = num(rec.turn);
     if (rec.parent_session_id && !s.parentSessionId) this.setLineage(s, { parent_session_id: rec.parent_session_id, branch_id: rec.branch_id,
       item_id: rec.parent_item, anchor_turn: rec.anchor_turn, fork_turn: rec.fork_turn, depth: rec.depth });
@@ -176,9 +225,23 @@ export class Store {
     s.updatedAt = Math.max(num(s.updatedAt), num(rec.updated_at));
     const cur = this.d.terminals[rec.terminal];
     if (!cur || num(rec.updated_at) >= num(cur.updatedAt)) {
-      this.d.terminals[rec.terminal] = { sessionId: rec.session_id, agent: rec.agent ?? s.agent, updatedAt: num(rec.updated_at) };
+      this.d.terminals[rec.terminal] = { sessionId: rec.session_id, agent: rec.agent ?? s.agent, updatedAt: num(rec.updated_at),
+        ...spaceField(rec, cur) };
     }
     return true;
+  }
+
+  // An identity-map record changed on disk (the writer watches ledgr-data/terminals/): only its space
+  // is taken, onto the terminal's mapping and its session. Returns true when something changed.
+  noteSpace(rec) {
+    if (!rec?.terminal || !hasSpace(rec)) return false;
+    const sp = str(rec.space);
+    let changed = false;
+    const m = this.d.terminals[rec.terminal];
+    if (m && (m.space ?? null) !== sp) { m.space = sp; changed = true; }
+    const s = rec.session_id && !this.isForgotten(rec.session_id) ? this.d.sessions[rec.session_id] : null;
+    if (s && (s.space ?? null) !== sp) { s.space = sp; changed = true; }
+    return changed;
   }
 
   // The agent's config folder and profile, when the hooks report them (session_start, prompt and the
@@ -187,6 +250,12 @@ export class Store {
   setProfile(s, r) {
     if (typeof r?.config_dir === "string" && r.config_dir) s.configDir = r.config_dir;
     if (typeof r?.profile === "string" && r.profile) s.profile = r.profile;
+  }
+
+  // The Herdr space the hooks recorded for the session's terminal (`space`: an id, or null when they
+  // could not tell). An event or record without the key leaves it as it was.
+  setSpace(s, r) {
+    if (hasSpace(r)) s.space = str(r.space);
   }
 
   // ── events (spec 2.5, 3.3) ───────────────────────────────────────────
@@ -213,10 +282,11 @@ export class Store {
       if (ev.terminal) {
         s.terminal = ev.terminal;
         const cur = this.d.terminals[ev.terminal];
-        if (!cur || at >= num(cur.updatedAt)) this.d.terminals[ev.terminal] = { sessionId: sid, agent: ev.agent ?? s.agent, updatedAt: at };
+        if (!cur || at >= num(cur.updatedAt)) this.d.terminals[ev.terminal] = { sessionId: sid, agent: ev.agent ?? s.agent, updatedAt: at, ...spaceField(ev, cur) };
       }
       if (ev.agent) s.agent = ev.agent;
       this.setProfile(s, ev);
+      this.setSpace(s, ev);
       if (!s.sessionName && ev.session_name) s.sessionName = ev.session_name;
       if (!s.cwd && ev.cwd) s.cwd = ev.cwd;
       if (String(s.sessionId).startsWith("herdr:")) s.turnSource = "herdr-status";
@@ -462,6 +532,21 @@ export class Store {
       return;
     }
     this.act(it.id, ev.action, ev.arg, at);
+  }
+
+  // {type: "clear_questions", session_id, keep: ["branched", "rejoin_pending"]}: the panel's Clear N
+  // (two clicks). Every open or deferred parked question of the session without a branch becomes
+  // dismissed, `dismissedBy: "clear"`, `clearedAt`; the Closed list labels it "cleared" and Reopen
+  // brings it back. Questions with a branch and rejoin_pending ones are never cleared, whatever `keep`
+  // says. The counts go on the session as `lastClear`.
+  on_clear_questions(_ev, s, at) {
+    const { clear, kept } = this.clearable(s.sessionId);
+    for (const it of clear) {
+      this.setStatus(it, "dismissed", at);
+      it.dismissedBy = "clear";
+      it.clearedAt = at;
+    }
+    s.lastClear = { at, cleared: clear.length, kept: kept.length };
   }
 
   // {type: "retry", session_id, turn, terminal}: re-run extraction for a turn.
@@ -768,6 +853,7 @@ export class Store {
     it.status = status;
     it.updatedAt = at;
     delete it.resolvedBy; delete it.resolvedNote;   // who closed it (and why): set after by the caller that closes it on someone's behalf
+    delete it.dismissedBy; delete it.clearedAt;     // Clear all's marks (on_clear_questions sets them after)
     const s = this.d.sessions[it.anchor?.sessionId];
     if (status === "resolved" || status === "dismissed") { it.resolvedAt = at; it.resolvedTurn = s?.turn ?? it.resolvedTurn; }
     else { delete it.resolvedAt; delete it.resolvedTurn; }
@@ -844,12 +930,15 @@ export class Store {
   // turn), else "surfaced" or "seen". `w: 1`: the agent is working (the chip quiets its pulse).
   // `p`: the turn whose asks are being extracted (a pending event under 30 s old). `o`: how the
   // counted asks arrived when they all arrived one way ("tool": declare_asks, "extract_block",
-  // "extract_model"), for the chip's tooltip.
-  chips(now = Date.now()) {
+  // "extract_model"), for the chip's tooltip. A terminal in a space where ledgr is off (spaces.disabled)
+  // has no chip; `live(t)` names a terminal's space when the hooks recorded none (the writer passes
+  // config.js terminalSpace).
+  chips(now = Date.now(), live = null) {
     const out = {};
     for (const [t, m] of Object.entries(this.d.terminals)) {
       const s = this.d.sessions[m.sessionId];
       if (!s || s.state === "ended") continue;
+      if (this.isOff(t, s, live)) continue;
       const mine = this.itemsOf(s.sessionId).filter((it) => this.counts(it));
       const q = mine.filter(isHuman).length, a = mine.filter(isAgentAsk).length, b = mine.filter(isBlocking).length;
       const p = this.pendingTurn(s.sessionId, now);

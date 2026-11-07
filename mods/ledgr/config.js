@@ -1,7 +1,7 @@
 // ledgr settings: paths under <Herdr home>/ledgr-data, the defaults of ledgr-data/config.json, and
 // where the panel sits in the person's layout. The mod only reads config.json; the hooks and
 // install.sh create it.
-import { appHome, readTextFile, layout, run, shared } from "herdr";
+import { appHome, readTextFile, layout, run, shared, agents, terminals } from "herdr";
 
 // true: every copy draws the fixture store (fixtures.js) instead of live data.
 // Used for `herdr-app check` with populated lanes. Keep false in normal use.
@@ -38,6 +38,12 @@ export const DEFAULTS = {
   // somewhere else): `column` is shown and hidden, `stack` (null: none) selects `child`. The default
   // is the right-hand panel stack of Herdr's `main` layout and its clones.
   ui: { foldAsksWhileWorking: false, animations: true, pasteIntoPrompt: true, panel: { column: "panel", stack: "panel-body", child: "ledgr" } },
+  // The spaces where ledgr is off (Herdr space ids, `sp` + 32 hex; names change, ids do not). A
+  // session in one of them gets no instruction and no extraction (the hooks), no chip (the writer),
+  // no ⌘J (capture.js), and the panel shows "ledgr is off in this space" instead of its lanes; its
+  // items are kept and come back when the space is on again. The panel's session menu writes it
+  // (panel.js setSpaceOff). An array: a config.json value replaces the default whole.
+  spaces: { disabled: [] },
   retention_days: 14,
 };
 
@@ -95,6 +101,35 @@ export const HANDOFF_WORDS = {
   both: "closing list: both (the agent lists its items in the reply and declares them here too)",
   prose: "closing list: prose (no instruction; the extractor finds the asks in each reply)",
 };
+
+// ── spaces where ledgr is off (spaces.disabled) ─────────────────────────
+// The ids in config.json spaces.disabled: strings only, each once.
+export function disabledSpaces(cfg) {
+  const v = cfg?.spaces?.disabled;
+  return Array.isArray(v) ? [...new Set(v.filter((x) => typeof x === "string" && x))] : [];
+}
+
+// Is ledgr off in this space? An unknown space (null) never is.
+export const spaceOff = (cfg, space) => Boolean(space) && disabledSpaces(cfg).includes(space);
+
+// spaces.disabled with `space` turned off (off true) or back on: a new array, the others in order.
+export function withSpaceOff(cfg, space, off) {
+  const cur = disabledSpaces(cfg).filter((x) => x !== space);
+  return off && space ? [...cur, space] : cur;
+}
+
+// The space a terminal is in, live from Herdr: its agent's `space`, else its `herdr.space` label
+// (every terminal Herdr starts carries one); null when unknown.
+export function terminalSpace(t) {
+  if (!t) return null;
+  try {
+    const a = agents().find((x) => x.address === t);
+    if (typeof a?.space === "string" && a.space) return a.space;
+    const k = terminals().find((x) => x.address === t);
+    const l = k?.labels?.["herdr.space"];
+    return typeof l === "string" && l ? l : null;
+  } catch { return null; }
+}
 
 // Agent kind -> the short label drawn on each session group ("claude", "codex"). With the session's
 // config profile (the hooks record it: a Claude Code started with CLAUDE_CONFIG_DIR=~/.claude-work is

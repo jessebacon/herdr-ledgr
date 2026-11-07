@@ -21,7 +21,9 @@
 //   - Resume session: for a session whose terminal is gone, `claude --resume <sid>` in a new pane
 //     (resumeSession, branch.js resumeArgs); the session's SessionStart hook re-maps it.
 //   - re-reads ledgr-data/config.json whenever it changes (watchConfig): extract.threshold (which
-//     asks count on the chips) and branch.maxDepth apply without a restart.
+//     asks count on the chips), spaces.disabled (no chip for a terminal in a space where ledgr is off:
+//     its space as the hooks recorded it, else config.js terminalSpace) and branch.maxDepth apply
+//     without a restart; an identity-map record that changes (ledgr-data/terminals/) brings its space.
 //
 // SOURCE OF TRUTH: mods/ledgr/{config,store,spool,writer,branch,confluence}.js (ENGINE_FILES). A
 // host in another mod (an overlay's tab bar) imports byte-identical copies from its own
@@ -31,7 +33,7 @@
 import * as fs from "fs/promises";
 import { randomUUID } from "crypto";
 import { shared, setShared, readTextFile, writeTextFile, watchFolder, agents, terminals, panes, run, exec, hc, openOverlay, appHome, home } from "herdr";
-import { DEFAULTS, loadConfig, dataDir, spoolDir, turnPath, storePath, binDir, agentLabel, panelPlace, panelShown, showPanel, liveHome } from "./config.js";
+import { DEFAULTS, loadConfig, dataDir, spoolDir, turnPath, storePath, binDir, agentLabel, panelPlace, panelShown, showPanel, liveHome, disabledSpaces, terminalSpace } from "./config.js";
 import { Store, isHuman, thresholdOf } from "./store.js";
 import { SpoolReader, readMap, writeAtomic } from "./spool.js";
 import { maxDepthOf, hcRunArgs, claudeArgv, resumeArgs, transcriptPathOf } from "./branch.js";
@@ -119,25 +121,33 @@ export class Writer {
     cx.notify();
   }
 
-  // The config values the store applies itself (branch.maxDepth, extract.threshold), and the ones
-  // the chips and the host need: shared("ledgr.ui") = {animations, panel} (a pane-header chip
-  // cannot read ledgr-data itself).
+  // The config values the store applies itself (branch.maxDepth, extract.threshold, spaces.disabled),
+  // and the ones the chips, the host and the capture box need: shared("ledgr.ui") = {animations,
+  // panel, off} (a pane-header chip cannot read ledgr-data itself; `off` is spaces.disabled, read by
+  // the capture box before it has read config.json).
   applyConfig(cfg) {
     this.cfg = cfg;
     this.live.maxDepth = maxDepthOf(cfg);
     this.live.threshold = thresholdOf(cfg);
-    const ui = { animations: cfg?.ui?.animations !== false, panel: panelPlace(cfg) };
+    const off = disabledSpaces(cfg);
+    this.live.spacesOff = new Set(off);
+    const ui = { animations: cfg?.ui?.animations !== false, panel: panelPlace(cfg), off };
     if (this.holds() && JSON.stringify(shared("ledgr.ui") ?? null) !== JSON.stringify(ui)) setShared("ledgr.ui", ui);
   }
 
-  // config.json edited (by hand, or by the hooks creating it): read it again and republish the
-  // chips, so a new extract.threshold counts at once. Wakes on every change under ledgr-data/
-  // (the watch is recursive), reads only when config.json is among them.
+  // What in the config changes the chips: the threshold and the spaces where ledgr is off.
+  chipKey() { return `${this.live.threshold}|${[...this.live.spacesOff].sort().join(",")}`; }
+
+  // config.json edited (by hand, by the panel's menus, or by the hooks creating it): read it again and
+  // republish the chips, so a new extract.threshold or spaces.disabled applies at once. An identity-map
+  // record rewritten by the hooks (ledgr-data/terminals/<t>.json): its space (noteSpace). Wakes on
+  // every change under ledgr-data/ (the watch is recursive), reads only those files.
   watchConfig(cx) {
     if (this.watchingConfig) return;
     this.watchingConfig = true;
     cx.spawn(async (cx) => {
       const root = dataDir().replace(/\/+$/, "");
+      const mapFile = /\/terminals\/[^/.][^/]*\.json$/;
       let quick = 0, lastAt = 0;
       try {
         while (!this.retired) {
@@ -147,14 +157,38 @@ export class Writer {
           lastAt = now;
           if (quick > 20) { quick = 0; await cx.sleep(1000); }
           if (!this.amWriter()) continue;
-          if (!paths.some((p) => String(p).replace(/\/+$/, "") === root || String(p).split("/").pop() === "config.json")) continue;
-          const before = this.live.threshold;
-          this.applyConfig(await loadConfig());
-          if (this.live.threshold !== before) { this.publish(); cx.notify(); }
+          const all = paths.some((p) => String(p).replace(/\/+$/, "") === root);
+          const cfgHit = all || paths.some((p) => String(p).split("/").pop() === "config.json");
+          const maps = all ? null : paths.map(String).filter((p) => mapFile.test(p));
+          if (!cfgHit && !all && !maps.length) continue;
+          let republish = false;
+          if (cfgHit) {
+            const before = this.chipKey();
+            this.applyConfig(await loadConfig());
+            if (this.chipKey() !== before) republish = true;
+          }
+          if ((all || maps.length) && (await this.refreshSpaces(maps)) && this.amWriter()) { this.commit(cx); continue; }
+          if (republish) { this.publish(); cx.notify(); }
         }
       } catch (e) { this.note = `config watch stopped: ${String(e?.message ?? e)}`; }
       finally { this.watchingConfig = false; }
     });
+  }
+
+  // The space of each changed identity-map record (null: all of them). True when the store changed.
+  async refreshSpaces(paths) {
+    let recs;
+    if (!paths) recs = await readMap();
+    else {
+      recs = [];
+      for (const p of paths) {
+        const text = await readTextFile(p).catch(() => null);
+        try { const r = JSON.parse(text); if (r?.terminal && r?.session_id) recs.push(r); } catch { /* in progress */ }
+      }
+    }
+    let changed = false;
+    for (const r of recs) if (this.live.noteSpace(r)) changed = true;
+    return changed;
   }
 
   // Writes store.json if it changed: writeTextFile replaces an existing file atomically and only
@@ -235,7 +269,8 @@ export class Writer {
       decisions.push(...(r.decisions ?? []));
       closes.push(...(r.close ?? []));
       resumes.push(...(r.resume ?? []));
-      if (ev?.type === "asks" && Array.isArray(ev.asks) && ev.asks.length) newAsks = true;
+      // A session in a space where ledgr is off does not open the panel (its asks are kept, hidden).
+      if (ev?.type === "asks" && Array.isArray(ev.asks) && ev.asks.length && !this.offEvent(ev)) newAsks = true;
       if (ev?.type === "pending") pending = true;
     }
     for (const s of settles) await this.reanchor(s);
@@ -257,6 +292,13 @@ export class Writer {
   }
 
   panelShown() { return panelShown(panelPlace(this.cfg)); }
+
+  // An event of a session whose terminal is in a space where ledgr is off.
+  offEvent(ev) {
+    const s = this.live.d.sessions[ev?.session_id];
+    const t = ev?.terminal ?? s?.terminal ?? null;
+    return Boolean(t) && this.live.isOff(t, s, terminalSpace);
+  }
 
   // A question parked during turn N points at N's message; if its quote is not in that
   // message, the saved turns are searched backward (spec 5.3).
@@ -455,7 +497,7 @@ export class Writer {
 
   publish() {
     if (!this.amWriter()) return;
-    const chips = this.live.chips();
+    const chips = this.live.chips(Date.now(), terminalSpace);
     const s = JSON.stringify(chips);
     if (s === this.lastChips) return;
     this.lastChips = s;
@@ -508,9 +550,9 @@ export class Writer {
       if (!this.watching && this.reader.missing === false) this.watch(cx);
       const changed = this.live.wake();
       // The safety net for watchConfig (a watch that stopped): config.json once a minute.
-      const before = this.live.threshold;
+      const before = this.chipKey();
       this.applyConfig(await loadConfig());
-      if (this.live.threshold !== before) this.publish();
+      if (this.chipKey() !== before) this.publish();
       await this.housekeep();
       if (changed) this.commit(cx); else this.publish();
     });

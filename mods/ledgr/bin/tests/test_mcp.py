@@ -651,6 +651,92 @@ def main():
     check("LEDGR_TERMINAL stands in for HC_TERMINAL_ID", len(tl) == 4 and "herdr:iterm-2" in json.dumps(r.get("structuredContent")), r)
     c.close()
 
+    print("== disabled spaces (spaces.disabled, the record's ledgr_off)")
+    take_events()
+    cfgp, recp = os.path.join(DATA, "config.json"), os.path.join(DATA, "sessions", SID + ".json")
+    logp = os.path.join(DATA, "log", "mcp.log")
+    off_re = re.compile(r"^\d+ off (declare_asks|resolve_asks|open_asks|parked_questions) ")
+
+    def off_lines():
+        return [ln for ln in (open(logp).read().splitlines() if os.path.exists(logp) else []) if off_re.match(ln)]
+
+    def no_turn_file(sid, turn):
+        return not os.path.exists(os.path.join(DATA, "mcp", sid.replace(":", "_"), f"{turn}.json"))
+
+    def off_round(c, why, sid, turn, space, by):
+        """All four tools in a session where ledgr is off: ok, off, empty, nothing written, four log lines."""
+        n0 = len(off_lines())
+        rd = c.call("declare_asks", {"items": [{"level": "blocking", "kind": "decide", "text": "Pick the region"}]})
+        rr = c.call("resolve_asks", {"handles": ["A5"]})      # A5 is an open ask of SID
+        ro = c.call("open_asks")
+        rp = c.call("parked_questions")
+        sd, sr, so, sp = (x.get("structuredContent") or {} for x in (rd, rr, ro, rp))
+        check(f"off ({why}): declare_asks is ok and off, declares nothing, no pointer, the note, its other fields empty",
+              not rd.get("isError") and sd.get("ok") is True and sd.get("off") is True and sd.get("pointer") is None
+              and sd.get("items") == [] and sd.get("handles") == [] and sd.get("repeats") == [] and sd.get("rejected") == []
+              and sd.get("event_id") is None and sd.get("call") == 0 and sd.get("session_id") == sid and sd.get("space") == space
+              and sd.get("note") == "ledgr is off in this space: declared nothing; list what you need from the user in your reply"
+              and "end it without a pointer line" in text(rd), [sd, text(rd)])
+        check(f"off ({why}): resolve_asks closes nothing (not even the open A5), ok and off, with a note",
+              not rr.get("isError") and sr.get("ok") is True and sr.get("off") is True and sr.get("resolved") == []
+              and sr.get("unknown") == [] and sr.get("already_closed") == [] and sr.get("event_ids") == []
+              and sr.get("note", "").startswith("ledgr is off in this space: closed nothing"), sr)
+        check(f"off ({why}): open_asks and parked_questions are empty, ok and off",
+              not ro.get("isError") and not rp.get("isError") and so.get("ok") is True and so.get("off") is True
+              and so.get("open") == [] and so.get("dismissed") == [] and sp.get("ok") is True and sp.get("off") is True
+              and sp.get("questions") == [] and "A5" not in text(ro), [so, sp])
+        new = off_lines()[n0:]
+        check(f"off ({why}): nothing written (no spool event, no mcp/<session>/{turn}.json), one off line per call (by={by})",
+              not spool_files() and no_turn_file(sid, turn) and len(new) == 4
+              and all(f" {sid} turn={turn} space={space} by={by}: nothing written" in ln for ln in new), [spool_files(), new])
+
+    wjson(cfgp, {"spaces": {"disabled": ["spOFF"]}})
+    set_map("t60", SID, 20, space="spON")
+    wjson(recp, {"session_id": SID, "turn": 20, "space": None, "ledgr_off": True})
+    c = Client(terminal="t60")
+    r = c.init()["result"]
+    check("instructions: an answer with off: true means list what the user must do in the reply",
+          "answers off: true" in r.get("instructions", "")
+          and "list what you need from the user in your reply instead" in r.get("instructions", ""), r.get("instructions"))
+    off_round(c, "the record's ledgr_off, no space", SID, 20, None, "ledgr_off")
+    wjson(recp, {"session_id": SID, "turn": 20, "space": "spOFF"})
+    off_round(c, "the record's space in spaces.disabled, ledgr_off absent", SID, 20, "spOFF", "spaces.disabled")
+    wjson(recp, {"session_id": SID, "turn": 20})
+    set_map("t60", SID, 20, space="spOFF")
+    off_round(c, "no space in the record: the map entry's, in spaces.disabled", SID, 20, "spOFF", "spaces.disabled")
+
+    set_map("t60", SID, 20, space="spON")
+    wjson(recp, {"session_id": SID, "turn": 20, "space": "spON", "ledgr_off": False})
+    n0 = len(off_lines())
+    rd = c.call("declare_asks", {"items": [{"level": "blocking", "kind": "decide", "text": "Pick the region"}]})
+    sd = rd.get("structuredContent") or {}
+    evs = take_events()
+    check("on (space not disabled, ledgr_off false; the same server): declare_asks records as before",
+          not rd.get("isError") and "off" not in sd and sd.get("pointer") == "ledgr: 1 item for you, 1 blocking"
+          and len(evs) == 1 and evs[0].get("type") == "asks" and evs[0].get("turn") == 20 and not no_turn_file(SID, 20), [sd, evs])
+    ro, rr = c.call("open_asks"), c.call("resolve_asks", {"handles": ["A99"]})
+    so, sr = ro.get("structuredContent") or {}, rr.get("structuredContent") or {}
+    check("on: open_asks lists the open A5, resolve_asks reports as before, no off key, no off log line",
+          "off" not in so and "A5" in [x["handle"] for x in so.get("open", [])] and "off" not in sr
+          and sr.get("unknown") == ["A99"] and len(off_lines()) == n0, [so, sr])
+    c.close()
+
+    fake_hc = os.path.join(ROOT, "fake-hc")
+    with open(fake_hc, "w") as f:
+        f.write("#!/bin/sh\nprintf '%s\\n' '{\"labels\": {\"herdr.space\": \"spOFF\"}}'\n")
+    os.chmod(fake_hc, 0o755)
+    c = Client(terminal="t61", extra={"LEDGR_HC": fake_hc})
+    c.init()
+    off_round(c, "a synthetic session, its space from a live hc get", "herdr:t61", 0, "spOFF", "spaces.disabled")
+    wjson(cfgp, {"spaces": {"disabled": []}})
+    rd = c.call("declare_asks", {"items": [{"level": "needed", "kind": "do", "text": "Anything"}]})
+    evs = take_events()
+    check("on again (spaces.disabled emptied): the synthetic session declares as before",
+          "off" not in (rd.get("structuredContent") or {}) and len(evs) == 1 and evs[0]["session_id"] == "herdr:t61", evs)
+    c.close()
+    for p in (cfgp, recp):
+        os.unlink(p)
+
     print("== hygiene")
     bad = []
     for s in servers:

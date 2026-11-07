@@ -38,6 +38,24 @@ export function resolvedByWords(by) {
   return { branch: "resolved by its branch", agent: "closed by the agent", answer: "answered by you" }[by] ?? null;
 }
 
+// Why a dismissed item was closed, when it was not the person's own Not needed: "cleared" (the
+// questions lane's Clear N, store.js on_clear_questions). None for Not needed.
+export function dismissedByWords(by) {
+  return { clear: "cleared" }[by] ?? null;
+}
+
+// The questions lane's Clear button (two clicks): "Clear 3"; armed, "Clear 3 questions? 1 branched
+// kept"; after, "3 questions cleared, 1 branched kept". The kept part only when something is kept.
+const qs = (n) => `${n} question${n === 1 ? "" : "s"}`;
+export const clearLabel = (n) => `Clear ${n}`;
+export const clearConfirm = (n, kept = 0) => `Clear ${qs(n)}?${kept ? ` ${kept} branched kept` : ""}`;
+export const clearedWords = (n, kept = 0) => `${qs(n)} cleared${kept ? `, ${kept} branched kept` : ""}`;
+
+// ledgr off in a space (config.json spaces.disabled): the session menu's toggle for the focused pane's
+// space, and the state the panel and the capture box show there.
+export const OFF_HERE = "ledgr is off in this space";
+export const spaceToggleWords = (off, here = true) => `ledgr ${off ? "on" : "off"} in ${here ? "this space" : "that space"}`;
+
 // A branch by what it is for: "branch of Question 1". Its hc name (br-q1-c51e) is the short id
 // shown beside it, small.
 export const branchWords = (item) => `branch of ${item ? itemWords(item) : "a question"}`;

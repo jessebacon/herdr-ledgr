@@ -93,6 +93,23 @@ reads `terminals/<t>.json`:
   provider's `claude -p`), `tools/list` is empty and the server gives no instructions. A Claude Code
   outside Herdr sees no ledgr tools.
 
+## Disabled spaces
+
+ledgr can be off per Herdr space (`config.json` `spaces.disabled`, written by the panel's session
+menu). The server asks, at every call, after the identity check: the session is off when its record
+(`sessions/<sid>.json`) has `ledgr_off: true` (the hooks set it at the prompt that finds the space
+disabled, so a turn that began off stays off) or its `space` is in `spaces.disabled` (a missing key is
+`[]`). The space is the record's, else the map entry's; a synthetic `herdr:<t>` session with none
+recorded gets one live `hc get` (`ledgr_map.herdr_space`, 0.3 s at most), the lookup the panel makes
+for it. When off, every tool answers `ok: true` and `off: true` with its usual fields empty, and writes
+nothing: no spool event, no `mcp/<session>/<turn>.json`. `declare_asks` returns `pointer: null`,
+`items: []`, `handles: []` and the note `ledgr is off in this space: declared nothing; list what you
+need from the user in your reply`; `resolve_asks` closes nothing (`resolved`, `unknown`,
+`already_closed` empty); `open_asks` and `parked_questions` list nothing. Each such call logs one
+`off <tool> <sid> turn=… space=… by=ledgr_off|spaces.disabled` line. The tools stay listed (a space can
+be switched on mid-session), and the server's `instructions` end with: when a ledgr tool answers
+`off: true`, list what you need from the user in your reply instead.
+
 ## declare_asks
 
 Input: `{"items": [{level, kind, text, quote?, options?, recommended?, repeat_of?}]}`. This is the
@@ -296,7 +313,7 @@ runtime first probes stdio servers for revision 2026-07-28, and the v1 runtime (
 
 ## Tests
 
-`tests/test_mcp.py` (76 checks, in `tests/run-all.sh`) spawns the server over real stdio with a
+`tests/test_mcp.py` (96 checks, in `tests/run-all.sh`) spawns the server over real stdio with a
 scratch `LEDGR_DATA` and covers the following:
 
 - both handshakes, `tools/list`, the error codes, a batch;
@@ -313,6 +330,10 @@ scratch `LEDGR_DATA` and covers the following:
 - the no-map fallback, and the map appearing later;
 - a live other owner, a child agent, a dead owner, another config folder;
 - `LEDGR_INNER`, no terminal id, `LEDGR_TERMINAL`;
+- disabled spaces: all four tools off by the record's `ledgr_off`, by the record's `space` in
+  `spaces.disabled` (no `ledgr_off`), by the map entry's space, and for a synthetic session by a live
+  lookup (a fake `hc`), each writing nothing and logging one line; the same server back on records
+  as before;
 - stdout purity, exit on EOF, no bytecode, the log.
 
 ```sh

@@ -22,7 +22,8 @@ bin/
     extract-system.txt      the extraction system prompt
     asks-instruction.txt    the opt-in SessionStart instruction (printed only when instruct_block is true);
                             since 2026-11-06 asks-instruction-ledgr.txt, -both.txt, -off.txt, on by default
-                            ("Who owns the closing list" below)
+                            ("Who owns the closing list" below); -space-off.txt since 2026-11-07
+                            ("Off per space" below)
   providers/                extraction providers, one signature: complete(system, user_text, schema, opts) -> result
     __init__.py             dispatch on config.extract.provider; key lookup; "no credential" result
     _http.py                result shape; curl POST with the key in a curl config on stdin, body in a 0600 temp file
@@ -328,6 +329,112 @@ Jesse found Done redundant after answering an ask in the prompt. The reference i
   call finding it closed); installer 69 (`test_mcp`: the fourth entry, `mcp_report` healthy, declined,
   missing, and an earlier install's three entries upgraded in place). `test-hooks.sh` (127) is
   unchanged.
+
+### Off per space (2026-11-07)
+
+Jesse: "enable/disable per space", the full version: a session in a space listed in config
+`spaces.disabled` behaves as if ledgr were not installed. The mod's side (the switch, the panel, the
+chip, ⌘J) is `BUILD-NOTES-mod.md` section 17; the contract is `bin/adapters/README.md` "Disabled
+spaces".
+
+- The lookup, `ledgr_map.herdr_space(timeout=0.3)`: one `hc get $HC_TERMINAL_ID --json`, the label
+  `labels["herdr.space"]` (about 6 ms). Run with `os.posix_spawn` and a pipe (`_read_cmd`: stdin and
+  stderr `/dev/null`, `select` up to the deadline, then `waitpid`; killed with SIGKILL past it),
+  because importing `subprocess` alone costs a hook about 4 ms. `hc` is found on `PATH` (else the
+  core's tool path); `LEDGR_HC` names another binary, and set but empty turns the lookup off.
+- Two answers that are not a space. None, which counts as on: no `HC_TERMINAL_ID` (outside Herdr, or
+  the `LEDGR_TERMINAL` override), a remote address (`/` in it) or one starting with `-`, no `hc` or one
+  that cannot be run, a terminal without the label, a label that is not an id
+  (`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`). `UNKNOWN`, which keeps the recorded space: a timeout (logged
+  "space lookup: hc get timed out after 300 ms"), a non-zero exit, output that is not a JSON object.
+  So a slow or failing `hc` never flips a session on and off.
+- When: SessionStart and UserPromptSubmit look up (`fields["space"]`); Stop and SessionEnd make no
+  `hc` call and use the record (`recorded(sid)`). `ledgr_map.handle` stores `space` on the session
+  record and the map entry (`map_record` always carries the key), unless the lookup was `UNKNOWN`.
+  `spaces_disabled(cfg)` reads the list (strings only), `space_off(cfg, space)` compares (a null
+  space is on). `ledgr_config.py` `DEFAULT_CONFIG` gains `"spaces": {"disabled": []}`.
+- Off (`fields["quiet"]`): `handle` still takes the lock, counts turns, records the prompt id and
+  state, and writes the record and the map, but emits no spool event: no `session_start`,
+  `branch_started`, `compacted`, `prompt` or `session_end`. A Stop while off saves no turn text and
+  emits no `pending`: it marks the session idle (`last_stop_at`) and logs "Stop … skipped: ledgr is
+  off in space …" once per off period (`off_skip_logged`). `run()` then returns False, `main` exits
+  10, and `stop.sh` never starts part B: no extraction, no tool settlement, no reinject. A Stop is
+  off when the recorded space is disabled now or the record says `ledgr_off` (the turn began off).
+- What the agent is told (`claude_hook.py`; `ledgr_off` on the record, written with the new
+  `ledgr_map.set_fields()`, one locked read-modify-write; `set_instruct_mode` now uses it):
+  - At a real prompt (`prompt_turn`), on to off: `lib/asks-instruction-space-off.txt` once ("ledgr is
+    off in this space: ignore every earlier ledgr instruction. Declare nothing: no ledgr-asks block,
+    no "ledgr:" line, and no calls to the ledgr tools (declare_asks, resolve_asks). List what you
+    need from the user in your reply as you normally would."), only to a session that had a wording
+    (`instruct_mode` other than `prose`; none recorded counts as `both`) and not to one first seen at
+    this prompt. Records `ledgr_off: true` and drops `reinject_pending`. No landing, no reinject, no
+    handoff switch while off. A record from before this build (no `ledgr_off`) in an off space is
+    treated as on to off.
+  - Off to on: the prompt event is written, landing runs, the mode's wording prints once (none in
+    `prose`), and the record gets `ledgr_off: false`, `instruct_mode`, and loses `off_skip_logged` and
+    `reinject_pending`.
+  - On and staying on: as before (landing, the reinject, a handoff change); `ledgr_off: false` is
+    written when missing. A local command (`/btw`) changes nothing.
+  - SessionStart (`start_session`): on, the mode's wording as before; off, nothing, except the off
+    text at a `resume` or `compact` of a session whose `instruct_mode` is `ledgr` or `both` (its
+    context may still carry the instruction). `startup` and `clear` while off print nothing.
+- Landing is skipped while off: an answer sheet or confluence pasted into an off session's prompt
+  does not land.
+- Known: a branch launched into an off space records its lineage on the record and the map, but no
+  `branch_started` is sent.
+- Timing, medians of 20 runs (`test-hooks.sh` timing table; it times the real `hc get` on the suite's
+  own Herdr terminal when it runs in one, else no lookup):
+
+  | Hook | Before | After |
+  |---|---|---|
+  | SessionStart | 43-45 ms | 51-52 ms |
+  | UserPromptSubmit | 42-45 ms | 52-54 ms |
+  | Stop | | unchanged (no lookup) |
+
+- Tests. `test-hooks.sh` (169 checks) now runs against a fake `hc` (`LEDGR_HC`, a bash script):
+  `hc get <t> --json` prints `$FAKE_HC_DIR/<t>.json`, else exits 3 with a `not_found` error as `hc`
+  does; `FAKE_HC_SLEEP` delays it and `FAKE_HC_BAD` prints a line that is not JSON. "disabled spaces"
+  (30): an enabled space (wording, `space` on the record and the map); a disabled one (nothing printed,
+  `ledgr_off`, the map written, no `session_start`); prompts in it (no output, no `prompt` event, a
+  pasted sheet does not land, turns still counted); off Stops (no `pending`, `stop`, `asks` or turn
+  text, one log line); a local `/btw` after the space is enabled; off to on (the wording once, the
+  prompt event, then `pending` and `asks` again); on to off (exactly the off text, once); the file's
+  content; a resume while off (the off text) and a clear (nothing); a space disabled mid-turn (that
+  Stop skipped) and enabled again (the next Stop runs); `prose` (nothing either way); a session
+  first seen in a disabled space; a record from before this build; `LEDGR_HC` empty, a missing
+  binary, a non-zero exit, bad output, a 2 s `hc` (the hook goes on well under 1.5 s and keeps the
+  space), a terminal without the label; no hook errors. The LEDGR_TERMINAL and remote-address checks
+  now also expect `space: null`.
+
+### Several messages in one prompt (2026-11-07)
+
+Found in Jesse's own prompt of the day, which carried two answer sheets (A11, A12) and a sentence he
+typed below them. Wrapped (each sheet a `<pasted_content>` block), only the first landed; unwrapped,
+one sheet was read in which A11's answer swallowed the second marker line and A12's took his
+sentence.
+
+- `ledgr_landing.detect_all(prompt, wrapper)` returns every message in prompt order (at most 20);
+  `detect()` returns the first, or None. Paste wrapper lines are marked (`bound`) and never part of
+  a message. Candidates: the unwrapped first message (the first non-empty line, or the second after
+  a one-line lead-in of at most 200 characters that is not a fence), then the first non-empty line of
+  every pasted block outside a typed fence.
+- Where a message ends (`_end`): at a wrapper line; at the next marker line outside a code fence; for
+  an answer sheet, at the first empty line after its `A<n>:` lines that is not followed by another
+  `A<n>:` line (a blank line between two answers stays inside; text typed below the sheet does not).
+  A confluence still runs to the next wrapper line or marker.
+- After a message (`_next`): the next line that is neither empty nor a wrapper line is the next
+  marker, or the one after it when that line is a single lead-in. Two lines of prose end the chain.
+- `claude_hook.py` `landing()`: one `confluence_landed` or `answers_landed` per message, `at` 1 ms
+  apart after the prompt event, one `hook.log` line each.
+- The mod now ends every staged message with one empty line (`nav.js` `promptText`), so pasted
+  sheets arrive a blank line apart; the parser also reads two that run together (an older mod).
+- Tests (`test-hooks.sh` "landing: several messages in one prompt", 12): two wrapped sheets (two
+  events, each with its own answer, after the prompt event and 1 ms apart, stdout empty); two
+  unwrapped with a blank line and Jesse's sentence below; sheets ending in a trailing blank line; one
+  sheet with one; a one-line lead-in before the first; a lead-in before two wrapped sheets with no blank line between;
+  two sheets that run together; one sheet with a blank line between two answers and a closing word
+  left out; two lines of prose between sheets (only the first); a confluence then a sheet (both).
+  `test-store.sh`: each message `confluence.js` composes, with its blank line, parses as before.
 
 ## Confirmed live (2026-11-05)
 

@@ -694,4 +694,125 @@ gturn(9, [ask("choose the cache size", "decide", { level: "needed" })]);
 A.equal(gh("A7").status, "open", "the agent asking a settled ask again: a new item"); A.equal(gh("A7").parentId, gh("A4").id, "...pointing at the settled one");
 const settleChecks = checks - phase1 - phase2 - phase3 - sev - prof - toolChecks;
 
-console.log(`OK: store, ${checks} checks (${phase1} phase 1, ${phase2} phase 2, ${phase3} phase 3, ${sev} severity and resume, ${prof} profiles, handoff and paste words, ${toolChecks} tool asks, ${settleChecks} blocking while working, closed by the agent, answered then settled), 0 failure(s)`);
+// ── Spaces where ledgr is off (config.json spaces.disabled) ─────────────
+// The config helpers (config.js): the default, the list as read, the switch the session menu writes,
+// a terminal's live space (its agent's, else its herdr.space label), loadConfig replacing the list whole.
+A.deepEqual(CFG.DEFAULTS.spaces, { disabled: [] }, "spaces.disabled: none by default");
+A.deepEqual(CFG.disabledSpaces({ spaces: { disabled: ["spA", "", 3, null, "spA", "spB"] } }), ["spA", "spB"], "strings only, each once");
+A.deepEqual(CFG.disabledSpaces({}), []); A.deepEqual(CFG.disabledSpaces({ spaces: { disabled: "spA" } }), [], "not a list: none");
+A.equal(CFG.spaceOff({ spaces: { disabled: ["spA"] } }, "spA"), true); A.equal(CFG.spaceOff({ spaces: { disabled: ["spA"] } }, "spB"), false);
+A.equal(CFG.spaceOff({ spaces: { disabled: ["spA"] } }, null), false, "an unknown space is on");
+A.deepEqual(CFG.withSpaceOff({ spaces: { disabled: ["spA"] } }, "spB", true), ["spA", "spB"], "off: added");
+A.deepEqual(CFG.withSpaceOff({ spaces: { disabled: ["spA"] } }, "spA", true), ["spA"], "off twice: once");
+A.deepEqual(CFG.withSpaceOff({ spaces: { disabled: ["spA", "spB"] } }, "spA", false), ["spB"], "on: removed, the others kept");
+A.deepEqual(CFG.withSpaceOff({}, "spA", true), ["spA"], "a config without spaces");
+globalThis.__herdr = { agents: [{ address: "t60", space: "spLive" }, { address: "t63", space: "" }],
+  terminals: [{ address: "t61", labels: { "herdr.space": "spLabel" } }, { address: "t63", labels: { "herdr.space": "spL3" } }, { address: "t64" }] };
+A.equal(CFG.terminalSpace("t60"), "spLive", "an agent's space"); A.equal(CFG.terminalSpace("t61"), "spLabel", "else the herdr.space label");
+A.equal(CFG.terminalSpace("t63"), "spL3", "an agent with no space: the label"); A.equal(CFG.terminalSpace("t64"), null); A.equal(CFG.terminalSpace("t65"), null);
+A.equal(CFG.terminalSpace(null), null);
+// The capture box's rule (capture.js): over a pane in a disabled space ⌘J parks nothing.
+A.equal(CFG.spaceOff({ spaces: { disabled: ["spLive"] } }, CFG.terminalSpace("t60")), true, "⌘J over t60 in a disabled space: refused");
+A.equal(CFG.spaceOff({ spaces: { disabled: ["spLive"] } }, CFG.terminalSpace("t61")), false, "...over t61 elsewhere: parks");
+globalThis.__herdr.files = { "/tmp/nowhere/ledgr-data/config.json": JSON.stringify({ spaces: { disabled: ["spA"] }, extract: { threshold: "blocking" } }) };
+let lc = await CFG.loadConfig();
+A.deepEqual(lc.spaces.disabled, ["spA"], "loadConfig: the file's list replaces the default whole"); A.equal(lc.extract.provider, "anthropic", "...other defaults merged");
+globalThis.__herdr.files = {};
+lc = await CFG.loadConfig(); A.deepEqual(lc.spaces.disabled, [], "no file: none off");
+
+// The store: the hooks' recorded space (map record, events) on the session and the terminal mapping;
+// chips() leaves out a terminal in a disabled space (recorded, else live); items are kept.
+st = Store.fromText(null);
+const SPA = "99999999-0000-0000-0000-00000000000a", SPB = "99999999-0000-0000-0000-00000000000b", SPC = "99999999-0000-0000-0000-00000000000c";
+const spev = (type, p, sid, term) => ({ v: 1, id: `s${++n}`, type, at: (at += 1000), terminal: term, session_id: sid, ...p });
+st.applyMap({ v: 1, terminal: "t60", session_id: SPA, agent: "claude-code", updated_at: at, turn: 0, state: "idle", space: "spOff" });
+A.equal(st.d.sessions[SPA].space, "spOff", "the map record's space on the session"); A.equal(st.d.terminals.t60.space, "spOff", "...and on the mapping");
+st.apply(spev("session_start", { agent: "claude-code", source: "startup", cwd: "/a", turn: 0 }, SPA, "t60"));
+A.equal(st.d.terminals.t60.space, "spOff", "an event without `space` keeps the recorded one"); A.equal(st.d.sessions[SPA].space, "spOff");
+st.apply(spev("session_start", { agent: "claude-code", source: "startup", cwd: "/b", turn: 0 }, SPB, "t61"));
+st.apply(spev("session_start", { agent: "claude-code", source: "startup", cwd: "/c", turn: 0, space: "spOn" }, SPC, "t62"));
+A.equal(st.d.sessions[SPC].space, "spOn", "an event's space is recorded"); A.equal(st.d.terminals.t62.space, "spOn");
+A.equal(st.d.sessions[SPB].space, undefined, "nothing recorded");
+for (const [sid, term, id] of [[SPA, "t60", "rq_sa"], [SPB, "t61", "rq_sb"], [SPC, "t62", "rq_sc"]]) {
+  st.apply(spev("capture", { request: { ...req(id, `question ${id}`, null, {}, sid, 0), anchor: { ...req(id, "x", null, {}, sid, 0).anchor, settled: true } } }, sid, term));
+}
+const spLive = (t) => ({ t61: "spOff" }[t] ?? null);
+A.deepEqual(Object.keys(st.chips(at, spLive)).sort(), ["t60", "t61", "t62"], "nothing off: every chip");
+st.spacesOff = new Set(["spOff"]);
+A.deepEqual(Object.keys(st.chips(at, spLive)).sort(), ["t62"], "t60 (recorded) and t61 (live) are in the disabled space: no chip");
+A.deepEqual(Object.keys(st.chips(at)).sort(), ["t61", "t62"], "no live answer: an unknown space is on");
+A.equal(st.isOff("t60", st.d.sessions[SPA]), true); A.equal(st.isOff("t62", st.d.sessions[SPC], spLive), false);
+A.equal(st.itemsOf(SPA).length, 1, "the off session's items are kept"); A.equal(st.item("rq_sa").status, "open");
+A.equal(st.spaceOf("t60", st.d.sessions[SPA], () => "spElse"), "spOff", "the recorded space wins over the live one");
+// a map record rewritten by the hooks (the writer's watch: noteSpace) moves t60 out of the disabled space
+A.equal(st.noteSpace({ terminal: "t60", session_id: SPA, space: "spOn" }), true);
+A.equal(st.noteSpace({ terminal: "t60", session_id: SPA, space: "spOn" }), false, "unchanged: false");
+A.equal(st.noteSpace({ terminal: "t60", session_id: SPA }), false, "a record without `space`: nothing");
+A.equal(st.d.sessions[SPA].space, "spOn"); A.ok(st.chips(at, spLive).t60, "on again: its chip comes back, with its item");
+A.equal(st.chips(at, spLive).t60.q, 1);
+// the hooks could not tell (space null): the live answer decides
+st.apply(spev("prompt", { turn: 1, prompt_id: "sp1", local: false, prompt_head: "go", refs: [], space: null }, SPC, "t62"));
+A.equal(st.d.terminals.t62.space, null); A.equal(st.d.sessions[SPC].space, null);
+A.equal(st.spaceOf("t62", st.d.sessions[SPC], () => "spOff"), "spOff", "recorded unknown: the live space");
+A.equal(st.chips(at, () => "spOff").t62, undefined, "...which is off: no chip");
+A.equal(Store.fromText(st.toText()).d.sessions[SPA].space, "spOn", "the space survives a save");
+st.spacesOff = new Set();
+
+// ── Clear all questions (the questions lane's Clear N) ─────────────────
+const CQ = "99999999-0000-0000-0000-0000000000cc", CQT = "t70";
+const cev = (type, p) => ({ v: 1, id: `q${++n}`, type, at: (at += 1000), terminal: CQT, session_id: CQ, ...p });
+st.apply(cev("session_start", { agent: "claude-code", source: "startup", cwd: "/q", session_name: "clear", turn: 0 }));
+st.apply(cev("prompt", { turn: 1, prompt_id: "cq1", local: false, prompt_head: "go", refs: [] }));
+st.apply(cev("stop", { turn: 1, prompt_id: "cq1", text_path: null, text_head: "", passage_hash: "cq" }));
+const cq = (id, text) => st.apply(cev("capture", { request: { ...req(id, text, null, {}, CQ, 1), anchor: { ...req(id, text, null, {}, CQ, 1).anchor, settled: true } } }));
+for (const [id, text] of [["rq_k1", "open question"], ["rq_k2", "deferred question"], ["rq_k3", "branched question"], ["rq_k4", "rejoin question"],
+  ["rq_k5", "answered question"], ["rq_k6", "question whose branch failed"], ["rq_k7", "question already done"]]) cq(id, text);
+st.act("rq_k2", "defer", "next_session");
+st.apply(cev("branch", { item: "rq_k3", branch_id: "br_00000000-dddd-4bbb-8ccc-000000000001", placement: "split" }));
+A.equal(st.d.branches["br_00000000-dddd-4bbb-8ccc-000000000001"].status, "launching");
+st.apply(cev("branch", { item: "rq_k6", branch_id: "br_00000000-dddd-4bbb-8ccc-000000000006", placement: "split" }));
+st.branchLaunched("br_00000000-dddd-4bbb-8ccc-000000000006", { error: "hc run exited 1" });
+const k4 = st.item("rq_k4"); k4.status = "rejoin_pending"; k4.rejoin = { branchId: "br_gone", at };
+st.setStatus(st.item("rq_k5"), "answered", at); st.act("rq_k7", "resolve");
+st.apply(cev("asks", { turn: 1, source: "model", asks: [ask("Pick a port", "decide", { level: "needed" })] }));
+A.equal(st.isBranched(st.item("rq_k3")), true); A.equal(st.isBranched(st.item("rq_k4")), true, "rejoin_pending: branched");
+A.equal(st.isBranched(st.item("rq_k6")), false, "a failed launch is no branch"); A.equal(st.isBranched(st.item("rq_k1")), false);
+const cl = st.clearable(CQ);
+A.deepEqual(cl.clear.map((i) => i.id).sort(), ["rq_k1", "rq_k2", "rq_k6"], "open and deferred, no branch");
+A.deepEqual(cl.kept.map((i) => i.id).sort(), ["rq_k3", "rq_k4"], "branched and rejoin_pending kept");
+A.equal(WORDS.clearLabel(3), "Clear 3"); A.equal(WORDS.clearConfirm(3, 2), "Clear 3 questions? 2 branched kept");
+A.equal(WORDS.clearConfirm(1, 0), "Clear 1 question?", "nothing kept: no kept part");
+A.equal(WORDS.clearedWords(3, 2), "3 questions cleared, 2 branched kept"); A.equal(WORDS.clearedWords(1), "1 question cleared");
+A.equal(WORDS.dismissedByWords("clear"), "cleared"); A.equal(WORDS.dismissedByWords(undefined), null, "Not needed by hand: no label");
+A.equal(WORDS.OFF_HERE, "ledgr is off in this space");
+A.equal(WORDS.spaceToggleWords(false), "ledgr off in this space"); A.equal(WORDS.spaceToggleWords(true), "ledgr on in this space");
+const askBefore = st.byHandle(CQ, "A1").status;
+const clearAt = at + 1000;
+st.apply(cev("clear_questions", { keep: ["branched", "rejoin_pending"] }));
+for (const id of ["rq_k1", "rq_k2", "rq_k6"]) {
+  const it = st.item(id);
+  A.equal(it.status, "dismissed", id); A.equal(it.dismissedBy, "clear", id); A.equal(it.clearedAt, clearAt, id); A.equal(it.resolvedAt, clearAt, id);
+}
+A.equal(st.item("rq_k2").deferUntil, undefined, "a cleared deferred question no longer waits");
+A.equal(st.item("rq_k3").status, "open", "branched: kept"); A.equal(st.item("rq_k4").status, "rejoin_pending", "rejoin_pending: kept");
+A.equal(st.item("rq_k5").status, "answered", "answered: untouched"); A.equal(st.item("rq_k7").status, "resolved"); A.equal(st.item("rq_k7").dismissedBy, undefined);
+A.equal(st.byHandle(CQ, "A1").status, askBefore, "agent asks untouched");
+A.deepEqual(st.d.sessions[CQ].lastClear, { at: clearAt, cleared: 3, kept: 2 });
+A.equal(st.clearable(CQ).clear.length, 0, "nothing left to clear");
+// Reopen one: open again, the marks go; a second clear takes it, whatever `keep` says
+st.act("rq_k1", "reopen");
+A.equal(st.item("rq_k1").status, "open"); A.equal(st.item("rq_k1").dismissedBy, undefined); A.equal(st.item("rq_k1").clearedAt, undefined);
+st.apply(cev("clear_questions", { keep: [] }));
+A.equal(st.item("rq_k1").dismissedBy, "clear"); A.equal(st.item("rq_k3").status, "open", "keep [] still keeps a branched question");
+st.act("rq_k1", "dismiss"); A.equal(st.item("rq_k1").dismissedBy, undefined, "Not needed by hand: not labelled cleared");
+// the panel's own event: never creates a session, a forgotten or unknown one is dropped
+const nSess = Object.keys(st.d.sessions).length;
+st.apply({ ...cev("clear_questions", {}), session_id: "99999999-0000-0000-0000-0000000000ff" });
+A.equal(Object.keys(st.d.sessions).length, nSess, "an unknown session: nothing created");
+// Closed, the archive and the snapshot treat them as dismissed items
+A.ok(st.archivable(0, at + 1).some((i) => i.id === "rq_k2"), "a cleared question archives like other dismissed items");
+A.ok(st.snapshot(at).items.some((i) => i.id === "rq_k2" && i.dismissedBy === "clear"), "recent: in the snapshot, as dismissed items are");
+A.equal(Store.fromText(st.toText()).item("rq_k6").dismissedBy, "clear", "survives a save");
+const spaceChecks = checks - phase1 - phase2 - phase3 - sev - prof - toolChecks - settleChecks;
+
+console.log(`OK: store, ${checks} checks (${phase1} phase 1, ${phase2} phase 2, ${phase3} phase 3, ${sev} severity and resume, ${prof} profiles, handoff and paste words, ${toolChecks} tool asks, ${settleChecks} blocking while working, closed by the agent, answered then settled, ${spaceChecks} spaces off and Clear all), 0 failure(s)`);

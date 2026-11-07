@@ -7,10 +7,24 @@ set -u
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 BIN="$(cd "$(dirname "$0")/.." && pwd)"; AD="$BIN/adapters/claude"
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ledgr-test.XXXXXX")"
+OUTER_T="${HC_TERMINAL_ID:-}"      # this shell's own Herdr terminal, if any: the timing table's real `hc get`
 export LEDGR_DATA="$ROOT/data" HC_TERMINAL_ID=t99 LEDGR_KEYCHAIN_SERVICE=ledgr-test-missing-service
 unset LEDGR_TERMINAL LEDGR_INNER LEDGR_ANTHROPIC_KEY HC_SCOPE LEDGR_OWNER_PID LEDGR_OWNER_COMM LEDGR_PARENT LEDGR_BRANCH CLAUDE_CONFIG_DIR
+unset FAKE_HC_SLEEP FAKE_HC_BAD
 D="$LEDGR_DATA"; SID=11111111-2222-3333-4444-555555555555
 TP="$ROOT/fake.jsonl"; : >"$TP"
+# A fake `hc` (LEDGR_HC) keeps the run hermetic: `hc get <t> --json` prints $FAKE_HC_DIR/<t>.json, else
+# exits 3 as hc does for an unknown terminal; FAKE_HC_SLEEP delays it, FAKE_HC_BAD prints a non-JSON line.
+export FAKE_HC_DIR="$ROOT/hc" LEDGR_HC="$ROOT/fake-hc"; mkdir -p "$FAKE_HC_DIR"
+cat >"$LEDGR_HC" <<'HC'
+#!/bin/bash
+[ "$1" = get ] && [ "$3" = --json ] || exit 2
+[ -n "${FAKE_HC_SLEEP:-}" ] && sleep "$FAKE_HC_SLEEP" >/dev/null 2>&1
+[ -n "${FAKE_HC_BAD:-}" ] && { echo "not json"; exit 0; }
+f="$FAKE_HC_DIR/$2.json"
+if [ -f "$f" ]; then cat "$f"; else echo '{"error":{"kind":"not_found"}}'; exit 3; fi
+HC
+chmod +x "$LEDGR_HC"
 P=0; F=0
 ok() { if [ "$1" = 0 ]; then echo "PASS $2"; P=$((P+1)); else echo "FAIL $2"; F=$((F+1)); fi; }
 t() { local name="$1"; shift; "$@" >/dev/null 2>&1; ok $? "$name"; }
@@ -63,9 +77,9 @@ t "no HC_TERMINAL_ID and no LEDGR_TERMINAL: no output, nothing written" test -z 
 out=$(printf '%s' "{$base,\"source\":\"startup\"}" | LEDGR_INNER=1 LEDGR_DATA="$G" bash "$AD/session-start.sh")
 t "LEDGR_INNER set: exits at once, nothing written" test -z "$out" -a ! -e "$G"
 printf '%s' "{$base,\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"hi\"}" | env -u HC_TERMINAL_ID LEDGR_TERMINAL=iterm-2 bash "$AD/user-prompt-submit.sh" >/dev/null
-t "LEDGR_TERMINAL override maps terminal iterm-2" jq -e '.terminal=="iterm-2" and .agent=="claude-code"' "$D/terminals/iterm-2.json"
+t "LEDGR_TERMINAL override maps terminal iterm-2 (no HC_TERMINAL_ID: no space lookup, space null)" jq -e '.terminal=="iterm-2" and .agent=="claude-code" and has("space") and .space==null' "$D/terminals/iterm-2.json"
 printf '%s' "{\"session_id\":\"22222222-0000-0000-0000-000000000001\",\"cwd\":\"/tmp\",\"prompt\":\"hi\"}" | HC_TERMINAL_ID=vps/t7 bash "$AD/user-prompt-submit.sh" --agent codex >/dev/null
-t "remote address vps/t7 -> vps__t7.json, --agent codex" jq -e '.terminal=="vps/t7" and .agent=="codex" and .transcript_path==null' "$D/terminals/vps__t7.json"
+t "remote address vps/t7 -> vps__t7.json, --agent codex, space null" jq -e '.terminal=="vps/t7" and .agent=="codex" and .transcript_path==null and .space==null' "$D/terminals/vps__t7.json"
 SA=77777777-0000-0000-0000-000000000001
 printf '%s' "{\"session_id\":\"$SA\",\"cwd\":\"/tmp\",\"prompt\":\"hi\",\"agent_id\":\"agent-abc\",\"agent_type\":\"Explore\"}" | bash "$AD/user-prompt-submit.sh" >/dev/null
 t "stdin with agent_id (subagent): ignored" test ! -e "$D/sessions/$SA.json"
@@ -292,6 +306,62 @@ A1: blue
 A2: typed after the paste, not part of the sheet"
 t "lead-in + wrapped answer sheet: answers_landed with the block's handles only" jq -e --arg s $LF 'length==1 and .[0].for_session==$s and .[0].handles==["A1"] and .[0].answers=={"A1":"blue"}' <<<"$(ev $LF answers_landed)"
 
+echo "== landing: several messages in one prompt (two answer sheets)"
+LM=77777777-3333-0000-0000-000000000003
+uprm() { up "$@" | HC_TERMINAL_ID=t76 bash "$AD/user-prompt-submit.sh"; }
+lmev() { ev $LM answers_landed | jq -c --arg p "$1" 'map(select(.prompt_id==$p)) | sort_by(.at)'; }
+SH1="ledgr answers $LM
+Answers to your asks from turn 18:
+A11: Full version is good if that's your recommendation"
+SH2="ledgr answers $LM
+Answers to your asks from turn 18:
+A12: shown session, skip branched and rejoining questions"
+TWO='.[0].handles==["A11"] and .[0].answers=={"A11":"Full version is good if that'"'"'s your recommendation"} and .[1].handles==["A12"] and .[1].answers=={"A12":"shown session, skip branched and rejoining questions"}'
+uprm $LM g0 "go" >/dev/null
+out=$(uprm $LM w1 "$(printf '<pasted_content id="a">\n%s\n</pasted_content id="a">\n\n<pasted_content id="b">\n%s\n</pasted_content id="b">' "$SH1" "$SH2")")
+t "two wrapped sheets in one prompt: two answers_landed, A11 then A12, each with its own answer" jq -e "length==2 and $TWO" <<<"$(lmev w1)"
+t "...stdout empty" test -z "$out"
+t "...both after the prompt event, the second 1 ms or more after the first" jq -e --argjson p "$(ev $LM prompt | jq 'map(select(.prompt_id=="w1"))[0].at')" '.[0].at > $p and .[1].at > .[0].at' <<<"$(lmev w1)"
+uprm $LM u1 "$SH1
+
+$SH2
+
+
+Also, when pasting an answer, you should add an empty line. When I'm trying to paste multiple answers, they run together" >/dev/null
+t "two unwrapped sheets with a blank line between (Jesse's prompt of 2026-11-07): both, no marker or typed text in an answer" jq -e "length==2 and $TWO" <<<"$(lmev u1)"
+uprm $LM b1 "$SH1"$'\n\n'"$SH2"$'\n\n' >/dev/null
+t "sheets that end with a trailing blank line (the mod's paste spacing): both" jq -e "length==2 and $TWO" <<<"$(lmev b1)"
+uprm $LM b2 "$SH1"$'\n\n' >/dev/null
+t "one sheet with a trailing blank line: one event, answer intact" jq -e 'length==1 and .[0].handles==["A11"] and .[0].answers.A11=="Full version is good if that'"'"'s your recommendation"' <<<"$(lmev b2)"
+uprm $LM l1 "My answers to A11, A12:
+$SH1
+
+$SH2" >/dev/null
+t "a one-line lead-in before the first sheet: both" jq -e "length==2 and $TWO" <<<"$(lmev l1)"
+uprm $LM l2 "My answers:
+$(printf '<pasted_content id="c">\n%s\n</pasted_content id="c">\n<pasted_content id="d">\n%s\n</pasted_content id="d">' "$SH1" "$SH2")" >/dev/null
+t "a lead-in before two wrapped sheets with no blank line between them: both" jq -e "length==2 and $TWO" <<<"$(lmev l2)"
+uprm $LM r1 "$SH1
+$SH2" >/dev/null
+t "two sheets that run together (no blank line, an older mod): both, A11's answer intact" jq -e "length==2 and $TWO" <<<"$(lmev r1)"
+uprm $LM a1 "ledgr answers $LM
+A3: one
+
+A4: two, after a blank line
+
+thanks" >/dev/null
+t "one sheet with a blank line between two answers: one event, A3 and A4, the closing word left out" jq -e 'length==1 and .[0].handles==["A3","A4"] and .[0].answers=={"A3":"one","A4":"two, after a blank line"}' <<<"$(lmev a1)"
+uprm $LM x1 "$SH1
+
+some prose
+more prose
+$SH2" >/dev/null
+t "two lines of prose between sheets: only the first (the second is mid-paragraph)" jq -e 'length==1 and .[0].handles==["A11"]' <<<"$(lmev x1)"
+uprm $LM c1 "$CONF
+
+$SH1" >/dev/null
+t "a confluence then a sheet: both events" test "$(ev $LM confluence_landed | jq 'map(select(.prompt_id=="c1")) | length')$(lmev c1 | jq length)" = 11
+
 echo "== hybrid re-injection (instruct_reinject)"
 # A fake OpenAI-compatible server stands in for the model: a message with BLOCKER yields one blocking
 # ask, one with NEEDED one needed ask, anything else none.
@@ -431,15 +501,91 @@ sleep 0.3; out=$(rprompt "$TD" t85 $K1 k2 "next")
 t "...no reinject after a tool-declared turn" test -z "$out" -a "$(jq -r '.reinject_pending // "none"' "$TD/sessions/$K1.json")" = none
 t "hook.log counts it: source=tool" grep -q "t85 extract $K1 turn=1 source=tool asks=2" "$TD/log/hook.log"
 
+echo "== disabled spaces (config spaces.disabled; the terminal's herdr.space label)"
+SPD="$ROOT/spaces"; mkdir -p "$SPD"
+SPA=spaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; SPB=spbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+sset() { printf '{"instruct_block": true, "asks": {"handoff": "%s"}, "spaces": {"disabled": [%s]}, "extract": {"mode": "block-only"}}\n' "${2:-ledgr}" "$1" >"$SPD/config.json"; }
+hcl() { printf '{"address":"%s","labels":{"herdr.space":"%s","herdr.tab":"tb1"},"state":"live"}\n' "$1" "$2" >"$FAKE_HC_DIR/$1.json"; }
+srun() { printf '%s' "$3" | LEDGR_DATA="$SPD" HC_TERMINAL_ID="$1" bash "$(script "$2")"; }      # srun <t> <event> <json>
+sstart() { srun "$1" SessionStart "{\"session_id\":\"$2\",\"cwd\":\"/tmp\",\"source\":\"${3:-startup}\"}"; }
+sprompt() { srun "$1" UserPromptSubmit "$(up "$2" "$3" "$4")"; }                                    # sprompt <t> <sid> <prompt id> <text>
+sstop() { srun "$1" Stop "$(J "$2" "$TP" "$3")"; }
+sev() { rev "$SPD" "$1" "$2" | jq length; }
+srec() { jq -r "$2" "$SPD/sessions/$1.json"; }
+WSO="$(cat "$BIN/lib/asks-instruction-space-off.txt")"
+X1=99999999-0000-0000-0000-0000000005a1; X2=99999999-0000-0000-0000-0000000005a2; X3=99999999-0000-0000-0000-0000000005a3
+X4=99999999-0000-0000-0000-0000000005a4; X5=99999999-0000-0000-0000-0000000005a5; X6=99999999-0000-0000-0000-0000000005a6
+X7=99999999-0000-0000-0000-0000000005a7; X8=99999999-0000-0000-0000-0000000005a8
+sset "\"$SPB\""; hcl t90 "$SPA"; hcl t91 "$SPB"
+out=$(sstart t90 $X1)
+t "an enabled space: SessionStart prints the ledgr wording; record and map carry space, ledgr_off false" test "$out" = "$WL" -a "$(srec $X1 '[.space, .ledgr_off] | @tsv')" = "$SPA	false" -a "$(jq -r .space "$SPD/terminals/t90.json")" = "$SPA"
+out=$(sstart t91 $X2)
+t "a disabled space: SessionStart prints nothing, records ledgr_off, writes the map with the space" test -z "$out" -a "$(srec $X2 .ledgr_off)" = true -a "$(jq -r '.session_id + " " + .space' "$SPD/terminals/t91.json")" = "$X2 $SPB"
+t "...and no spool event (no session_start)" test "$(sev $X2 session_start)" = 0
+out=$(sprompt t91 $X2 o1 "go [A1]"); out+=$(sprompt t91 $X2 o2 "$SH1")
+t "off: prompts print nothing, make no prompt event, and a pasted answer sheet does not land" test -z "$out" -a "$(sev $X2 prompt)$(sev $X2 answers_landed)" = 00
+t "...the record still counts the turns and refreshes the space" test "$(srec $X2 '[.turn, .space, .state] | @tsv')" = "2	$SPB	working"
+sstop t91 $X2 "I stopped here. I need the production database password before I go on."
+sstop t91 $X2 "A second reply in the same off period, long enough to be extracted if ledgr were on."
+sleep 1
+t "off Stop: no pending, stop or asks event, no turn text, state idle" test "$(sev $X2 pending)$(sev $X2 stop)$(sev $X2 asks)" = 000 -a ! -e "$SPD/turns/$X2" -a "$(srec $X2 .state)" = idle
+t "...hook.log explains it once per off period" test "$(grep -c "t91 Stop $X2 skipped: ledgr is off in space $SPB" "$SPD/log/hook.log")" = 1
+sset ""; out=$(sprompt t91 $X2 o3 "/btw still off?")
+t "space enabled, a local /btw: prints nothing, keeps the off record" test -z "$out" -a "$(srec $X2 .ledgr_off)" = true
+out=$(sprompt t91 $X2 o4 "back on")
+t "off -> on at the next real prompt: prints the mode's wording once, ledgr_off false, instruct_mode ledgr" test "$out" = "$WL" -a "$(srec $X2 '[.ledgr_off, .instruct_mode, (.off_skip_logged // "none")] | @tsv')" = "false	ledgr	none"
+t "...that prompt makes its prompt event (turn 3: the /btw counted none)" jq -e 'map(select(.prompt_id=="o4")) | length==1 and .[0].turn==3' <<<"$(rev "$SPD" $X2 prompt)"
+out=$(sprompt t91 $X2 o5 "next"); t "...once" test -z "$out"
+sstop t91 $X2 "Back on, this reply is extracted again: Please confirm the deploy."; wait_sp() { local i; for i in $(seq 40); do [ "$(sev "$1" asks)" -ge "$2" ] 2>/dev/null && return 0; sleep 0.25; done; return 1; }; wait_sp $X2 1
+t "...and its Stop makes pending and asks again" test "$(sev $X2 pending)" = 1 -a "$(sev $X2 asks)" = 1
+sset "\"$SPB\""; out=$(sprompt t91 $X2 o6 "now off again")
+t "on -> off at the next real prompt: prints exactly the space-off text, ledgr_off true, no prompt event" test "$out" = "$WSO" -a "$(srec $X2 .ledgr_off)" = true -a "$(rev "$SPD" $X2 prompt | jq 'map(select(.prompt_id=="o6")) | length')" = 0
+out=$(sprompt t91 $X2 o7 "still off"); t "...once" test -z "$out"
+t "space-off text: off in this space, no block, no pointer line, no ledgr tools" bash -c 'grep -q "ledgr is off in this space" "$1" && grep -q "no ledgr-asks" "$1" && grep -q "declare_asks, resolve_asks" "$1"' _ "$BIN/lib/asks-instruction-space-off.txt"
+out=$(sstart t91 $X2 resume)
+t "a resume while off, of a session that had a wording: the space-off text (its context may still carry it)" test "$out" = "$WSO"
+out=$(sstart t91 $X2 clear); t "a clear while off: nothing" test -z "$out"
+out=$(sstart t90 $X1); sprompt t90 $X1 m1 "go" >/dev/null
+sset "\"$SPA\""; sstop t90 $X1 "The space was disabled while I worked. Please confirm the deploy to staging."; sleep 1
+t "a space disabled mid-turn: that Stop is skipped (no pending)" test "$(sev $X1 pending)" = 0
+sset ""; sstop t90 $X1 "Another Stop of a turn that began on, after the space came back on."; sleep 0.3
+t "a turn that began on ends on once the space is on again" test "$(sev $X1 pending)" = 1
+sset "\"$SPB\"" prose; sstart t91 $X3 >/dev/null
+t "prose mode, a disabled space: nothing printed at start, no wording recorded" test "$(srec $X3 '[.ledgr_off, (.instruct_mode // "none")] | @tsv')" = "true	none"
+sset "" prose; out=$(sprompt t91 $X3 p1 "go"); sset "\"$SPB\"" prose; out+=$(sprompt t91 $X3 p2 "go")
+t "prose mode: off -> on and on -> off print nothing (no wording to give or revoke)" test -z "$out" -a "$(srec $X3 .ledgr_off)" = true
+sset "\"$SPB\""; out=$(sprompt t91 $X4 f1 "first seen here")
+t "a session first seen at a prompt in a disabled space: nothing printed, ledgr_off true, no event" test -z "$out" -a "$(srec $X4 .ledgr_off)" = true -a "$(sev $X4 prompt)" = 0
+sset ""; sstart t91 $X5 >/dev/null; jq 'del(.ledgr_off)' "$SPD/sessions/$X5.json" >"$ROOT/x.json" && mv "$ROOT/x.json" "$SPD/sessions/$X5.json"
+sset "\"$SPB\""; out=$(sprompt t91 $X5 r1 "go")
+t "a running session from before this build (no ledgr_off, had the ledgr wording): the space-off text at its next prompt" test "$out" = "$WSO" -a "$(srec $X5 .ledgr_off)" = true
+# The lookup: missing, failing, slow or garbled hc.
+sset "\"$SPB\""; out=$(LEDGR_HC= sstart t91 $X6)
+t "LEDGR_HC empty (no hc): space null, so the session counts as on" test "$out" = "$WL" -a "$(srec $X6 .space)" = null
+out=$(LEDGR_HC=/nonexistent/hc sprompt t91 $X6 n1 "go"); t "a missing hc binary: space null, on" test -z "$out" -a "$(srec $X6 '[(.space // "null"), .ledgr_off] | @tsv')" = "null	false"
+sstart t91 $X7 >/dev/null; rm -f "$FAKE_HC_DIR/t91.json"
+out=$(sprompt t91 $X7 k1 "go"); t "hc exits non-zero: the recorded space is kept (still off, nothing printed)" test -z "$out" -a "$(srec $X7 '[.space, .ledgr_off] | @tsv')" = "$SPB	true"
+out=$(FAKE_HC_BAD=1 sprompt t91 $X7 k2 "go"); t "hc prints no JSON: the recorded space is kept" test -z "$out" -a "$(srec $X7 .space)" = "$SPB"
+T0=$(now); out=$(FAKE_HC_SLEEP=2 sprompt t91 $X7 k3 "go"); T1=$(now); ms=$($PYQ -I -c "print(int(($T1-$T0)*1000))")
+t "hc slower than 300 ms: the hook goes on (${ms} ms), the recorded space is kept, hook.log says so" test "$ms" -lt 1500 -a -z "$out" -a "$(srec $X7 .space)" = "$SPB" -a "$(grep -c "t91 space lookup: hc get timed out" "$SPD/log/hook.log")" -ge 1
+printf '{"address":"t92","labels":{"where":"x"}}\n' >"$FAKE_HC_DIR/t92.json"; out=$(sstart t92 $X8)
+t "a terminal without the herdr.space label: space null, on" test "$out" = "$WL" -a "$(srec $X8 .space)" = null
+t "no hook errors in the disabled-space runs" test ! -s "$SPD/log/hook.err"
+
 echo "== layout"
 $PYQ -I -B -S -c 'import sys; sys.path[:0]=[sys.argv[1]]; import ledgr_spool; bad=[m for m in sys.modules if m.startswith(("claude_","last_assistant","providers"))]; sys.exit(1 if bad else 0)' "$BIN/lib"
 ok $? "lib/ledgr_spool imports with no Claude-specific or provider modules"
 
 echo "== timing (20 runs each, wall time of the entry script)"
-$PYQ -I - "$BIN" "$ROOT/timing" <<'PY'
+$PYQ -I - "$BIN" "$ROOT/timing" "$OUTER_T" <<'PY'
 import json, os, subprocess, sys, time
-bin_, data = sys.argv[1], sys.argv[2]
-env = dict(os.environ, LEDGR_DATA=data, HC_TERMINAL_ID="t98")
+bin_, data, outer = sys.argv[1], sys.argv[2], sys.argv[3]
+# With a Herdr terminal of its own, the run times the real `hc get` (read only) on it; else none.
+env = dict(os.environ, LEDGR_DATA=data, HC_TERMINAL_ID=outer or "t98")
+env.pop("LEDGR_HC", None)
+if not outer:
+    env["LEDGR_HC"] = ""
+print(f"  space lookup: {'hc get ' + outer + ' --json (real)' if outer else 'none (no Herdr terminal)'}")
 sid = "55555555-0000-0000-0000-000000000000"
 scripts = {"SessionStart": "session-start.sh", "UserPromptSubmit": "user-prompt-submit.sh", "Stop": "stop.sh"}
 conf = "ledgr confluence br_00000000-0000-4000-8000-000000000001 rq_00000000-0000-4000-8000-000000000002\nParked question Q1, from turn 1: why?\nConclusion:\nanswer: because\nThis is the result of branch br-q1-0001."

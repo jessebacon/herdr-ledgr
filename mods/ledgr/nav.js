@@ -97,6 +97,14 @@ export function pasteBlock(t, paste = true) {
   return a.status === "blocked" ? "blocked" : null;
 }
 
+// A message staged for a prompt (the answer sheet, one answer, a confluence) ends with one empty line,
+// so a second paste into the same prompt starts after a blank line instead of running into the first
+// (Jesse, 2026-11-07). Only the end changes: trailing line breaks become exactly "\n\n"; the first
+// line (the marker the hooks look for) and everything else stay as composed.
+export function promptText(text) {
+  return `${String(text ?? "").replace(/[\r\n]+$/, "")}\n\n`;
+}
+
 // The one-click paste. Must be called from an event handler (the clipboard is written with that
 // call's cx). In order: the text on the clipboard; the target's pane focused; then, if pasteBlock
 // allows it, a task looks at Herdr's focus every PASTE.stepMs, and once the target has been the
@@ -105,13 +113,17 @@ export function pasteBlock(t, paste = true) {
 // within PASTE.waitMs nothing is pasted and the text stays on the clipboard (today's ⌘V by hand).
 // Returns "pasting" (the task decides) or the pasteBlock reason; `done(result, cx)` gets
 // {pasted: true, ms} or {pasted: false, why} ("off", "gone", "plain", "blocked", "focus",
-// "clipboard", "error"), synchronously for a reason known at once.
+// "clipboard", "error"), synchronously for a reason known at once. The clipboard gets
+// promptText(text): the message plus one empty line, pasted or not.
 export function stageIntoPrompt(text, terminal, cx, { paste = true, done } = {}) {
-  cx.write_to_clipboard(text);
+  const msg = promptText(text);
+  cx.write_to_clipboard(msg);
   const why = pasteBlock(terminal, paste);
   if (why !== "gone") run("pane.focus", { terminal });
   if (why) { done?.({ pasted: false, why }, cx); return why; }
-  const same = (a) => String(a ?? "").replace(/\r\n?/g, "\n") === String(text).replace(/\r\n?/g, "\n");
+  // CRLF and LF are one; so is a clipboard that lost or gained trailing line breaks.
+  const norm = (a) => String(a ?? "").replace(/\r\n?/g, "\n").replace(/\s+$/, "");
+  const same = (a) => norm(a) === norm(msg);
   cx.spawn(async (cx) => {
     let seen = 0, r = { pasted: false, why: "focus" };
     try {

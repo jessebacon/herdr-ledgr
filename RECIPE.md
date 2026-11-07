@@ -35,7 +35,12 @@ Tell the person all of this before copying anything (the manual's step 1).
   `/compact`; Claude Code adds it to the context. When the extractor finds a blocking ask in a reply
   that had no block, the session's next prompt carries it once more (`instruct_reinject`); when you
   change `asks.handoff`, each running session's next prompt carries the new wording once (to `prose`:
-  two lines telling it to stop, `asks-instruction-off.txt`). Nothing else is ever printed.
+  two lines telling it to stop, `asks-instruction-off.txt`). In a space where ledgr is off
+  (`spaces.disabled`) nothing is printed, except three lines (`asks-instruction-space-off.txt`:
+  ignore every earlier ledgr instruction, declare nothing, list needs in the reply as usual) once to
+  a session that had a wording, at its first prompt after the space was turned off or at a resume or
+  compact while off; when the space is on again, its next prompt carries the mode's wording once.
+  Nothing else is ever printed.
 - **Registers an MCP server with Claude Code (asked; default yes when you answer the questions, never
   with `--yes` unless the answers or `--mcp on` say so).** For each chosen Claude config folder the
   installer shows and then runs Claude Code's own command,
@@ -73,7 +78,9 @@ Tell the person all of this before copying anything (the manual's step 1).
   (Resume session), `hc kill` and `hc rm` (Close branch, after its answer landed),
   `git -C <cwd> rev-parse` (whether "isolate in a worktree" applies), `/usr/bin/which claude` once,
   and `bash mods/ledgr/bin/adapters/claude/extract.sh --retry …` (the Retry button). The hooks run
-  `python3`, `/usr/bin/security find-generic-password` (the key) and `/usr/bin/curl` (the call).
+  `python3`, `/usr/bin/security find-generic-password` (the key), `/usr/bin/curl` (the call) and,
+  at SessionStart and each prompt, `hc get $HC_TERMINAL_ID --json` (read only, killed after 300 ms)
+  for the terminal's `herdr.space` label, to know whether ledgr is off in that space.
 - **Reads the clipboard and pastes into a prompt.** The capture box reads the clipboard when it opens,
   to offer the copied passage as the question's quote (attached only if it matches the agent's saved
   turn text or screen). The panel writes the clipboard for Paste answer, Paste answers, Paste into
@@ -112,7 +119,15 @@ Tell the person all of this before copying anything (the manual's step 1).
     by agent and profile, each group headed by how its asks arrive: `declares asks` in `accent`,
     `extractor only` or `no asks`; then ENDED SESSIONS), the pin (a faint outline `pin` while the panel follows focus;
     pinned, an `accent` pill "pinned" whose tooltip says "click to follow focus"), `turn N` (in `working` colour with
-    "· working" while the agent works), and a `demo` pill in demo mode.
+    "· working" while the agent works), an `off` pill where ledgr is off, and a `demo` pill in demo mode.
+  - The session list's first row is the switch for the focused pane's space: "ledgr off in this
+    space" (or "ledgr on in this space", in `accent`) with the space's name small and dim beside it;
+    rows of sessions in an off space read "off" instead of "N open".
+  - Off in this space: instead of the lanes and the footer, "ledgr is off in this space", a dim line
+    (no chips, no ⌘J, no instruction or extraction; items are kept and show again when it is on), a
+    primary button "ledgr on in this space", and a line pointing at the session menu. A session
+    pinned or picked in another space still shows its lanes; one whose own space is off reads "ledgr
+    is off in <space name>".
   - The agent label names the session's Claude profile when it is not the default one: a Claude Code
     started with `CLAUDE_CONFIG_DIR=~/.claude-work` (a second account, `claude-work`) reads `claude · work`
     in the header pill, in its session-list group (`CLAUDE · WORK`, a group of its own) and row pill, in
@@ -127,7 +142,11 @@ Tell the person all of this before copying anything (the manual's step 1).
   - **YOUR QUESTIONS** lane (top): parked questions, newest first. Each row: status glyph,
     `Question 3`, kind (`question`, `bookmark`), text, and a dim line `turn 14 · re Ask 5 · “quote…”`; a
     question parked mid-turn reads "parked during turn 17; anchors at end of turn" with a hollow glyph.
-    Badges: `/btw`, `sent at turn 18`, `branched`.
+    Badges: `/btw`, `sent at turn 18`, `branched`. The lane head carries a quiet `Clear 3` (10.5 px,
+    `dim`) while the session has open or deferred parked questions without a branch; clicked once it
+    reads "Clear 3 questions? 1 branched kept" in `blocked` on a faint `blocked` tint for 4 s, then
+    "Clearing 3…" until the writer has applied it. Cleared rows sit in the closed fold with a dim
+    `cleared` badge.
   - **ASKED OF YOU** lane (second): folded or open only when you click its head (kept across reloads);
     while the agent works the head says "agent working" in `working`. The head carries the threshold
     control, a quiet `blocking only ▾` / `blocking + needed ▾` / `everything ▾` menu that writes
@@ -154,7 +173,9 @@ Tell the person all of this before copying anything (the manual's step 1).
 - **Capture box** (⌘J): a popup at the top of the window, 600 × 236, no dimming, so the stream stays
   visible. Title "Park a question", then `t21 · <name> · turn N (working)` and the agent pill; the
   question field; the clipboard quote with a checkbox when it checks out, else a "Quote (optional)"
-  field and a one-line reason; key hints; `session: t21 ↻ 1/3` to switch.
+  field and a one-line reason; key hints; `session: t21 ↻ 1/3` to switch. Over a pane in a space
+  where ledgr is off: the title, "ledgr is off in this space", "Nothing is parked. The ledgr panel's
+  session menu (›) turns it on again for this space." and an Esc hint; no field.
 - **Header chip** (optional mod `ledgr-pane`: Herdr's `pane` header plus the chip), 18 px, 10.5 px
   text: hidden with nothing open; `? 2` dim while the agent works and you parked questions this turn;
   `1 blocking · 2 asks · 1 parked` in `blocked` on a faint `blocked` tint while a blocking ask is open,
@@ -243,7 +264,24 @@ Tell the person all of this before copying anything (the manual's step 1).
   own prompt (a permission menu), or when the focus does not arrive in time; the status line says so
   and how to paste with ⌘V. A second click while a paste is pending is ignored. A paste joins a draft
   already in the prompt. With the switch off the buttons read Copy answers, Copy answer, Send to trunk
-  and Copy confluence again, and the person types a lead-in, then ⌘V, Enter.
+  and Copy confluence again, and the person types a lead-in, then ⌘V, Enter. Either way the message
+  ends with one empty line (marker line still first), so two pastes into one prompt stay apart; the
+  trunk's hook lands each message a prompt holds, one event apiece.
+- Clear all questions: Clear N on the YOUR QUESTIONS head, clicked twice within 4 s, sends one
+  `clear_questions` event for the shown session. Every open or deferred parked question without a
+  branch is dismissed and marked cleared (a launch that was refused or failed counts as no branch);
+  a branched or `rejoin_pending` question always stays, so no branch is left with nothing to close
+  it. The status line says "3 questions cleared, 1 branched kept". Reopen in the closed fold brings
+  one back.
+- Off per space (`spaces.disabled`, Herdr space ids): the session menu's first row turns ledgr off or
+  on for the focused pane's space, written to `config.json` with the same compare-and-swap as the
+  threshold menu. In an off space the hooks send no event, print no instruction (the off text once,
+  above), land nothing and start no extraction, and the MCP server records nothing and answers
+  `off: true`, so the agent lists its needs in prose as if ledgr were not installed. The writer
+  draws no chip there and does not open the panel for it, ⌘J parks nothing, and the panel shows the
+  off state. Items are kept, hidden, and return when the space is on again. A space the hooks cannot
+  name (no label, no `hc`) counts as on; a lookup that fails or takes over 300 ms keeps the space
+  recorded before.
 
 ## Built from
 
@@ -281,18 +319,20 @@ Tell the person all of this before copying anything (the manual's step 1).
   the `worktree` dialog (Branch's "isolate in a worktree"), and `pane` (what `ledgr-pane` clones).
 - **herdr**: `watchFolder`, `readTextFile`, `writeTextFile`, `fs/promises`, `shared`/`setShared`
   (`ledgr.writer`, `ledgr.ping`, `ledgr.chips` (`a` counts at or above the threshold, `b` the blocking
-  ones, `w` the agent working), `ledgr.focus`, `ledgr.ui` `{animations, panel}`), `focused`,
-  `agents`, `panes`, `terminals`, `layout`, `placement`, `run` (`pane.focus`, `layout.select`,
+  ones, `w` the agent working), `ledgr.focus`, `ledgr.ui` `{animations, panel, off}`), `focused`
+  (its `space` too), `agents` (their `space`), `panes`, `terminals` (the `herdr.space` label),
+  `spaces` (a space's name for the switch), `layout`, `placement`, `run` (`pane.focus`, `layout.select`,
   `layout.show`, `layout.hide`, `mod.open`, `terminal.keep`, `terminal.peek`; `terminal.paste` in
   `nav.js` `stageIntoPrompt` only), `openOverlay`, `closeOverlay`, `nextCommand`, `hc`, `exec`;
   `cx.read_from_clipboard`, `cx.write_to_clipboard`.
 - **Data**, `<Herdr home>/ledgr-data/`: `store.json` (written only by the writer), `spool/` (one JSON
-  event per file), `terminals/<t>.json` (identity map), `sessions/<sid>.json` and
+  event per file), `terminals/<t>.json` (identity map, with the terminal's `space`),
+  `sessions/<sid>.json` (with `space` and `ledgr_off`) and
   `sessions/<sid>/decisions.md`, `turns/<sid>/<n>.md`, `mcp/<sid>/<turn>.json` (tool declarations),
   `snapshot.json`, `archive/`, `log/`, `tmp/`, `config.json` (`extract.provider`, `model`,
   `base_url`, `mode`, `threshold`; `asks.handoff`, `instruct_block`, `instruct_reinject`;
-  `ui.animations`, `ui.foldAsksWhileWorking`, `ui.pasteIntoPrompt`, `ui.panel`; the full list with
-  defaults is in the README's Configuration table).
+  `ui.animations`, `ui.foldAsksWhileWorking`, `ui.pasteIntoPrompt`, `ui.panel`; `spaces.disabled`;
+  the full list with defaults is in the README's Configuration table).
 - **Install.** Both paths end in the same files:
   - `./install.sh` asks each question with its reason (defaults in brackets are what is installed
     now); `./install.sh --yes --answers ledgr.install.json` asks nothing (schema:
@@ -341,8 +381,12 @@ Tell the person all of this before copying anything (the manual's step 1).
   `ledgr.pick:<handle>:<n>`, `ledgr.copy-answer:<handle>`, `ledgr.session:<terminal>`,
   `ledgr.below-threshold`, `ledgr.act:<handle>:<resolve|dismiss|reopen|promote>`,
   `ledgr.whole:<handle>`, `ledgr.menu:<handle>:<defer|more>` / `menu:threshold` / `menu:off`,
-  `ledgr.threshold:<level>`, in the demo `ledgr.demo-ask:<level>` and `ledgr.demo-answer:<handle>`,
-  and `ledgr-pane.demo-chip:<state|off>`.
+  `ledgr.threshold:<level>`, `ledgr.space:<off|on|toggle>` (the focused pane's space; in the demo it
+  only draws the off state), `ledgr.clear-questions` (a click on Clear N: twice to clear), in the demo
+  `ledgr.demo-ask:<level>` and `ledgr.demo-answer:<handle>`, and `ledgr-pane.demo-chip:<state|off>`.
+- Off per space has two known gaps: a branch launched into an off space records its lineage but sends
+  no `branch_started` event; and the capture box over an off pane stays open until Esc, Enter or a
+  click dismisses it.
 - Motion is native (`transition`), never a timer; an idle panel does not render. No reduced-motion
   setting reaches a mod: `ui.animations: false` is the switch.
 - A branch shares the trunk's checkout unless isolated: the preamble forbids edits, nothing enforces it.

@@ -29,6 +29,9 @@
 //   threshold:<blocking|needed|optional> (the threshold menu's choice: writes extract.threshold),
 //   demo-ask:<blocking|needed|optional> and demo-answer:<handle> (demo only),
 //   render-stats (the render count, to ledgr-data/log/panel-renders-<copy>.json).
+//   Spaces: space:<off|on|toggle> (the session menu's switch for the focused pane's space: writes
+//   spaces.disabled in ledgr-data/config.json; demo: draws the off state, nothing saved),
+//   clear-questions (the YOUR QUESTIONS head's Clear N, as a click: twice, arm then clear).
 import { View } from "gpui-kit";
 import { props, nextCommand } from "herdr";
 import { Panel } from "./panel.js";

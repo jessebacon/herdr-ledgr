@@ -15,10 +15,20 @@ emits branch_started; source "compact" emits compacted.
 Landing (Phase 3): after the prompt event, a UserPromptSubmit whose prompt carries a ledgr marker line
 (lib/ledgr_landing.py: "ledgr confluence <branch> <item>", "ledgr answers <session>") as the first
 line of a pasted block, or of the prompt (after at most a one-line lead-in), emits confluence_landed or
-answers_landed, 1 ms or more after the prompt event so the mod applies it after the turn has started.
-The Claude-specific part is the paste wrapper: Claude Code puts pasted text between
-<pasted_content id="..."> and </pasted_content id="..."> lines, so a lead-in the person types before
-pasting does not hide the marker. Any other prompt is untouched; landing prints nothing.
+answers_landed, 1 ms or more after the prompt event so the mod applies it after the turn has started;
+one event per message when several follow one another (two answer sheets pasted into one prompt),
+each 1 ms after the one before. The Claude-specific part is the paste wrapper: Claude Code puts pasted
+text between <pasted_content id="..."> and </pasted_content id="..."> lines, so a lead-in the person
+types before pasting does not hide the marker. Any other prompt is untouched; landing prints nothing.
+Disabled spaces: SessionStart and UserPromptSubmit read the terminal's Herdr space (ledgr_map.herdr_space,
+one `hc get`); Stop and SessionEnd use the recorded one. A session whose space is in config
+spaces.disabled is off and behaves as if ledgr were not installed: the record and the map are still
+written (with `space`), but no spool event, no turn text, no landing, no extractor, no instruction.
+The session record keeps `ledgr_off`, and a change is told once, at a real prompt: on -> off prints
+lib/asks-instruction-space-off.txt (only to a session that had a wording), off -> on prints the mode's
+wording. A SessionStart while off prints nothing, except the off text at a resume or compact of a
+session that had a wording (its context may still carry it). A Stop is off when the recorded space
+is disabled now or the turn began off, so a turn that started off ends off.
 The instruction is the wording for the session's handoff mode (ledgr_config.handoff: asks.handoff
 "ledgr" -> lib/asks-instruction-ledgr.txt, "both" -> lib/asks-instruction-both.txt, "prose" or
 instruct_block false -> nothing). It is printed at every SessionStart (startup, resume, clear,
@@ -94,23 +104,84 @@ def session_name_fallback(sid, cfg_dir=None):
 
 
 def landing(t, sid, rec, prompt):
-    """Emit confluence_landed / answers_landed when the prompt carries a ledgr marker line."""
+    """Emit confluence_landed / answers_landed for each ledgr message the prompt carries, in order."""
     if "ledgr confluence " not in prompt and "ledgr answers " not in prompt:
         return
-    hit = L.detect(prompt, wrapper=(PASTE_OPEN, PASTE_CLOSE))
-    if not hit:
+    hits = L.detect_all(prompt, wrapper=(PASTE_OPEN, PASTE_CLOSE))
+    if not hits:
         return
     turn = int(rec.get("turn") or 0)
     at = max(C.now_ms(), int(rec.get("updated_at") or 0) + 1)    # after the prompt event, in name order
     pid_ = rec.get("prompt_id")
-    if hit["kind"] == "confluence":
-        S.confluence_landed(t, sid, turn=turn, branch_id=hit["branch_id"], item_id=hit["item_id"],
-                            prompt_id=pid_, conclusion_head=hit.get("conclusion_head"), at=at)
-        C.log(f"{t} confluence_landed {sid} turn={turn} branch={hit['branch_id']}")
+    for i, hit in enumerate(hits):
+        if hit["kind"] == "confluence":
+            S.confluence_landed(t, sid, turn=turn, branch_id=hit["branch_id"], item_id=hit["item_id"],
+                                prompt_id=pid_, conclusion_head=hit.get("conclusion_head"), at=at + i)
+            C.log(f"{t} confluence_landed {sid} turn={turn} branch={hit['branch_id']}")
+        else:
+            S.answers_landed(t, sid, turn=turn, for_session=hit["for_session"], handles=hit["handles"],
+                             answers=hit["answers"], prompt_id=pid_, at=at + i)
+            C.log(f"{t} answers_landed {sid} turn={turn} handles={','.join(hit['handles'])}")
+
+
+def recorded(sid):
+    cur = C.read_json(C.path("sessions", sid + ".json"), {})
+    return cur if isinstance(cur, dict) else {}
+
+
+def prompt_turn(t, sid, rec, cfg, mode, off, prompt):
+    """A real (not local) prompt: tell a change of the space's on/off state once, else as before:
+    landing, the reinject reminder, a change of handoff mode. One record write at most."""
+    prev_off = rec.get("ledgr_off") is True
+    turn = rec.get("turn")
+    upd = {}
+    if off:
+        if not prev_off:                             # on -> off (or never told: a record from before)
+            new = rec.get("started_at") == rec.get("updated_at")          # first seen at this prompt
+            had = not new and (rec.get("instruct_mode") or "both") != "prose"
+            told = had and instruct("space-off")
+            C.log(f"{t} space-off {sid} turn={turn} space={rec.get('space')}" + (" (told to stop)" if told else ""))
+            upd.update(ledgr_off=True, reinject_pending=None)
+    elif prev_off:                                   # off -> on: the prompt event was written; the wording
+        landing(t, sid, rec, prompt)
+        told = mode != "prose" and instruct(mode)
+        C.log(f"{t} space-on {sid} turn={turn} space={rec.get('space')}" + (f" (wording {mode})" if told else ""))
+        upd.update(ledgr_off=False, off_skip_logged=None, reinject_pending=None, instruct_mode=mode)
     else:
-        S.answers_landed(t, sid, turn=turn, for_session=hit["for_session"], handles=hit["handles"],
-                         answers=hit["answers"], prompt_id=pid_, at=at)
-        C.log(f"{t} answers_landed {sid} turn={turn} handles={','.join(hit['handles'])}")
+        landing(t, sid, rec, prompt)
+        due = rec.get("reinject_pending") is not None and M.take_reinject(sid) \
+            and mode != "prose" and cfg.get("instruct_reinject") is not False
+        last = rec.get("instruct_mode")
+        switched = (last or "both") != mode and not (last is None and mode == "prose")
+        if (due or switched) and instruct("off" if mode == "prose" else mode):
+            C.log(f"{t} {'reinject' if due else 'handoff ' + str(last) + '->' + mode} {sid} turn={turn}"
+                  + (f" (after turn {rec.get('reinject_pending')})" if due else ""))
+        if switched or last is None:
+            upd["instruct_mode"] = mode
+        if rec.get("ledgr_off") is None:
+            upd["ledgr_off"] = False
+    if upd:
+        M.set_fields(sid, **upd)
+
+
+def start_session(t, sid, rec, mode, off, src):
+    """SessionStart: the mode's wording when on; when off nothing, except the off text at a resume
+    or compact of a session that had a wording. One record write at most."""
+    upd = {}
+    if off:
+        told = src in ("resume", "compact") and rec.get("instruct_mode") in ("ledgr", "both") \
+            and instruct("space-off")
+        C.log(f"{t} space-off {sid} at {src} space={rec.get('space')}" + (" (told to stop)" if told else ""))
+        upd.update(ledgr_off=True, reinject_pending=None)
+    else:
+        if mode != "prose" and instruct(mode) and rec.get("reinject_pending") is not None:
+            upd["reinject_pending"] = None          # the instruction is in context again already
+        if rec.get("instruct_mode") != mode:
+            upd["instruct_mode"] = mode
+        if rec.get("ledgr_off") is not False:
+            upd.update(ledgr_off=False, off_skip_logged=None)
+    if upd:
+        M.set_fields(sid, **upd)
 
 
 def run(event, agent):
@@ -140,35 +211,31 @@ def run(event, agent):
         fields["local"] = bool(LOCAL_CMD.match(p))
     if event == "SessionStart":
         fields["session_name_fallback"] = lambda s: session_name_fallback(s, cdir)
+    if event in ("SessionStart", "UserPromptSubmit"):
+        fields["space"] = M.herdr_space()           # one `hc get`; UNKNOWN keeps the recorded space
+        space = fields["space"] if fields["space"] is not M.UNKNOWN else recorded(sid).get("space")
+        off = M.space_off(cfg, space)
+    else:                                           # Stop, SessionEnd: the recorded space, no `hc` call
+        cur = recorded(sid)
+        off = M.space_off(cfg, cur.get("space")) or cur.get("ledgr_off") is True
+    fields["quiet"] = off
     rec = M.handle(event, sid, t, agent or AGENT, fields)
     if rec is None:
         return False
     mode = K.handoff(cfg)
     if event == "UserPromptSubmit" and not fields.get("local"):
-        landing(t, sid, rec, fields.get("prompt") if isinstance(fields.get("prompt"), str) else "")
-        due = rec.get("reinject_pending") is not None and M.take_reinject(sid) \
-            and mode != "prose" and cfg.get("instruct_reinject") is not False
-        last = rec.get("instruct_mode")
-        switched = (last or "both") != mode and not (last is None and mode == "prose")
-        if (due or switched) and instruct("off" if mode == "prose" else mode):
-            C.log(f"{t} {'reinject' if due else 'handoff ' + str(last) + '->' + mode} {sid} turn={rec.get('turn')}"
-                  + (f" (after turn {rec.get('reinject_pending')})" if due else ""))
-        if switched or last is None:
-            M.set_instruct_mode(sid, mode)
+        prompt_turn(t, sid, rec, cfg, mode, off, fields.get("prompt") if isinstance(fields.get("prompt"), str) else "")
     if event == "SessionStart":
         M.prune(C.path("spool"), SPOOL_DAYS * 86400)
         M.prune(C.path("tmp"), 86400)
         M.prune(C.path("locks"), SPOOL_DAYS * 86400)
-        if mode != "prose" and instruct(mode) and rec.get("reinject_pending") is not None:
-            M.take_reinject(sid)                    # the instruction is in context again already
-        if rec.get("instruct_mode") != mode:
-            M.set_instruct_mode(sid, mode)
-    return True
+        start_session(t, sid, rec, mode, off, rec.get("last_source"))
+    return not (off and event == "Stop")            # an off Stop starts no extractor (stop.sh)
 
 
 def instruct(mode):
     """Print the ledgr-asks wording for a handoff mode ("ledgr", "both"; "off" revokes an earlier
-    one). It becomes model context. True when printed."""
+    one; "space-off" says ledgr is off in this space). It becomes model context. True when printed."""
     txt = C.read_text(os.path.join(C.LIB, f"asks-instruction-{mode}.txt"))
     if not txt:
         return False

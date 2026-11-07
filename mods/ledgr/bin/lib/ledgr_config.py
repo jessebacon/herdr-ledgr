@@ -45,6 +45,10 @@ DEFAULT_CONFIG = {
            "pasteIntoPrompt": True},          # the panel's: True = Paste answer(s) / Paste into trunk paste
                                               # the message into the target's prompt (terminal.paste, once
                                               # its pane has the focus; never Enter); False = clipboard + focus
+    "spaces": {"disabled": []},       # Herdr space ids where ledgr is off: no instruction and no
+                                      # extraction for a session there (the hooks), no chip, no capture,
+                                      # the panel says so; items are kept. The panel's session menu
+                                      # writes it. A list: a config.json value replaces it whole
     "retention_days": 14,
 }
 

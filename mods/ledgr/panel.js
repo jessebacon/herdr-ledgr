@@ -33,19 +33,27 @@
 // and collapses when its height is known; an answered ask glows in `done` and folds its details;
 // a new suggestion lights its fold line. All of it native (`transition`): no timer redraws, and an
 // idle panel does not render (ledgr.render-stats counts renders).
+// Spaces (2026-11-07): the session menu's first row turns ledgr off (or on) in the focused pane's space
+// (config.json spaces.disabled, setSpaceOff). Where it is off, the panel shows "ledgr is off in this
+// space" with the switch instead of that session's lanes (offState); a session picked in another space
+// (pinned, or from the menu) still shows. Items are kept, only hidden.
+// Clear N (2026-11-07): the YOUR QUESTIONS head clears the shown session's open and deferred parked
+// questions in two clicks (one `clear_questions` event); branched and rejoin_pending ones stay, the rest
+// go to Closed labelled "cleared", each with Reopen.
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, Popup } from "gpui-base";
-import { theme, props, shared, setShared, focused, layout, run, watchFolder, readTextFile, writeTextFile, openOverlay, agents, terminals, panes, exec, home } from "herdr";
+import { theme, props, shared, setShared, focused, layout, run, watchFolder, readTextFile, writeTextFile, openOverlay, agents, terminals, panes, spaces, exec, home } from "herdr";
 import * as fs from "fs/promises";
 import { randomUUID } from "crypto";
-import { FORCE_DEMO, DEFAULTS, loadConfig, dataDir, turnPath, agentLabel, storePath, panelPlace, panelShown, liveHome, handoffOf, HANDOFF_WORDS } from "./config.js";
+import { FORCE_DEMO, DEFAULTS, loadConfig, dataDir, turnPath, agentLabel, storePath, panelPlace, panelShown, liveHome, handoffOf, HANDOFF_WORDS, spaceOff, withSpaceOff, terminalSpace } from "./config.js";
 import { Store, isAgentAsk, isHuman, isClosed, levelOf, isSuggestion, isBlocking, thresholdOf, LEVELS, groupOpen } from "./store.js";
 import { writeEvent } from "./spool.js";
 import { Writer, writerClaim, engineDrift } from "./writer.js";
-import { goToAnchor, stageText, stageIntoPrompt, PASTE, busy, btwText } from "./nav.js";
+import { goToAnchor, stageText, stageIntoPrompt, promptText, PASTE, busy, btwText } from "./nav.js";
 import { demoData, FIXTURE_TURNS, DEMO_SESSION } from "./fixtures.js";
 import { manifest, manifestLines, liveStatus, maxDepthOf, preamble, branchName, transcriptPathOf } from "./branch.js";
-import { itemWords as H, paneWords as P, trunkWords, originWords, branchWords, sessionWords, resolvedByWords, stageLabels, stagedWords } from "./words.js";
+import { itemWords as H, paneWords as P, trunkWords, originWords, branchWords, sessionWords, resolvedByWords, stageLabels, stagedWords,
+  dismissedByWords, clearLabel, clearConfirm, clearedWords, OFF_HERE, spaceToggleWords } from "./words.js";
 import { loadAdapters, adapterOf, asksMode } from "./adapters.js";
 import { confluenceMessage, answersSheet, conclusionRequest, extractConclusion, forkTurnOf, wrapperWords, leadIn, answersLeadIn } from "./confluence.js";
 
@@ -62,6 +70,9 @@ const HOUR = 3600e3;
 const TH_WORDS = { blocking: "blocking only", needed: "blocking + needed", optional: "everything" };
 const DONE_TIP = "Done: you did or decided it";
 const NOT_NEEDED_TIP = "Not needed: close it; the agent may raise it again";
+// How long Clear N waits for its second click.
+const CLEAR_ARM_MS = 4000;
+const obj = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : {});
 const BR_WORD = { working: "working", blocked: "needs you", done: "done", idle: "idle", starting: "starting", launching: "launching…",
   launched: "starting", running: "running", closed: "closed", ended: "ended", failed: "launch failed", refused: "refused",
   nostart: "did not start (see its terminal's error toast)", concluded: "concluded", rejoined: "rejoined" };
@@ -140,6 +151,9 @@ export class Panel {
     this.forgetAsk = null;         // session id awaiting a second click on Forget
     this.conclude = null;          // { branchId, input, text, source, turn, prefill, edited }: the open Conclude editor
     this.closeAsk = null;          // branch id awaiting a second click on Close branch
+    this.clearAsk = null;          // {sid, at}: Clear N armed, awaiting its second click
+    this.clearing = null;          // {sid, evId, at, n}: a clear_questions event not yet in store.json
+    this.demoOff = false;          // demo only: draw the "ledgr is off in this space" state
     this.gitOk = new Map();        // cwd -> is a git checkout (the worktree toggle)
     this.txCheck = new Map();      // session id -> {ok, at}: does its transcript exist (Resume session)
     this.dd = null;                // the open dropdown's key (menuButton): one at a time
@@ -235,6 +249,7 @@ export class Panel {
         if (ts) this.live.on_conclude({ branch_id: a.branchId, text: a.text, message: a.message, source: a.source }, ts, a.at);
       } else if (a.action === "close_branch") { const b = this.live.d.branches[a.branchId]; if (b) b.closeRequestedAt = a.at; }
       else if (a.action === "resume") { const x = this.live.d.sessions[a.sid]; if (x && x.resume?.state !== "resumed") x.resume = { at: a.at, state: "launching" }; }
+      else if (a.action === "clear_questions") { const x = this.live.d.sessions[a.sid]; if (x) this.live.on_clear_questions({}, x, a.at); }
       else this.live.act(a.item, a.action, a.arg, a.at);
     }
     for (const [id, v] of this.drafts) {
@@ -308,6 +323,7 @@ export class Panel {
       cx.notify();
     });
     cx.notify();
+    return evId;
   }
 
   // ── commands (`herdr-app do ledgr.<command>`, shown copies only) ────
@@ -453,6 +469,18 @@ export class Panel {
       cx.spawn(async () => { await fs.mkdir(`${dataDir()}/log`, { recursive: true }).catch(() => {}); await fs.writeFile(`${dataDir()}/log/panel-renders-${out.copy}.json`, JSON.stringify(out) + "\n").catch(() => {}); });
     }
     else if (c === "expand-branches") { const st = this.viewStore(); for (const b of Object.values(st.d.branches)) this.brOpen.add(b.id); }
+    // space:<off|on|toggle>: the session menu's switch for the focused pane's space (writes
+    // spaces.disabled; demo: draws the off state, nothing saved).
+    else if (c.startsWith("space:")) {
+      const want = c.slice("space:".length), fsp = focused()?.space ?? null;
+      if (!["off", "on", "toggle"].includes(want)) this.flash = `No space:${want}; space:off, space:on or space:toggle.`;
+      else this.setSpaceOff(fsp, want === "toggle" ? !(this.demo ? this.demoOff : spaceOff(this.cfg, fsp)) : want === "off", cx);
+    }
+    // clear-questions: the YOUR QUESTIONS head's Clear N, as a click (twice: arm, then clear).
+    else if (c === "clear-questions") {
+      const st = this.viewStore(), sid = this.current(st), s = sid ? st.d.sessions[sid] : null;
+      if (s) this.clearQuestions(s, cx); else this.flash = "No session shown.";
+    }
   }
 
   enterDemo() {
@@ -629,7 +657,7 @@ export class Panel {
     const hs = items.map((it) => it.handle), ws = items.map(H);   // hs: the lead-in's short forms
     const what = ws.length === 1 ? `Answer for ${ws[0]}` : `${ws.length} answers (${ws.join(", ")})`;
     const lead = answersLeadIn(hs);
-    if (this.demo) { cx.write_to_clipboard(msg); this.flash = `(demo) ${what} copied to the clipboard; ${this.demoHow(lead)}.`; cx.notify(); return; }
+    if (this.demo) { cx.write_to_clipboard(promptText(msg)); this.flash = `(demo) ${what} copied to the clipboard; ${this.demoHow(lead)}.`; cx.notify(); return; }
     this.stage(msg, s.terminal, cx, { what, where: P(s.terminal, "the pane"), lead, word: this.trunkWord(s),
       tail: `${ws.length === 1 ? `${ws[0]} shows` : "They show"} answered once that prompt is sent.` });
   }
@@ -895,7 +923,7 @@ export class Panel {
     if (!text) { this.flash = "Write the conclusion first: an empty confluence is not staged."; cx.notify(); return; }
     if (!it || !ts) { this.flash = "The question or its trunk session is no longer in the ledger."; cx.notify(); return; }
     const msg = confluenceMessage({ branch: br, item: it, text });
-    if (this.demo) { this.conclude = null; cx.write_to_clipboard(msg); this.flash = `(demo) Confluence for ${H(it)} copied; nothing is saved.`; cx.notify(); return; }
+    if (this.demo) { this.conclude = null; cx.write_to_clipboard(promptText(msg)); this.flash = `(demo) Confluence for ${H(it)} copied; nothing is saved.`; cx.notify(); return; }
     if (!this.stage(msg, ts.terminal, cx, { what: `Confluence for ${H(it)}`, where: trunkWords(ts.terminal), lead: leadIn(it), word: this.trunkWord(ts),
       tail: `${H(it)} resolves when that prompt is sent.` })) return;
     this.conclude = null;
@@ -907,7 +935,7 @@ export class Panel {
   copyConfluence(st, br, cx) {
     const ts = st.d.sessions[br.parentSessionId], msg = br.conclusion?.message, it = st.item(br.requestId);
     if (!msg) { this.flash = "No staged confluence for this branch."; cx.notify(); return; }
-    if (this.demo) { cx.write_to_clipboard(msg); this.flash = `(demo) Confluence copied again; ${this.demoHow(leadIn(it))}.`; cx.notify(); return; }
+    if (this.demo) { cx.write_to_clipboard(promptText(msg)); this.flash = `(demo) Confluence copied again; ${this.demoHow(leadIn(it))}.`; cx.notify(); return; }
     this.stage(msg, ts?.terminal, cx, { what: `Confluence for ${it ? H(it) : "the question"} (again)`, where: trunkWords(ts?.terminal), lead: leadIn(it), word: this.trunkWord(ts) });
   }
 
@@ -1046,19 +1074,21 @@ export class Panel {
     if (ver !== this.obsVer) { this.obsVer = ver; this.observe(st, shown, this.fallback(), cx); }
     const sid = this.current(st);
     const s = sid ? st.d.sessions[sid] : null;
-    if (s && !this.demo && s.surfaced && shown && this.seenSent.get(sid) !== (s.lastStopAt ?? 0)) {
+    // ledgr off in this space (spaces.disabled): the lanes are hidden, nothing is marked seen.
+    const off = this.offState(st, s);
+    if (s && !off && !this.demo && s.surfaced && shown && this.seenSent.get(sid) !== (s.lastStopAt ?? 0)) {
       this.seenSent.set(sid, s.lastStopAt ?? 0);
       cx.timer.after(0, (cx) => this.post("act", { session_id: sid, action: "seen" }, { action: "seen", sid }, cx));
     }
-    if (s) this.pumpBranchMessages(st, s, cx);
+    if (s && !off) this.pumpBranchMessages(st, s, cx);
     const note = this.flash || this.writerNote || (this.fallback() ? this.writer.note : null);
     return v_flex().id("ledgr").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border)
       .text_color(t.foreground).text_size(12.5)
-      .child(this.header(t, st, s))
+      .child(this.header(t, st, s, off))
       .when(this.menu, (el) => el.child(this.sessionMenu(t, st, sid)))
       .child(v_flex().id("ledgr-list").flex_1().min_h(0).overflow_y_scrollbar().px(8).py(8).gap(4)
-        .children(s ? this.body(t, st, s) : [this.away && st.sessionsList().length ? this.awayState(t, this.away) : this.emptyState(t)]))
-      .when(Boolean(s), (el) => el.child(this.footer(t, st, s)))
+        .children(off ? [this.offView(t, off)] : s ? this.body(t, st, s) : [this.away && st.sessionsList().length ? this.awayState(t, this.away) : this.emptyState(t)]))
+      .when(Boolean(s) && !off, (el) => el.child(this.footer(t, st, s)))
       .when(Boolean(note), (el) => el.child(
         div().flex_none().px(12).py(6).border_t(1).border_color(t.border).text_size(11).text_color(t.muted).child(note)));
   }
@@ -1105,6 +1135,15 @@ export class Panel {
     this.prevCls = null;
     this.obsVer = undefined;
     if (this.demo) { this.flash = `(demo) Threshold: ${TH_WORDS[level]}; not saved.`; cx.notify(); return; }
+    this.saveConfig((d) => { d.extract = { ...obj(d.extract), threshold: level }; },
+      `Threshold: ${TH_WORDS[level]} (extract.threshold "${level}" in ledgr-data/config.json).`, "Threshold not saved", cx);
+  }
+
+  // One change to ledgr-data/config.json: read it, `edit(d)` the parsed object, write it back only if
+  // it still holds what was read (writeTextFile's compare-and-swap; a missing file starts from the
+  // defaults). A file that is not a JSON object is left alone. The flash says `ok`, or `fail: why`
+  // (then the panel reads the file again).
+  saveConfig(edit, ok, fail, cx) {
     cx.spawn(async (cx) => {
       const path = `${dataDir()}/config.json`;
       try {
@@ -1113,11 +1152,11 @@ export class Panel {
         if (cur) { try { d = JSON.parse(cur); } catch { throw new Error("config.json is not valid JSON: fix it by hand first"); } }
         else { d = JSON.parse(JSON.stringify(DEFAULTS)); }
         if (!d || typeof d !== "object" || Array.isArray(d)) throw new Error("config.json is not a JSON object");
-        d.extract = { ...(d.extract && typeof d.extract === "object" ? d.extract : {}), threshold: level };
+        edit(d);
         await writeTextFile(path, JSON.stringify(d, null, 2) + "\n", cur ?? null);
-        this.flash = `Threshold: ${TH_WORDS[level]} (extract.threshold "${level}" in ledgr-data/config.json).`;
+        this.flash = ok;
       } catch (e) {
-        this.flash = `Threshold not saved: ${String(e?.message ?? e)}`;
+        this.flash = `${fail}: ${String(e?.message ?? e)}`;
         this.cfg = await loadConfig();
       }
       cx.notify();
@@ -1125,11 +1164,95 @@ export class Panel {
     cx.notify();
   }
 
+  // ── spaces where ledgr is off (config.json spaces.disabled) ──────────
+  // A session's space: as the hooks recorded it, else live from Herdr (config.js terminalSpace).
+  sessionSpace(st, s) { return s ? st.spaceOf(s.terminal, s, terminalSpace) : null; }
+
+  // A space as the person reads it: its name from spaces() (names change; the id is the key).
+  spaceName(id) {
+    if (!id) return "this space";
+    try { const sp = spaces().find((x) => x.id === id); if (sp?.name) return sp.name; } catch { /* none */ }
+    return `space ${String(id).slice(0, 10)}`;
+  }
+
+  // What the panel shows instead of lanes ({space, here}), or null: the shown session's space is off;
+  // else, unless that session was picked (pinned, or from the session menu), the focused pane's space
+  // is off. `here`: the off space is the focused pane's.
+  offState(st, s) {
+    if (this.demo) return this.demoOff ? { space: null, here: true } : null;
+    const fsp = focused()?.space ?? null;
+    if (s) {
+      const sp = this.sessionSpace(st, s);
+      if (spaceOff(this.cfg, sp)) return { space: sp, here: !fsp || sp === fsp };
+      if (this.pinned === s.sessionId || this.override?.sid === s.sessionId) return null;
+    }
+    return spaceOff(this.cfg, fsp) ? { space: fsp, here: true } : null;
+  }
+
+  // The session menu's switch and the off state's button: spaces.disabled in ledgr-data/config.json,
+  // the same compare-and-swap as the threshold. The writer follows the file (no chip there), the hooks
+  // read it at every run (no instruction, no extraction), this panel re-reads it. Demo: memory only.
+  setSpaceOff(space, off, cx) {
+    if (this.demo) { this.demoOff = off; this.flash = `(demo) ${off ? OFF_HERE : "ledgr is on in this space again"}; not saved.`; cx.notify(); return; }
+    if (!space) { this.flash = "No space to switch: Herdr names no focused space."; cx.notify(); return; }
+    const name = this.spaceName(space);
+    this.cfg = { ...this.cfg, spaces: { ...obj(this.cfg.spaces), disabled: withSpaceOff(this.cfg, space, off) } };
+    this.prevCls = null;
+    this.obsVer = undefined;
+    const ok = off ? `ledgr is off in ${name}: no chips, no ⌘J, no instruction or extraction for its agents. Their items are kept; the session menu turns it on again.`
+      : `ledgr is on in ${name} again.`;
+    this.saveConfig((d) => { d.spaces = { ...obj(d.spaces), disabled: withSpaceOff(d, space, off) }; }, ok, "Not saved", cx);
+  }
+
+  // ── Clear all questions ──────────────────────────────────────────────
+  // The YOUR QUESTIONS head's Clear N: every open or deferred parked question of the shown session that
+  // has no branch goes to Closed by one `clear_questions` event (store.js on_clear_questions); branched
+  // and rejoin_pending ones stay. Two clicks: the first arms it for CLEAR_ARM_MS ("Clear 3 questions? 1
+  // branched kept"), the second sends it; "Clearing…" until store.json has it. Reopen works per item.
+  clearQuestions(s, cx) {
+    const st = this.viewStore(), now = Date.now();
+    const { clear, kept } = st.clearable(s.sessionId);
+    if (!clear.length) { this.clearAsk = null; this.flash = "No open or deferred parked question to clear in this session."; cx.notify(); return; }
+    const armed = this.clearAsk?.sid === s.sessionId && now - this.clearAsk.at < CLEAR_ARM_MS;
+    if (!armed) {
+      const ask = this.clearAsk = { sid: s.sessionId, at: now };
+      cx.timer.after(CLEAR_ARM_MS + 50, (cx) => { if (this.clearAsk === ask) { this.clearAsk = null; cx.notify(); } });
+      cx.notify();
+      return;
+    }
+    this.clearAsk = null;
+    const words = clearedWords(clear.length, kept.length);
+    if (this.demo) { st.on_clear_questions({}, st.d.sessions[s.sessionId], now); this.bump(); this.flash = `(demo) ${words}; not saved.`; cx.notify(); return; }
+    const evId = this.post("clear_questions", { session_id: s.sessionId, keep: ["branched", "rejoin_pending"] }, { action: "clear_questions", sid: s.sessionId }, cx);
+    this.clearing = { sid: s.sessionId, evId, at: now, n: clear.length };
+    this.flash = words;
+    cx.notify();
+  }
+
+  // The Clear control for the lane head: idle "Clear N", armed "Clear N questions? M branched kept",
+  // pending "Clearing N…"; null when nothing is clearable.
+  clearButton(t, st, s) {
+    const now = Date.now(), c = this.clearing;
+    if (c && c.sid === s.sessionId && now - c.at < 15000 && !st.d.ingested.includes(c.evId)) {
+      return div().id("clear-q").flex_none().h(18).px(5).flex().items_center().rounded(5).text_size(10.5).text_color(t.dim).child(`Clearing ${c.n}…`);
+    }
+    const { clear, kept } = st.clearable(s.sessionId);
+    if (!clear.length) return null;
+    const armed = this.clearAsk?.sid === s.sessionId && now - this.clearAsk.at < CLEAR_ARM_MS;
+    return div().id("clear-q").flex_none().h(18).px(5).flex().items_center().rounded(5).text_size(10.5).cursor_pointer()
+      .when(armed, (el) => el.font_semibold().bg(t.blocked + "26").text_color(t.blocked))
+      .when(!armed, (el) => el.text_color(t.dim).hover((x) => x.bg(t.hover).text_color(t.foreground)))
+      .tooltip(armed ? "Click again to clear them; each one can be reopened from closed"
+        : `Close the ${clear.length} open or deferred parked question${clear.length === 1 ? "" : "s"} of this session${kept.length ? `; ${kept.length} with a branch stay` : ""}. Reopen any from closed.`)
+      .on_click((_e, cx) => { cx.stop_propagation(); this.clearQuestions(s, cx); })
+      .child(armed ? clearConfirm(clear.length, kept.length) : clearLabel(clear.length));
+  }
+
   pill(t, text, color) {
     return div().flex_none().px(5).py(0.5).rounded(4).border_1().border_color(t.border).text_size(10).text_color(color ?? t.muted).child(text);
   }
 
-  header(t, st, s) {
+  header(t, st, s, off = null) {
     const away = !s ? this.away : null;
     const name = s ? sessionWords(s) : away ? (away.agent ? "no ledgr session yet" : "no agent here") : "no session";
     const pinned = Boolean(this.pinned && s && this.pinned === s.sessionId);
@@ -1160,6 +1283,7 @@ export class Panel {
         .when(pinned, (x) => x.child(div().text_size(10.5).font_semibold().text_color(t.accent).child("pinned")))))
       .when(Boolean(s), (el) => el.child(div().flex_none().text_size(11).text_color(s.state === "working" ? t.working : t.dim)
         .child(`turn ${s.turn}${s.state === "working" ? " · working" : s.state === "ended" ? " · ended" : ""}`)))
+      .when(Boolean(off), (el) => el.child(this.pill(t, "off", t.dim)))
       .when(this.demo, (el) => el.child(this.pill(t, "demo", t.accent)));
   }
 
@@ -1199,6 +1323,7 @@ export class Panel {
     const ended = roots.filter((s) => s.state === "ended").flatMap((s) => flat(s, 0));
     const row = ([s, depth]) => {
       const open = st.itemsOf(s.sessionId).filter((it) => st.counts(it)).length;
+      const offThere = !this.demo && spaceOff(this.cfg, this.sessionSpace(st, s));
       const gone = !this.demo && !this.parentLive(s);
       const asking = this.forgetAsk === s.sessionId;
       return h_flex().id(`lg-s-${s.sessionId}`).h(26).pr(8).pl(8 + depth * 14).gap(6).items_center().rounded(6).cursor_pointer()
@@ -1213,7 +1338,7 @@ export class Panel {
         .child(this.pill(t, agentLabel(s.agent, s.profile)))
         .child(div().flex_1().min_w(0).truncate().text_size(12).child(sessionWords(s)))
         .when(Boolean(s.terminal), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(P(s.terminal))))
-        .child(div().flex_none().text_size(11).text_color(open ? t.accent : t.dim).child(open ? `${open} open` : gone ? "gone" : s.state))
+        .child(div().flex_none().text_size(11).text_color(open && !offThere ? t.accent : t.dim).child(offThere ? "off" : open ? `${open} open` : gone ? "gone" : s.state))
         .when(gone && !asking, (el) => el.child(div().id(`lg-f-${s.sessionId}`).flex_none().px(5).rounded(4).text_size(10.5).text_color(t.dim)
           .hover((x) => x.bg(t.hover).text_color(t.foreground)).tooltip("Forget this session, its items and its branches")
           .on_click((_e, cx) => { cx.stop_propagation(); this.forgetAsk = s.sessionId; cx.notify(); }).child("forget")))
@@ -1223,7 +1348,9 @@ export class Panel {
           .child(div().id(`lg-fn-${s.sessionId}`).flex_none().px(5).rounded(4).text_size(10.5).text_color(t.dim)
             .on_click((_e, cx) => { cx.stop_propagation(); this.forgetAsk = null; cx.notify(); }).child("keep")));
     };
+    const sw = this.spaceSwitch(t);
     return v_flex().flex_none().max_h(220).id("lg-menu").overflow_y_scrollbar().px(6).py(4).gap(1).border_b(1).border_color(t.border).bg(t.surface)
+      .when(Boolean(sw), (el) => el.child(sw))
       .children(groups.flatMap((g) => [groupHead(g), ...g.rows.map(row)]))
       .when(ended.length > 0, (el) => el.child(div().px(8).pt(6).pb(2).text_size(10.5).font_semibold().text_color(t.dim).child("ENDED SESSIONS")))
       .children(ended.map(row))
@@ -1242,6 +1369,32 @@ export class Panel {
       : v_flex().p(8).gap(6)
         .child(div().text_size(12.5).text_color(t.muted).child(`${P(away.terminal)} runs no agent ledgr knows.`))
         .child(line("Focus an agent's pane, or pick a session from the menu (›)."));
+  }
+
+  // The session menu's first row: ledgr off (or on) in the focused pane's space, by its name.
+  spaceSwitch(t) {
+    const fsp = this.demo ? null : focused()?.space ?? null;
+    if (!fsp && !this.demo) return null;
+    const isOff = this.demo ? this.demoOff : spaceOff(this.cfg, fsp), name = this.demo ? "demo space" : this.spaceName(fsp);
+    return h_flex().id("lg-space").h(26).px(8).gap(6).items_center().rounded(6).cursor_pointer().hover((x) => x.bg(t.hover))
+      .tooltip(isOff ? `Turn ledgr on again in ${name}: chips, ⌘J, the instruction and extraction come back, with the items kept`
+        : `Turn ledgr off in ${name}: no chips, no ⌘J, no instruction or extraction for its agents; items are kept (ledgr-data/config.json spaces.disabled)`)
+      .on_click((_e, cx) => { this.menu = false; this.setSpaceOff(fsp, !isOff, cx); })
+      .child(div().flex_1().min_w(0).text_size(12).text_color(isOff ? t.accent : t.foreground).child(spaceToggleWords(isOff)))
+      .child(div().flex_none().max_w(140).truncate().text_size(10.5).text_color(t.dim).child(name));
+  }
+
+  // ledgr is off where the panel looks (offState): the state, and the switch to turn it on.
+  offView(t, off) {
+    const line = (x) => div().text_size(11.5).text_color(t.dim).child(x);
+    const name = this.spaceName(off.space);
+    return v_flex().p(8).gap(6)
+      .child(div().text_size(12.5).text_color(t.muted).child(off.here ? OFF_HERE : `ledgr is off in ${name}`))
+      .child(line(`${off.here ? `In this space${off.space ? ` (${name})` : ""}` : `In ${name}`}: no chips, no ⌘J, and no ledgr instruction or extraction for the agents. Items recorded before are kept and show again when it is on.`))
+      .child(h_flex().gap(6).items_center()
+        .child(this.btn(t, "space-on", spaceToggleWords(true, off.here), (_e, cx) => this.setSpaceOff(off.space, false, cx),
+          { primary: true, tip: `Take ${name} out of spaces.disabled in ledgr-data/config.json` })))
+      .child(line("The session menu (›) has the same switch and the sessions in other spaces."));
   }
 
   emptyState(t) {
@@ -1314,7 +1467,7 @@ export class Panel {
     const out = [];
 
     out.push(this.laneHead(t, "mine", "YOUR QUESTIONS", mine.filter((it) => it.status === "open").length,
-      !this.collapsed.mine, (open) => this.setCollapsed("mine", !open)));
+      !this.collapsed.mine, (open) => this.setCollapsed("mine", !open), null, null, this.clearButton(t, st, s)));
     if (!this.collapsed.mine) {
       const sorted = [...mine, ...gh.filter(isHuman)].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
       for (const it of sorted) out.push(draw(it));
@@ -1488,6 +1641,7 @@ export class Panel {
     if (agent && it.repeatOf) badges.push(["raised again", t.accent]);
     if (it.origin === "btw" || it.btwStagedAt) badges.push(["/btw", t.muted]);
     if (isHuman(it) && it.askedAtTurn) badges.push([`sent at turn ${it.askedAtTurn}`, t.muted]);
+    if (it.status === "dismissed" && dismissedByWords(it.dismissedBy)) badges.push([dismissedByWords(it.dismissedBy), t.dim]);
     const sub = [];
     if (isHuman(it)) {
       if (it.status === "open" && it.anchor && !it.anchor.settled) sub.push(`parked during turn ${it.anchor.turn}; anchors at end of turn`);

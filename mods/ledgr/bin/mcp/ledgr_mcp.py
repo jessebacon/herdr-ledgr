@@ -38,6 +38,14 @@ the handles from snapshot.json; when the writer is not running (spool files olde
 not wait. resolve_asks maps each handle to this session's agent ask in snapshot.json (the items
 open_asks lists) and drops one `act` event per ask still open, deferred or answered (action
 "resolve", actor "agent", the handle, the turn); it waits for the writer the same way.
+
+Disabled spaces: a session is off when its record (sessions/<sid>.json) has `ledgr_off: true` (the
+hooks set it at the prompt that finds its Herdr space disabled, so a turn that began off stays off) or
+its `space` is in config.json spaces.disabled (missing: []). The space is the record's, else the map
+entry's; a synthetic session with none recorded gets one live `hc get` (ledgr_map.herdr_space), the
+lookup the panel makes for it. Every tool then answers ok with `off: true` and its usual fields empty,
+writes nothing (no spool event, no mcp/<session>/<turn>.json) and logs one `off` line. The
+instructions tell the agent to list what it needs in its reply when a call answers `off: true`.
 """
 import json
 import os
@@ -82,7 +90,23 @@ INSTRUCTIONS = (
     "leaves something blocking or needed for the user, call declare_asks once, when the work of the "
     "reply is done, and end the reply with the pointer line it returns, instead of a closing list or a "
     "ledgr-asks block. open_asks shows what is already recorded, with handles such as A7; when the user's "
-    "message answers or drops one of them, call resolve_asks with its handle before declaring anything new.")
+    "message answers or drops one of them, call resolve_asks with its handle before declaring anything new. "
+    "When a ledgr tool answers off: true, ledgr is off in this space: list what you need from the user in "
+    "your reply instead.")
+
+# A session where ledgr is off (spaces.disabled): (the result's note, its text) per tool.
+OFF_WORDS = {
+    "declare_asks": ("ledgr is off in this space: declared nothing; list what you need from the user in your reply",
+                     "ledgr is off in this space: declared nothing. List what you need from the user in your "
+                     "reply, as you would without ledgr, and end it without a pointer line."),
+    "resolve_asks": ("ledgr is off in this space: closed nothing; asks are not tracked here",
+                     "ledgr is off in this space: closed nothing. Asks are not tracked here."),
+    "open_asks": ("ledgr is off in this space: no asks are tracked here; list what you need from the user in your reply",
+                  "ledgr is off in this space: no asks are tracked here. List what you need from the user in "
+                  "your reply."),
+    "parked_questions": ("ledgr is off in this space: no parked questions are released here",
+                         "ledgr is off in this space: no parked questions are released here."),
+}
 
 MAX_RESOLVE = 30                     # handles per resolve_asks call (the extractor lists at most 30 open asks)
 CLOSED = ("resolved", "dismissed")   # store.js isClosed
@@ -262,7 +286,8 @@ class Identity:
             if v == "mine":
                 turn = m.get("turn") if isinstance(m.get("turn"), int) else 0
                 return {"session_id": sid, "terminal": t, "turn": turn, "prompt_id": m.get("prompt_id"),
-                        "synthetic": False, "agent": m.get("agent"), "note": None, "state": m.get("state")}
+                        "synthetic": False, "agent": m.get("agent"), "note": None, "state": m.get("state"),
+                        "space": m.get("space")}
             if v == "other":
                 return {"error": (f"terminal {t} belongs to another agent process (pid {m.get('owner_pid')}, "
                                   f"session {sid}); this server runs under pid {self.owner[0]}. Nothing was "
@@ -280,7 +305,8 @@ class Identity:
         s = (store.get("sessions") or {}).get(sid) if isinstance(store, dict) and isinstance(store.get("sessions"), dict) else None
         turn = s.get("turn") if isinstance(s, dict) and isinstance(s.get("turn"), int) else 0
         return {"session_id": sid, "terminal": t, "turn": turn, "prompt_id": None, "synthetic": True,
-                "in_store": isinstance(s, dict), "note": note, "state": None}
+                "in_store": isinstance(s, dict), "note": note, "state": None,
+                "space": m.get("space") if isinstance(m, dict) else None}
 
 
 # ---------- snapshot ----------
@@ -511,7 +537,9 @@ class Server:
             return Err(-32602, "Invalid params: arguments must be an object")
         t0 = time.monotonic()
         try:
-            res = self.tools[name](args)
+            ctx = self.who.resolve()
+            off = None if ctx.get("error") else self.off_state(ctx)
+            res = self.off_result(name, ctx, off) if off else self.tools[name](args, ctx)
         except Exception as ex:
             log(f"tool {name} failed: {ex!r}\n{traceback.format_exc()}")
             res = text_result(f"ledgr: internal error in {name} ({ex.__class__.__name__}); see ledgr-data/log/{LOG}.",
@@ -519,9 +547,49 @@ class Server:
         log(f"tool {name} {int((time.monotonic() - t0) * 1000)} ms error={res.get('isError')}")
         return res
 
+    # ----- disabled spaces -----
+
+    def off_state(self, ctx):
+        """None when ledgr is on for the resolved session, else {space, by}: the session record's
+        `ledgr_off: true` (the hooks' state, kept from the prompt that found the space disabled until
+        the prompt that finds it on), or the session's space in config spaces.disabled. The space is
+        the record's (refreshed at every prompt), else the map entry's; a synthetic session with none
+        gets one live lookup (ledgr_map.herdr_space: `hc get`, 0.3 s at most), as the panel does."""
+        rec = {} if ctx.get("synthetic") else C.read_json(C.path("sessions", ctx["session_id"] + ".json"), {})
+        rec = rec if isinstance(rec, dict) else {}
+        space = rec.get("space") if "space" in rec else ctx.get("space")
+        if not space and ctx.get("synthetic") and self.env.get("HC_TERMINAL_ID"):
+            sp = M.herdr_space()
+            space = sp if isinstance(sp, str) else None
+        if rec.get("ledgr_off") is True:
+            return {"space": space, "by": "ledgr_off"}
+        if space and M.space_off(K.load(create=False), space):
+            return {"space": space, "by": "spaces.disabled"}
+        return None
+
+    def off_result(self, name, ctx, off):
+        """Every tool's answer in a session where ledgr is off: ok, `off: true`, its usual fields
+        empty, nothing written (no spool event, no mcp/<session>/<turn>.json). One log line."""
+        note, words = OFF_WORDS[name]
+        data = {"ok": True, "off": True, "session_id": ctx["session_id"], "synthetic": ctx["synthetic"],
+                "space": off["space"]}
+        if name == "declare_asks":
+            data.update(terminal=ctx["terminal"], turn=ctx["turn"], replaces_turn=False, call=0, event_id=None,
+                        items=[], handles=[], repeats=[], rejected=[], notes=[], pointer=None, handoff=None,
+                        writer=None)
+        elif name == "resolve_asks":
+            data.update(turn=ctx["turn"], resolved=[], unknown=[], already_closed=[], event_ids=[], writer=None)
+        elif name == "open_asks":
+            data.update(turn=ctx["turn"], open=[], dismissed=[])
+        else:
+            data.update(questions=[], flag="releasedToAgent")
+        data["note"] = note
+        log(f"off {name} {ctx['session_id']} turn={ctx['turn']} space={off['space']} by={off['by']}: nothing written")
+        return text_result(words, data)
+
     # ----- tools -----
 
-    def t_declare(self, args):
+    def t_declare(self, args, ctx=None):
         t0 = time.monotonic()
         items = args.get("items")
         if isinstance(items, str):                 # a client that sends the array as JSON text
@@ -532,7 +600,7 @@ class Server:
         if not isinstance(items, list):
             return text_result("ledgr: items must be an array of {level, kind, text, quote?, options?}. Nothing recorded.",
                                {"ok": False, "error": "items must be an array"}, error=True)
-        ctx = self.who.resolve()
+        ctx = ctx or self.who.resolve()
         if ctx.get("error"):
             return text_result("ledgr: " + ctx["error"], {"ok": False, "error": ctx["error"]}, error=True)
         sid, turn, t = ctx["session_id"], ctx["turn"], ctx["terminal"]
@@ -772,7 +840,7 @@ class Server:
                 except OSError:
                     pass
 
-    def t_resolve(self, args):
+    def t_resolve(self, args, ctx=None):
         hs, note = args.get("handles"), args.get("note")
         if isinstance(hs, str):                    # one handle, or the array as JSON text
             try:
@@ -786,7 +854,7 @@ class Server:
         if note is not None and not isinstance(note, str):
             return text_result("ledgr: note must be one line of text. Nothing closed.",
                                {"ok": False, "error": "note must be a string"}, error=True)
-        ctx = self.who.resolve()
+        ctx = ctx or self.who.resolve()
         if ctx.get("error"):
             return text_result("ledgr: " + ctx["error"], {"ok": False, "error": ctx["error"]}, error=True)
         sid, t = ctx["session_id"], ctx["terminal"]
@@ -841,8 +909,8 @@ class Server:
             data["note"] = ctx["note"]
         return text_result("\n".join(lines), data)
 
-    def t_open(self, args):
-        ctx = self.who.resolve()
+    def t_open(self, args, ctx=None):
+        ctx = ctx or self.who.resolve()
         if ctx.get("error"):
             return text_result("ledgr: " + ctx["error"], {"ok": False, "error": ctx["error"]}, error=True)
         sid = ctx["session_id"]
@@ -894,8 +962,8 @@ class Server:
             data["note"] = ctx["note"]
         return text_result("\n".join(lines), data)
 
-    def t_parked(self, args):
-        ctx = self.who.resolve()
+    def t_parked(self, args, ctx=None):
+        ctx = ctx or self.who.resolve()
         if ctx.get("error"):
             return text_result("ledgr: " + ctx["error"], {"ok": False, "error": ctx["error"]}, error=True)
         sid = ctx["session_id"]

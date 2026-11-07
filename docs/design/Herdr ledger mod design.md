@@ -1241,3 +1241,20 @@ Notes: `BUILD-NOTES-mod.md` section 16, `BUILD-NOTES-phase3.md` (notes under ite
 | Known | A paste joins a draft already in the prompt | Accepted: nothing is sent, and the person sees it before Enter |
 
 Status on 2026-11-06: offline tests pass (nav 233, no keystrokes 313, store 478); `herdr-app check mods/ledgr` passes. Live, the primitives on throwaway panes: `pane.focus` returned in 15 ms, the focus was confirmed at 24 ms, `terminal.paste` succeeded and `hc read` showed the probe once, not submitted; a raw-byte probe received exactly `ESC[200~ … \n … ESC[201~`, so a line break stays inside the bracketed paste.
+
+### Off per space and Clear all (2026-11-07)
+
+Notes: `BUILD-NOTES-mod.md` section 17, `BUILD-NOTES-hooks.md` "Off per space" and "Several messages in one prompt", `mods/ledgr/bin/adapters/README.md`.
+
+| Topic | Built | Why |
+|---|---|---|
+| Off per space (2.7, Appendix B) | `config.json` `spaces.disabled`: Herdr space ids (default `[]`), written by the session menu's first row "ledgr off in this space" / "ledgr on in this space" with the threshold menu's compare-and-swap | Jesse: "enable/disable per space". Ids, because a space's name can change |
+| Hooks (2.7, 4) | SessionStart and UserPromptSubmit read the terminal's `herdr.space` label with one `hc get $HC_TERMINAL_ID --json` (300 ms limit) and record `space`; Stop and SessionEnd use the recorded one. Off: the record and the map are written, but no spool event, no instruction, no landing, and Stop starts no extraction. Told once at a real prompt: on to off the off text (`asks-instruction-space-off.txt`), off to on the mode's wording. No space counts as on; a failed lookup keeps the recorded one | The full version, Jesse's choice: an agent in an off space behaves as if ledgr were not installed and lists its needs in prose |
+| MCP server | For a session in an off space, `declare_asks` and `resolve_asks` write nothing and answer `off: true`; `open_asks` and `parked_questions` answer empty with `off: true` | The server's tools stay listed in an off space; a call must record nothing |
+| Panel, chip, capture (5, 6.2, 6.5) | Where the focused pane's space is off, an `off` pill and "ledgr is off in this space" with a button to turn it on, instead of the lanes; a session pinned or picked elsewhere still shows. No chip for a terminal in an off space (recorded space, else live), no panel opening on its asks, and ⌘J parks nothing there. Items kept, only hidden | |
+| Clear all questions (3.1, 6.2, 6.3) | "Clear N" on the YOUR QUESTIONS head, two clicks within 4 s, one `clear_questions` spool event for the shown session: every open or deferred parked question without a branch becomes `dismissed`, `dismissedBy: "clear"`, `clearedAt`; branched and `rejoin_pending` ones stay. Closed rows read "cleared"; Reopen per item | Jesse: "clear all questions", scoped "shown session, skip branched and rejoining questions": a cleared branched question would leave a branch running with nothing able to close it |
+| Delivery (6.4, 8.6) | Every message `stageIntoPrompt` handles ends with one empty line (`nav.js` `promptText`), pasted or not; the marker line stays first | Jesse: "When I'm trying to paste multiple answers, they run together" |
+| Landing (8.6) | `ledgr_landing.detect_all()` finds every message in a prompt: a sheet ends at a paste wrapper line, the next marker, or a blank line not followed by an `A<n>:` line; one landing event per message, 1 ms apart | Found in Jesse's own prompt: two sheets in one prompt landed as one (or the first only), with the second marker and a typed sentence inside the answers |
+| Known | A branch launched into an off space records lineage but sends no `branch_started`; the capture box over an off pane stays until dismissed | |
+
+Status on 2026-11-07: offline tests pass (store 574, nav 256, no keystrokes 313, hooks 169, mcp 76 plus the off checks); `herdr-app check mods/ledgr` passes. Hook medians: SessionStart 43-45 to 51-52 ms, UserPromptSubmit 42-45 to 52-54 ms, Stop unchanged.

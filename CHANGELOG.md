@@ -4,7 +4,63 @@
 
 First public shape of the mod. Built on Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311.
 
-### Blocking survives working, the agent closes answered asks, paste into the prompt (2026-11-06)
+### Off per space, Clear all questions, room between pastes (2026-11-07)
+
+- Off per space (Jesse: "enable/disable per space"; he chose the full version). `config.json`
+  `spaces.disabled` lists Herdr space ids (default `[]`; names change, ids do not; defaults in
+  `config.js` and `ledgr_config.py`). The session menu's first row, "ledgr off in this space" or
+  "ledgr on in this space" beside the space's name, writes it with the threshold menu's
+  compare-and-swap (`panel.js` `saveConfig`, now shared). Where the focused pane's space is off the
+  panel shows an `off` pill and "ledgr is off in this space" with a button to turn it on, instead of
+  the lanes; a session pinned or picked in another space still shows, and the session list marks
+  sessions in an off space "off". Items are kept, only hidden. The writer draws no chip for a
+  terminal in an off space (its space as the hooks recorded it, else live from `agents()` or the
+  terminal's `herdr.space` label), publishes the list as `shared("ledgr.ui").off`, does not open
+  the panel on asks from such a session (`offEvent`), and takes a terminal's new space from its
+  rewritten identity-map record. ⌘J over an off pane says "ledgr is off in this space" and parks
+  nothing; sessions in off spaces are not offered as targets. Commands `ledgr.space:<off|on|toggle>`.
+- The hooks in an off space behave as if ledgr were not installed. `ledgr_map.herdr_space()` runs
+  one `hc get $HC_TERMINAL_ID --json` (`posix_spawn`, 300 ms limit) at SessionStart and each prompt
+  and records `space` on the session record and the map; no space (no terminal id, no `hc`, no
+  label) counts as on, and a failed lookup (timeout, bad exit, bad JSON) keeps the recorded value.
+  Off: no spool event at all, no instruction, no landing; Stop part A only marks the session idle and
+  exits 10, so no `pending`, extraction, settlement or reinject (one `hook.log` line per off
+  period). A running session is told once, at a real prompt: on to off prints the new
+  `lib/asks-instruction-space-off.txt` (to a session that had a wording), off to on the mode's
+  wording; a SessionStart while off prints nothing, except the off text at a resume or compact of a
+  session that had a wording. The record keeps `ledgr_off`. Medians: SessionStart 43-45 to 51-52 ms,
+  UserPromptSubmit 42-45 to 52-54 ms, Stop unchanged.
+- The MCP server, for a calling session in an off space: `declare_asks` and `resolve_asks` write
+  nothing and answer `off: true` with a note to list needs in prose; `open_asks` and
+  `parked_questions` answer empty with `off: true`. Known limits: a branch launched into an off space
+  records its lineage but sends no `branch_started`; the capture box over an off pane stays until
+  dismissed (Esc, Enter or a click).
+- Clear all questions (Jesse; scope as he chose: "shown session, skip branched and rejoining
+  questions"). The YOUR QUESTIONS head shows "Clear N" while the shown session has open or deferred
+  parked questions; a first click arms it for 4 s ("Clear N questions? M branched kept"), a second
+  posts one `clear_questions {session_id, keep: ["branched", "rejoin_pending"]}` event ("Clearing
+  N…" until the store has it). The writer dismisses each open or deferred parked question with no
+  branch (a refused or failed launch counts as none), with `dismissedBy: "clear"` and `clearedAt`;
+  branched and `rejoin_pending` ones always stay. Closed rows read "cleared", Reopen works per item
+  (`setStatus` drops both marks), and the archive treats them as dismissed. Status line "N questions
+  cleared, M branched kept"; command `ledgr.clear-questions`.
+- A blank line after every staged message (Jesse: "when pasting an answer, you should add an empty
+  line. When I'm trying to paste multiple answers, they run together"). `nav.js` `promptText` ends
+  the text `stageIntoPrompt` handles (one answer, the answer sheet, the confluence) with exactly one
+  empty line, pasted or not, and demo copies the same; the marker line stays first and the stored
+  conclude message is unchanged. The clipboard check before the paste ignores trailing line breaks.
+- Landing fix, found in Jesse's own prompt of the day: two answer sheets in one prompt were misread.
+  Wrapped, only the first landed; unwrapped, A11's answer swallowed the second marker line and A12's
+  took the sentence he typed below the sheets. `ledgr_landing.detect_all()` ends a sheet at a paste
+  wrapper line, the next marker, or a blank line not followed by an `A<n>:` line, and follows one
+  message to the next; the hook sends one landing event per message, 1 ms apart. `detect()` still
+  returns the first.
+- Tests: store 574 checks (spaces off and Clear all), nav 256 (`promptText`), no keystrokes 313,
+  hooks 169 (a fake `hc` through `LEDGR_HC`; 30 disabled-space checks; two sheets wrapped, two
+  unwrapped with a blank line, a trailing blank line, a one-line lead-in, prose between sheets, a
+  confluence then a sheet), mcp 76 plus the off checks. `herdr-app check` passes.
+
+### bba05b1: blocking survives working, the agent closes answered asks, paste into the prompt
 
 - The pane chip keeps its `blocking` state while the agent works: an open blocking ask at or above
   `extract.threshold` no longer yields to `working` on every prompt and through every permission
