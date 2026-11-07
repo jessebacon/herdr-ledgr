@@ -1207,7 +1207,7 @@ Notes: `mods/ledgr/bin/mcp/README.md`, `BUILD-NOTES-hooks.md` "Declared by tool,
 | Install | Asked; `claude mcp add --scope user` per chosen config folder plus three `mcp__ledgr__*` allow entries; `--check` reports both; uninstall removes both | Claude Code owns `.claude.json` |
 | Not built | A panel action that releases a parked question to the agent: `parked_questions` returns an empty list until it exists | |
 
-Status on 2026-11-06: offline tests pass (`tests/test_mcp.py` in `run-all.sh`); registered on the maintainer's machine for `~/.claude` and `~/.claude-work`, both shown connected, `--check` healthy.
+Status on 2026-11-06: offline tests pass (`tests/test_mcp.py` in `run-all.sh`); registered on the maintainer's machine for `~/.claude` and a second config folder (`~/.claude-work` in the examples), both shown connected, `--check` healthy.
 
 ### Blocking while working, closed by the agent, answered then settled (2026-11-06)
 

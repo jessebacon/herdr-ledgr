@@ -12,7 +12,9 @@ It is not part of the mod; a stranger never needs it.
   the chip's code exists once; the installer removed the live copy once no layout used it).
 - `overlay.json`: which mods to deploy, which one hosts the writer, which mod draws the chip
   (`ledgr-pane` here; an overlay may name its own), and what the toggle key runs.
-- `answers.json`: the owner's full answers: `./install.sh --yes --answers examples/personal-overlay/answers.json`.
+- `answers.json`: the owner's answers with only the primary Claude settings file. His real ones, with a
+  second config folder, stay in the gitignored `answers.local.json`:
+  `./install.sh --yes --answers examples/personal-overlay/answers.local.json`.
 
 To make your own: copy this folder, put your mods under `mods/`, edit `overlay.json`, and run
 `./install.sh --overlay <your folder>`. The installer backs up every file it replaces and keeps the

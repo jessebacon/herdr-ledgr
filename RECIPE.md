@@ -131,7 +131,7 @@ Tell the person all of this before copying anything (the manual's step 1).
   - The agent label names the session's Claude profile when it is not the default one: a Claude Code
     started with `CLAUDE_CONFIG_DIR=~/.claude-work` (a second account, `claude-work`) reads `claude · work`
     in the header pill, in its session-list group (`CLAUDE · WORK`, a group of its own) and row pill, in
-    the capture box, and on the branch manifest's Parent line (`trip script (claude · work) · pane t1z …`);
+    the capture box, and on the branch manifest's Parent line (`app (claude · work) · pane t1z …`);
     `~/.claude` (profile `default`) reads `claude` alone. The hooks record the folder and profile at
     each session start and prompt; the header pill's tooltip names the folder. A session from before
     this reads `claude` until its next prompt.
@@ -354,7 +354,8 @@ Tell the person all of this before copying anything (the manual's step 1).
 - **Example integration** (`examples/personal-overlay/`, not part of the mod): a personal tab bar
   (`my-tabs`) that hosts the writer from an engine copy; its pane header is the public `ledgr-pane`.
   `./install.sh --overlay examples/personal-overlay` deploys it and writes the engine copy; its
-  `answers.json` is that setup's full answer set.
+  `answers.json` is that setup's answer set with only the primary Claude settings file (the owner's
+  real one, with a second config folder, is a gitignored `answers.local.json`).
 
 ## Watch out
 

@@ -119,10 +119,10 @@ MC="$ROOT/.claude-work"; mkdir -p "$MC"; SX=77777777-0000-0000-0000-0000000000d1
 printf '%s' "{\"session_id\":\"$SX\",\"cwd\":\"/tmp\",\"source\":\"startup\",\"transcript_path\":\"$MC/projects/-tmp/$SX.jsonl\"}" | CLAUDE_CONFIG_DIR="$MC/" HC_TERMINAL_ID=t58 bash "$AD/session-start.sh" >/dev/null
 printf '%s' "{\"session_id\":\"$SX\",\"cwd\":\"/tmp\",\"prompt_id\":\"m1\",\"prompt\":\"go\",\"transcript_path\":\"$MC/projects/-tmp/$SX.jsonl\"}" | CLAUDE_CONFIG_DIR="$MC/" HC_TERMINAL_ID=t58 bash "$AD/user-prompt-submit.sh" >/dev/null
 t "CLAUDE_CONFIG_DIR=~/.claude-work/: config_dir absolute (no trailing slash), profile work, record and map" jq -e --arg c "$(nrm "$MC")" '.config_dir==$c and .profile=="work"' "$D/sessions/$SX.json" "$D/terminals/t58.json"
-t "work: session_start and prompt events carry it" test "$(jq -s -c --arg s "$SX" '[.[] | select(.session_id==$s and (.type=="session_start" or .type=="prompt")) | [.type, .profile]] | sort' "$D"/spool/*.json)" = '[["prompt","work"],["session_start","work"]]'
+t "profile work: session_start and prompt events carry it" test "$(jq -s -c --arg s "$SX" '[.[] | select(.session_id==$s and (.type=="session_start" or .type=="prompt")) | [.type, .profile]] | sort' "$D"/spool/*.json)" = '[["prompt","work"],["session_start","work"]]'
 SY=77777777-0000-0000-0000-0000000000d2
 printf '%s' "{\"session_id\":\"$SY\",\"cwd\":\"/tmp\",\"prompt_id\":\"m2\",\"prompt\":\"go\",\"transcript_path\":\"$MC/projects/-tmp/$SY.jsonl\"}" | env -u CLAUDE_CONFIG_DIR HC_TERMINAL_ID=t59 bash "$AD/user-prompt-submit.sh" >/dev/null
-t "no CLAUDE_CONFIG_DIR: work from the transcript path (folder above projects/)" jq -e --arg c "$(nrm "$MC")" '.config_dir==$c and .profile=="work"' "$D/sessions/$SY.json"
+t "no CLAUDE_CONFIG_DIR: profile work from the transcript path (folder above projects/)" jq -e --arg c "$(nrm "$MC")" '.config_dir==$c and .profile=="work"' "$D/sessions/$SY.json"
 DC="$ROOT/home/.claude"; SZ=77777777-0000-0000-0000-0000000000d3
 printf '%s' "{\"session_id\":\"$SZ\",\"cwd\":\"/tmp\",\"source\":\"startup\",\"transcript_path\":\"$DC/projects/-tmp/$SZ.jsonl\"}" | env -u CLAUDE_CONFIG_DIR HC_TERMINAL_ID=t60 bash "$AD/session-start.sh" >/dev/null
 t "a .claude folder from the transcript path: profile default" jq -e --arg c "$(nrm "$DC")" '.config_dir==$c and .profile=="default"' "$D/sessions/$SZ.json"

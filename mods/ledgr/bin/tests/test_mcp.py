@@ -623,7 +623,7 @@ def main():
     take_events()
     c.close()
     set_map("t79", SID2, 3, owner_pid=0, config_dir="/Users/someone/.claude-work")
-    c = Client(terminal="t79", extra={"CLAUDE_CONFIG_DIR": os.path.join(ROOT, ".claude-work")})
+    c = Client(terminal="t79", extra={"CLAUDE_CONFIG_DIR": os.path.join(ROOT, ".claude-alt")})
     c.init()
     r = c.call("declare_asks", {"items": [{"level": "needed", "kind": "do", "text": "Anything"}]})
     sc = r.get("structuredContent") or {}

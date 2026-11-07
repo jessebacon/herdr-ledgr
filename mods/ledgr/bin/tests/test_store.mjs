@@ -488,7 +488,7 @@ const mev = (type, p, sid, term) => ({ v: 1, id: `m${++n}`, type, at: (at += 100
 st.apply(mev("session_start", { agent: "claude-code", source: "startup", cwd: "/w", session_name: "app", turn: 0, config_dir: MDIR, profile: "work" }, PM, "t70"));
 st.apply(mev("session_start", { agent: "claude-code", source: "startup", cwd: "/h", session_name: "homebase", turn: 0, config_dir: "/Users/x/.claude", profile: "default" }, PD, "t71"));
 A.equal(st.d.sessions[PM].profile, "work"); A.equal(st.d.sessions[PM].configDir, MDIR);
-A.equal(CFG.agentLabel(st.d.sessions[PM].agent, st.d.sessions[PM].profile), "claude · work", "an work session reads claude · work");
+A.equal(CFG.agentLabel(st.d.sessions[PM].agent, st.d.sessions[PM].profile), "claude · work", "a work session reads claude · work");
 A.equal(CFG.agentLabel(st.d.sessions[PD].agent, st.d.sessions[PD].profile), "claude", "the default session reads claude");
 st.apply(mev("prompt", { turn: 1, prompt_id: "m1", local: false, prompt_head: "go", refs: [] }, PM, "t70"));
 A.equal(st.d.sessions[PM].profile, "work", "an event without a profile keeps the recorded one");
@@ -515,7 +515,7 @@ mm = B.manifest(st, pdItem, { now: at });
 A.match(Object.fromEntries(B.manifestLines(mm)).Parent, /^homebase \(claude\) · pane t71 /, "the default profile: claude alone");
 A.equal(mm.configDir, null, "the default folder adds no CLAUDE_CONFIG_DIR");
 A.match(Object.fromEntries(B.manifestLines({ ...mm, parentAgent: undefined, parentProfile: undefined })).Parent, /^homebase · pane t71 /, "a manifest frozen without an agent: no label");
-A.equal(B.configDirOf({ configDir: "/Users/x/.claude-work/", transcriptPath: `/Users/x/.claude-work/projects/-w/${R}.jsonl` }), "/Users/x/.claude-work", "recorded beats derived");
+A.equal(B.configDirOf({ configDir: "/Users/x/.claude-alt/", transcriptPath: `/Users/x/.claude-work/projects/-w/${R}.jsonl` }), "/Users/x/.claude-alt", "recorded beats derived");
 A.equal(B.configDirOf({ configDir: "/Users/x/.claude", profile: "default", transcriptPath: `/Users/x/.claude-work/projects/-w/${R}.jsonl` }), null, "recorded default: no env");
 A.equal(B.configDirOf({ configDir: "", transcriptPath: `/Users/x/.claude-work/projects/-w/${R}.jsonl` }), "/Users/x/.claude-work", "no recorded folder: derived from the transcript path");
 A.deepEqual(B.resumeArgs({ sessionId: R, cwd: "/w", configDir: MDIR, profile: "work" }, "/opt/claude").slice(-6), ["--", "/usr/bin/env", `CLAUDE_CONFIG_DIR=${MDIR}`, "/opt/claude", "--resume", R]);

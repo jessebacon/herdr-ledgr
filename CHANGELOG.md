@@ -4,7 +4,17 @@
 
 First public shape of the mod. Built on Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311.
 
-### Ready for the public repo (2026-11-07)
+### No names in the repo (2026-11-07)
+
+- The example of a second Claude config folder is neutral everywhere: `~/.claude-work`, profile
+  `claude · work` (docs, comments, tests; two tests that compare two folders use `.claude-alt` for
+  the other). Nothing in the code ever depended on the literal name: the profile label is derived
+  from the folder name.
+- The maintainer's real install answers moved to a gitignored `examples/personal-overlay/
+  answers.local.json` (`*.local.json` is ignored); the shipped `answers.json` names only
+  `~/.claude/settings.json`. CLAUDE.md, the overlay README and the RECIPE point at the local file.
+
+### 69d4c3e: ready for the public repo
 
 - `preview.png` retaken on the tool path from a throwaway `claude --model haiku` session in a neutral
   folder: the reply ends with the pointer line and no block, the panel shows the three asks

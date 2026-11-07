@@ -241,7 +241,7 @@ Offline runs point `LEDGR_KEYCHAIN_SERVICE` at a service that does not exist, so
   (`ledgr_spool.py`, null when unknown). `pending`, `stop`, `asks` do not.
 - Tests (`test-hooks.sh`, "config folder and profile", 10): default (no env, no projects/ path),
   both events carry it, pending does not, a folder without `.claude-` keeps its name, `~/.claude-work/`
-  from the env (record, map, events), work from the transcript path alone, a `.claude` folder from the
+  from the env (record, map, events), the same profile from the transcript path alone, a `.claude` folder from the
   transcript path, and a record stripped of both (an older build) regaining them at its next prompt.
 
 ### Who owns the closing list (2026-11-06)
@@ -273,8 +273,8 @@ Offline runs point `LEDGR_KEYCHAIN_SERVICE` at a service that does not exist, so
   wrote `<ledgr-asks>` tags and fell back to the model (7 asks, reinject marked): fixed by showing the
   fence in the wording and by reading the tag form. Invented quotes are dropped by the validator, as
   for JSON. The throwaway transcripts stay under `~/.claude/projects/-private-tmp-…-scratchpad-lt-site/`.
-- Live on the owner's sessions: the deploy set `asks.handoff: ledgr`; the `claude-work`
-  session got the ledgr wording at its next prompt (`handoff None->ledgr` in hook.log) and its next
+- Live on the owner's sessions: the deploy set `asks.handoff: ledgr`; the second account's
+  session (`claude-work` here) got the ledgr wording at its next prompt (`handoff None->ledgr` in hook.log) and its next
   reply ended with `ledgr: 2 items for you, 1 blocking` and a bullet block.
 
 ### Declared by tool, settled at Stop (2026-11-06)

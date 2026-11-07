@@ -1,12 +1,11 @@
 {
-  "$comment": "The repo owner's answers: ./install.sh --yes --answers examples/personal-overlay/answers.json",
+  "$comment": "The repo owner's answers with only the primary settings file (his real ones, with a second config folder, live in the gitignored answers.local.json): ./install.sh --yes --answers examples/personal-overlay/answers.json",
   "overlay": "examples/personal-overlay",
   "agents": [
     "claude"
   ],
   "claude_settings": [
-    "~/.claude/settings.json",
-    "~/.claude-work/settings.json"
+    "~/.claude/settings.json"
   ],
   "provider": "anthropic",
   "model": "claude-haiku-5-5",

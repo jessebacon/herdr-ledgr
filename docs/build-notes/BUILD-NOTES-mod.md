@@ -446,8 +446,8 @@ needed/review from a statement of state ("Two batches are now uncommitted in the
 
 ## 13. Which Claude profile a session belongs to (2026-11-06)
 
-Jesse runs two Claude Code accounts through `CLAUDE_CONFIG_DIR`: `~/.claude` and `~/.claude-work`
-(the `claude-work` wrapper). Every session read "claude".
+Jesse runs two Claude Code accounts through `CLAUDE_CONFIG_DIR`: `~/.claude` and a second folder
+(`~/.claude-work` in these notes, started by a `claude-work` wrapper). Every session read "claude".
 
 - The hooks record `config_dir` and `profile` (hooks notes, "Profiles"); `session_start` and `prompt`
   carry them, the map entry too. `Store.setProfile` takes them from any hook event and from
@@ -461,7 +461,7 @@ Jesse runs two Claude Code accounts through `CLAUDE_CONFIG_DIR`: `~/.claude` and
 - Where it shows: the header pill (tooltip adds "Config folder: ~/.claude-work (profile work)."), the
   session menu's group key and head (`CLAUDE · WORK`, a group apart from `CLAUDE`) and each row's pill,
   the capture box's pill (from the map entry), and the manifest's Parent line:
-  `trip script (claude · work) · pane t1z (session f5c4026f), depth 0`. The manifest records
+  `app (claude · work) · pane t1z (session f5c4026f), depth 0`. The manifest records
   `parentProfile`; a manifest frozen before this shows `(claude)` from `parentAgent`, none if absent.
   The chip's `ag` is unchanged (`ledgr-pane` does not draw it).
 - Branch and Resume: `configDirOf` prefers the recorded `configDir` (null when it is the default
@@ -469,7 +469,7 @@ Jesse runs two Claude Code accounts through `CLAUDE_CONFIG_DIR`: `~/.claude` and
   before. `transcriptPathOf` without a recorded transcript looks under the recorded folder.
 - Tests: `test_store.mjs` "profiles" (31 checks: the label, the store picking a profile up from
   session_start, prompt (also local) and the map, keeping it across an event without one, surviving a
-  save; the Parent line for work and default; recorded beats derived; resume argv and transcript path).
+  save; the Parent line for the work profile and the default; recorded beats derived; resume argv and transcript path).
 
 ## 14. Closing-list mode on the lane, tool asks in the writer, the installer's MCP step (2026-11-06)
 
@@ -502,7 +502,7 @@ Jesse runs two Claude Code accounts through `CLAUDE_CONFIG_DIR`: `~/.claude` and
   ledgr's entries differ). Installer tests: `test_handoff`, `test_mcp` (a fake claude; scratch only).
 - Deployed with `--mcp off`: nothing registered, no Claude settings file written (mtimes unchanged).
   Later the same evening Jesse ran `./install.sh --yes --answers ~/.local/state/ledgr/last-install.json
-  --mcp on`: `ledgr` registered for `~/.claude` and `~/.claude-work`, both shown connected, the allow
+  --mcp on`: `ledgr` registered for `~/.claude` and the second config folder (`~/.claude-work` here), both shown connected, the allow
   entries in both settings files, `--check` healthy.
 - Live, writer path for tool asks: a throwaway session made of spool events (fake terminal
   `lt-tool1`): a mid-turn `asks` with `source: "tool"`, `tool_call: 1`, then `pending` and the Stop

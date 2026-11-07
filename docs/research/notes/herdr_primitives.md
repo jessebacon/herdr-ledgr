@@ -64,7 +64,7 @@ Spawning is first-class. `pane.split`, `tab.new`, `space.new` and `terminal.open
   - `new-menu`: `run("tab.new", {name, space, argv: agent.run})`. — `~/.config/herdr-app/mods/new-menu/main.js:34, 60, 66`
   - `linear`: prefers the installed `claude` from `knownAgents()`, sets `spec.argv = agent.run` and `spec.task = res.prompt`, then calls `run("space.new", spec)`. — `~/.config/herdr-app/mods/linear/main.js:736-745`
   - `worktree`: `run("space.new", {folder, machine, tab, argv})`, with no task. — `~/.config/herdr-app/mods/worktree/main.js:192`
-- `knownAgents()` returns each startable agent's `run` argv (`~/.config/herdr-app/herdr.d.ts:30-34`). `shared.json` caches `claude → ["claude"]` and `claude-work → ["claude-work"]` under `new-menu.agents` (`~/.config/herdr-app/shared.json`; `~/.config/herdr-app/programs.json`).
+- `knownAgents()` returns each startable agent's `run` argv (`~/.config/herdr-app/herdr.d.ts:30-34`). `shared.json` caches `claude → ["claude"]` and a second account's wrapper (`claude-work → ["claude-work"]` in the examples) under `new-menu.agents` (`~/.config/herdr-app/shared.json`; `~/.config/herdr-app/programs.json`).
 - Terminals started outside the app are adopted into a space or tab through labels: `hc run --keep --label herdr.space=<id> --label herdr.tab=<id> -- claude`. — `~/.config/herdr-app/AGENTS.md:136-149`
 - `hc run` options: `--parent <t>`, `--no-parent`, `--no-notify`, `--outlive-parent`, `--label K=V`, `--keep`, `--bg`, `--name`, `--cwd`. — `hc run --help`
 - Mods can call `hc(args)` (`~/.config/herdr-app/herdr.d.ts:15-16`) and `exec` ("30 s limit, 8 MiB output", `~/.config/herdr-app/herdr.d.ts:10-13`).

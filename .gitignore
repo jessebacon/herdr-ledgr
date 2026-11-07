@@ -8,6 +8,9 @@ examples/*/mods/*/ledgr/
 # A personal answers file for ./install.sh --yes --answers (keep yours out of the repo)
 ledgr.install.json
 
+# Local answers files, such as the owner's real examples/personal-overlay/answers.local.json
+*.local.json
+
 # Python
 __pycache__/
 *.pyc
