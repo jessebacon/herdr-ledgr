@@ -1,6 +1,6 @@
 #!/bin/bash
 # ledgr Claude Code adapter: UserPromptSubmit hook. Turn +1 (not for local slash commands, and once
-# per prompt_id), state working, prompt event with refs; a staged confluence or answer sheet landing
+# per prompt_id), state working, prompt event with refs; a staged confluence, answer sheet or pins message landing
 # emits its event. Prints nothing, except the mode's ledgr-asks instruction once after a turn whose
 # blocking ask only the model found (instruct_reinject), and once after asks.handoff changed
 # (asks-instruction-off.txt on a switch to prose). In a disabled space (config spaces.disabled, the

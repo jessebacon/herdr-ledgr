@@ -12,10 +12,11 @@ adds a SessionStart or UserPromptSubmit hook's stdout to the session's context).
 Branch lineage (Phase 2) is agent-agnostic and lives in lib/ledgr_map: a SessionStart with source
 "fork" in a process carrying LEDGR_PARENT (the ledgr branch launcher's `env` prefix) records it and
 emits branch_started; source "compact" emits compacted.
-Landing (Phase 3): after the prompt event, a UserPromptSubmit whose prompt carries a ledgr marker line
-(lib/ledgr_landing.py: "ledgr confluence <branch> <item>", "ledgr answers <session>") as the first
-line of a pasted block, or of the prompt (after at most a one-line lead-in), emits confluence_landed or
-answers_landed, 1 ms or more after the prompt event so the mod applies it after the turn has started;
+Landing (Phase 3, pins): after the prompt event, a UserPromptSubmit whose prompt carries a ledgr marker
+line (lib/ledgr_landing.py: "ledgr confluence <branch> <item>", "ledgr answers <session>", "ledgr pins
+<session> <item>") as the first line of a pasted block, or of the prompt (after at most a one-line
+lead-in), emits confluence_landed, answers_landed or pins_asked, 1 ms or more after the prompt event so
+the mod applies it after the turn has started;
 one event per message when several follow one another (two answer sheets pasted into one prompt),
 each 1 ms after the one before. The Claude-specific part is the paste wrapper: Claude Code puts pasted
 text between <pasted_content id="..."> and </pasted_content id="..."> lines, so a lead-in the person
@@ -104,8 +105,9 @@ def session_name_fallback(sid, cfg_dir=None):
 
 
 def landing(t, sid, rec, prompt):
-    """Emit confluence_landed / answers_landed for each ledgr message the prompt carries, in order."""
-    if "ledgr confluence " not in prompt and "ledgr answers " not in prompt:
+    """Emit confluence_landed / answers_landed / pins_asked for each ledgr message the prompt carries,
+    in order."""
+    if not L.has_marker_text(prompt):
         return
     hits = L.detect_all(prompt, wrapper=(PASTE_OPEN, PASTE_CLOSE))
     if not hits:
@@ -118,6 +120,10 @@ def landing(t, sid, rec, prompt):
             S.confluence_landed(t, sid, turn=turn, branch_id=hit["branch_id"], item_id=hit["item_id"],
                                 prompt_id=pid_, conclusion_head=hit.get("conclusion_head"), at=at + i)
             C.log(f"{t} confluence_landed {sid} turn={turn} branch={hit['branch_id']}")
+        elif hit["kind"] == "pins":
+            S.pins_asked(t, sid, turn=turn, for_session=hit["for_session"], item_id=hit["item_id"],
+                         prompt_id=pid_, at=at + i)
+            C.log(f"{t} pins_asked {sid} turn={turn} item={hit['item_id']}")
         else:
             S.answers_landed(t, sid, turn=turn, for_session=hit["for_session"], handles=hit["handles"],
                              answers=hit["answers"], prompt_id=pid_, at=at + i)

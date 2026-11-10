@@ -6,6 +6,7 @@
   "mod:ledgr": {
     "cmd-enter": "ledgr.btw",
     "tab": "ledgr.tab",
-    "shift-tab": "ledgr.backtab"
+    "shift-tab": "ledgr.backtab",
+    "cmd-s": "ledgr.pin"
   }
 }

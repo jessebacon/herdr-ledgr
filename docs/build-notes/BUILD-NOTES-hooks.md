@@ -436,6 +436,8 @@ sentence.
   left out; two lines of prose between sheets (only the first); a confluence then a sheet (both).
   `test-store.sh`: each message `confluence.js` composes, with its blank line, parses as before.
 
+Pins (2026-11-07: the `ledgr pins <session> <item>` marker, `pins_asked`, `ledgr_map.prompt_refs`): `BUILD-NOTES-pins.md`.
+
 ## Confirmed live (2026-11-05)
 
 - The owner pid is the claude process: live map entries show t3 -> 4817 and t2 -> 60575, both `claude`, matching `~/.claude/sessions/<pid>.json` for those sessions.

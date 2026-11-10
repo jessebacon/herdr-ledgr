@@ -3,6 +3,7 @@
 A [Herdr](https://herdr.dev) mod for long conversations with coding agents.
 
 - Park a question with ⌘J while the agent is still writing; it waits in a side panel, anchored to the passage it came from.
+- Pin a passage with ⌘J, then ⌘S, before you have a question: it is kept verbatim for good, searchable across every session, and becomes the context of a question you ask later.
 - At the end of every turn, the things the agent asked of you (decide, confirm, do, provide, review) land in a second lane, each marked blocking, needed or optional.
 - A small ledgr button and an optional chip in each pane header count what is open, so nothing scrolls away.
 - Branch a parked question into its own forked Claude Code session, with an honest list of what the fork knows.
@@ -21,6 +22,7 @@ A [Herdr](https://herdr.dev) mod for long conversations with coding agents.
 | Phase 3: confluence (the branch's answer back to the trunk) and the answer sheet | shipped 2026-11-05 |
 | The MCP server: agents declare asks by tool instead of a block, and close the ones you answered | built 2026-11-06, optional at install |
 | Off per space, Clear all questions, a blank line after each paste | built 2026-11-07 |
+| Pins: passages kept verbatim, searched across sessions, asked about in the trunk or a branch | built 2026-11-07, not yet tried live |
 | Providers `openai-compatible` and `cli`; adapters for agents other than Claude Code | built (providers) or sketched (adapters), not tested end to end |
 
 ## Requirements
@@ -58,10 +60,11 @@ It checks your setup first (Herdr home and version, which layouts are Herdr's ow
 | ⌘⇧J | anywhere | show or hide the ledgr panel |
 | ⏎ | capture box | park it |
 | ⌘⏎ | capture box | park it and copy `/btw About "<quote>": <question>` for the agent |
+| ⌘S | capture box | pin the copied passage; the line you typed becomes its note |
 | ⇥ / ⇧⇥ | capture box | move between the question and the quote |
 | Esc | capture box | cancel |
 
-The installer offers free alternatives when ⌘J or ⌘⇧J is taken.
+The installer offers free alternatives when ⌘J or ⌘⇧J is taken. ⌘S lives in the box's own key section (`mod:ledgr`), so it pins only while the box is open; no Herdr section binds it (Herdr's picker and palette keep their own keys).
 
 ## How asks are found
 
@@ -84,6 +87,22 @@ The installer asks whether to register it, and then runs `claude mcp add --scope
 **Clear all.** The YOUR QUESTIONS head shows Clear N while the shown session has open or deferred parked questions. The first click asks "Clear 3 questions? 1 branched kept", the second closes them: each moves to Closed as "cleared" and can be reopened there. A question with a branch, or with its branch's answer on the way back, always stays.
 
 **Off in a space.** The session menu's first row turns ledgr off in the focused pane's Herdr space ("ledgr off in this space", with its name), and on again. There the agents get no instruction and no extraction (one that had the instruction is told once to ignore it and to list what it needs in its reply as usual; the MCP server records nothing), the pane has no chip, ⌘J parks nothing, and the panel shows "ledgr is off in this space" with a button to turn it on. Items recorded before are kept and come back. The switch is stored by space id in `spaces.disabled`, so renaming a space keeps it.
+
+## Pins
+
+A pin is a passage of an agent's reply that you keep before you have a question about it. It keeps the passage word for word (line breaks too, up to 4,000 characters), your one-line note, the turn it came from and the session's name, folder and agent, so it outlives the session in the panel (Forget keeps pins) and the transcript (Claude Code deletes old ones). Nothing removes a pin but you.
+
+**Taking one.** Select the passage in the agent's pane (fullscreen Claude copies a selection), press ⌘J, type a note if you like, then ⌘S. ledgr looks for the passage in the session's saved replies, then on its screen; found nowhere, it says so, and a second ⌘S within 5 seconds pins it marked "unverified". Pinning the same passage again does not make a second pin.
+
+**The PINS lane.** The first lane of the panel lists the shown session's pins, newest first: five, then "N more", and "archived (N)" at the bottom. Each pin shows its passage, note, turn and age, and where it was used ("answered in Question 3 (turn 14)"). Open one for Ask here…, Branch…, Note, Copy (the passage quoted with where it came from, on the clipboard), and in ⋯ Go to anchor and Archive. An archived pin can be restored, or deleted with two clicks.
+
+**Search.** The box in the lane's head searches every session's pins as you type: each word (or "quoted phrase") must appear in the passage, the note, the session's name, repo or folder; newest first, grouped by session, with "archived too" and "this session only" switches. Pins of a forgotten session are still found, under its name.
+
+**Ask here.** Check up to 12 pins, from any sessions, and click Ask about these… (or Ask here… on one pin): type your question in the box and press Enter, and it is parked with the pins. Its Ask here button then pastes one message into the session's prompt: a marker line, your question, each pin quoted line by line with where it came from (a pin from another session is marked as not written in this conversation), and a closing line in your voice. Nothing is sent: add a word and press Enter. ledgr notices the prompt, marks the question sent, and when the reply ends records on each pin that it was answered.
+
+**Ask in a branch.** Branch… on a pin, or on a question with pins, forks the session as usual; the fork's first prompt quotes the pins verbatim and asks for one line per pin in its conclusion, and the manifest says how many pins it is given. Over 24,000 pinned characters the branch is refused (ask here instead, or attach fewer). Conclude… prefills one entry per pin when the branch wrote no conclusion block, and once the confluence lands each pin records the branch that answered it.
+
+Agents do not see your pins: no MCP tool reads them yet, and they never reach the extractor.
 
 ## Configuration
 
@@ -113,6 +132,8 @@ The installer asks whether to register it, and then runs `claude mcp add --scope
 | `retention_days` | closed items older than this move from `store.json` to `ledgr-data/archive/<yyyy-mm>.jsonl` (checked once a day) | `14` |
 | `v` | the file's format version | `1` |
 
+Pins add no key here. Their limits are constants in `mods/ledgr/config.js` `LIMITS`: a passage of at most 4,000 characters, a note of 200, 12 pins per question, 24,000 pinned characters in a branch's first prompt, 200 search results.
+
 ## Branching and confluence
 
 **Branching.** Branch… on a parked question forks the conversation (`claude --resume <id> --fork-session`) into a new pane beside it, with a preamble that tells the fork which question it exists to answer. Before you launch, a manifest says what the fork knows and does not know: the fork is taken at the end of the session, so it also sees the turns after the question's anchor, and it shares the folder unless you isolate it in a git worktree. Branches of branches stop at `branch.maxDepth`.
@@ -127,7 +148,7 @@ The installer asks whether to register it, and then runs `claude mcp add --scope
 - **Network:** one call per finished turn to the extraction provider you chose (the Anthropic API by default), carrying that turn's last assistant message and the session's open asks. None with provider `none`, or when the agent declared its asks (the `declare_asks` tool, or a valid `ledgr-asks` block unless `extract.audit_rate` is above 0).
 - **Keychain:** the API key, service `ledgr`, account = provider, read at each call; never on disk.
 - **Programs:** `hc read`, `hc run … claude --resume …` for branches and Resume session, `hc kill`/`hc rm` when you close a branch, `git rev-parse`, `which claude`, the extractor's retry script; the hooks run `python3`, `security`, `curl`, and `hc get <terminal> --json` (read only, at session start and each prompt, for the terminal's space); Claude Code starts the MCP server (`python3`) with each session of a folder that registered it; the installer runs `herdr-app` (checks, `layout.clone`), `python3` and `claude --version` (preflight), `security` (to store the key), the offline tests, and `claude mcp add` / `claude mcp remove` only for the MCP server you chose.
-- **Clipboard, focus and one paste:** the clipboard is read when the capture box opens (to offer the copied passage as a quote) and before a paste (to check it still holds ledgr's text), and written when you paste answers, a branch's answer, a `/btw` or an anchor slice; those actions also focus the agent's pane. Paste answers, Paste answer and Paste into trunk then run Herdr's `terminal.paste` (what ⌘V runs) once Herdr reports that terminal focused: the text lands in the prompt and is not sent, never in a plain shell or an agent waiting on its own prompt (`ui.pasteIntoPrompt: false` turns this off). That is all the mod does to a terminal.
+- **Clipboard, focus and one paste:** the clipboard is read when the capture box opens (to offer the copied passage as a quote, or to pin it with ⌘S; `hc read` then checks it against the agent's screen) and before a paste (to check it still holds ledgr's text), and written when you paste answers, a branch's answer, a question with its pins, a `/btw` or an anchor slice; those actions also focus the agent's pane. A pin's Copy only writes the clipboard. Paste answers, Paste answer, Paste into trunk and Ask here then run Herdr's `terminal.paste` (what ⌘V runs) once Herdr reports that terminal focused: the text lands in the prompt and is not sent, never in a plain shell or an agent waiting on its own prompt (`ui.pasteIntoPrompt: false` turns this off). That is all the mod does to a terminal.
 - **Files:** only under the Herdr home: `ledgr-data/` and the mod's folders. Install state and backups in `~/.local/state/ledgr/`.
 - **Never:** sends keystrokes to a terminal (no `hc keys`, no `hc send`, no Enter: the one paste above waits in the prompt until you send it; a test checks the source), calls anything but the one provider, or touches other applications.
 

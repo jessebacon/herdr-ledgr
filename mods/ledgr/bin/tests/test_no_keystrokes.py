@@ -2,8 +2,9 @@
 Staging is clipboard plus focus; the one thing beyond it is Herdr's `terminal.paste` (what ⌘V runs:
 the clipboard into the focused terminal, no Enter, no key names), allowed in exactly one place,
 nav.js stageIntoPrompt, with no arguments, reached from the panel only through its `stage` method
-(Paste answer(s), Paste into trunk). A static check over the mod's own source (comments are
-stripped first, so the rule may be written down); the runtime half is tests/test_nav.mjs.
+(Paste answer(s), Paste into trunk, Ask here with pins). A pin's Copy only copies. A static check
+over the mod's own source (comments are stripped first, so the rule may be written down); the
+runtime half is tests/test_nav.mjs.
     python3 -I -B tests/test_no_keystrokes.py
 """
 import os
@@ -99,16 +100,20 @@ ok(re.search(r"\bf\.terminal === t\b", function(nav, "focusedOn") or "") is not 
 
 
 def method(text, name):
-    """The body of a two-space-indented class method in panel.js, up to its closing brace."""
-    m = re.search(rf"^  {name}\([^)]*\) \{{(.*?)^  \}}$", text, flags=re.S | re.M)
-    if m:
-        return m.group(1)
-    m = re.search(rf"^  {name}\([^)]*\) \{{([^\n]*)\}}$", text, flags=re.M)   # a one-line method
-    return m.group(1) if m else None
+    """The body of a two-space-indented class method in panel.js, one line or many: from its opening
+    brace to the brace that closes it (counted, so a one-line method never runs on into the next)."""
+    m = re.search(rf"^  {name}\([^)]*\) \{{", text, flags=re.M)
+    if not m:
+        return None
+    depth, i = 1, m.end()
+    while i < len(text) and depth:
+        depth += {"{": 1, "}": -1}.get(text[i], 0)
+        i += 1
+    return text[m.end():i - 1] if depth == 0 else None
 
 
 panel = files.get("panel.js", "")
-for name in ("copyAnswers", "copyAnswer", "stageAnswers", "sendToTrunk", "copyConfluence", "stage"):
+for name in ("copyAnswers", "copyAnswer", "stageAnswers", "sendToTrunk", "copyConfluence", "stage", "askPinsHere", "copyPin", "copyPinsMessage"):
     body = method(panel, name)
     ok(body is not None, f"panel.js has {name}")
     for bad in ("hc(", "run(", "exec(", "openOverlay(", "goTo", "spawn("):
@@ -116,6 +121,16 @@ for name in ("copyAnswers", "copyAnswer", "stageAnswers", "sendToTrunk", "copyCo
 ok("this.stage(msg, s.terminal, cx" in method(panel, "stageAnswers"), "stageAnswers stages through the panel's stage")
 ok("this.stage(msg, ts.terminal, cx" in method(panel, "sendToTrunk"), "Paste into trunk stages through the panel's stage")
 ok("this.stage(msg, ts?.terminal, cx" in method(panel, "copyConfluence"), "the confluence again: the same stage")
+ok("this.stage(msg, s.terminal, cx" in method(panel, "askPinsHere"), "Ask here (a question with its pins) stages through the panel's stage")
+ok(re.search(r"\bstage\(|stageIntoPrompt\(", method(panel, "copyPin")) is None, "a pin's Copy only copies: nothing focused, nothing pasted")
+# Copy for prompt on a question with pins: the whole pins message, through the copy path only.
+cpm = method(panel, "copyPinsMessage")
+ok(re.search(r"\bstage\(|stageIntoPrompt\(|stageText\(|stageQuestion\(", cpm) is None, "Copy for prompt with pins only copies: no stage, nothing focused or pasted")
+ok("write_to_clipboard(promptText(pinsMessage(" in cpm, "...the whole pins message (marker first), as Ask here would paste it")
+i_pins, i_btw = panel.find("this.copyPinsMessage(it, s, cx)"), panel.find('"Stage /btw"')
+ok(0 <= i_pins < i_btw and "} else if (isHuman(it)" in panel[i_pins:i_btw] and "qPins.length" in panel[panel.rfind("if (", 0, i_pins):i_pins],
+   "a question with pins offers no Stage /btw, and its Copy for prompt is copyPinsMessage")
+ok(panel.count('"Stage /btw"') == 1, "one Stage /btw, for a question without pins")
 stage = method(panel, "stage")
 ok("stageIntoPrompt(msg, terminal, cx, { paste: this.pasteOn()" in stage, "stage goes through nav.js stageIntoPrompt and honours ui.pasteIntoPrompt")
 ok("pasteIntoPrompt !== false" in (method(panel, "pasteOn") or ""), "ui.pasteIntoPrompt is on unless set false")

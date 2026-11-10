@@ -35,16 +35,26 @@ confluence_landed  UserPromptSubmit whose prompt starts  turn (the trunk's new t
 answers_landed  UserPromptSubmit whose prompt starts  turn, for_session (the marker's session id),
                 (Phase 3)                             handles ["A3"], answers {"A3": text (400)},
                 with "ledgr answers <session id>"     prompt_id. Emitted after prompt
+pins_asked      UserPromptSubmit whose prompt carries turn (the session's new turn), for_session (the
+                (pins)                                marker's session id), item_id (the parked
+                "ledgr pins <session id> <item id>"   question's rq_ id), prompt_id; the envelope's
+                (the panel's Ask here: a question     session_id is the session the prompt was
+                and its pins quoted with "> ")        submitted in. Emitted after prompt
 act             the agent closes asks the user        item (an item id), action ("resolve"), arg
                 answered (bin/mcp resolve_asks)       (null), actor ("agent"), handle ("A4"),
                                                       turn|null, [note] (one line, 200 chars); the
                                                       panel's own act events carry none of actor,
                                                       handle, turn or note
-Written by the mod, not here: capture (a full Request), act (the person's), retry, branch (the panel's
-Branch confirmation: item, branch_id, placement, isolate), forget (session_id), conclude (Phase 3:
-branch_id, item, text, message, source, source_turn), close_branch (Phase 3: branch_id),
-clear_questions (the panel's Clear N: session_id, keep ["branched", "rejoin_pending"]; every open or
-deferred parked question without a branch is dismissed, dismissedBy "clear").
+Written by the mod, not here: capture (a full Request; its request.pins, at most 12 pn_ ids, attaches
+pins to the question), act (the person's), retry, branch (the panel's Branch confirmation: item,
+branch_id, placement, isolate), forget (session_id), conclude (Phase 3: branch_id, item, text, message,
+source, source_turn), close_branch (Phase 3: branch_id), clear_questions (the panel's Clear N:
+session_id, keep ["branched", "rejoin_pending"]; every open or deferred parked question without a
+branch is dismissed, dismissedBy "clear"); pins: pin (the capture box, ⌘S: agent, turn, session_name,
+cwd, pin {id "pn_<uuid>", text, note, anchor {sessionId, terminal, turn, uuid, promptId, hash,
+quoteSource, verified, settled, approx}, createdTurn, createdAt}), and from the panel, each with the
+pin's own session as session_id and applied by pin id: pin_note (pin, note; empty clears), pin_archive
+(pin), pin_restore (pin), pin_delete (pin; an archived pin only).
 
 Branch environment (set by the launcher with `env` in the argv, read by ledgr_map.branch_env):
   LEDGR_PARENT = <parent session id>:<item id>:<anchor turn>
@@ -125,6 +135,13 @@ def confluence_landed(t, sid, *, turn, branch_id, item_id, prompt_id=None, concl
 def answers_landed(t, sid, *, turn, for_session, handles, answers, prompt_id=None, at=None):
     return emit("answers_landed", t, sid, {"turn": turn, "for_session": for_session, "handles": list(handles),
                                            "answers": dict(answers), "prompt_id": prompt_id}, at)
+
+
+def pins_asked(t, sid, *, turn, for_session, item_id, prompt_id=None, at=None):
+    """A pins message (`ledgr pins <session id> <item id>`) was submitted in session `sid`: the
+    question was asked in that turn. The writer checks that sid and for_session are the question's."""
+    return emit("pins_asked", t, sid, {"turn": turn, "for_session": for_session, "item_id": item_id,
+                                       "prompt_id": prompt_id}, at)
 
 
 def act(t, sid, *, item, action, actor, handle, turn=None, note=None, arg=None, at=None):

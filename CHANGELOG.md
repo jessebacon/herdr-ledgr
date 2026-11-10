@@ -4,7 +4,63 @@
 
 First public shape of the mod. Built on Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311.
 
-### No names in the repo (2026-11-07)
+### Pins (2026-11-07)
+
+- A pin is a passage kept verbatim from an agent's reply before any question exists (Jesse: pins
+  "should actually live"; Claude Code deletes transcripts after about a month). Pins live in their
+  own `pins` map in `store.json`, beside `items`, so chips, counts, the snapshot (extractor and MCP
+  server), refs, the daily archive and Forget never touch one. Each keeps its text (line breaks
+  kept, at most 4,000 characters, `clipped` beyond), a one-line note, an anchor (turn and passage
+  hash, uuid when known, never a position) and its session's `source`, so it outlives Forget and the
+  transcript. Handles `P1`, `P2`… per session ("Pin 4"). Archived only by the person, deleted only
+  once archived (two clicks). Spec: `docs/design/Pins.md`; notes:
+  `docs/build-notes/BUILD-NOTES-pins.md`.
+- Taking one: select the passage, ⌘J, then ⌘S in the box (`mod:ledgr` `"cmd-s": "ledgr.pin"`, in
+  `keys.json` and the installer's `MOD_KEYS`); the box's line becomes the note. The passage is looked
+  for in the session's saved turns (that turn is the anchor), else on its screen (`hc read`, read
+  only); found nowhere, a second ⌘S within 5 s pins it "unverified". The same passage again in the
+  same session makes no second pin. A screen pin taken mid-turn settles at Stop and the writer
+  re-anchors it to the saved turn that holds it. A clipboard over 600 characters can now be pinned,
+  never attached as a question's quote.
+- The PINS lane, above YOUR QUESTIONS: the shown session's pins, newest first, five then "N more",
+  "archived (N)" with Restore and Delete; per pin Ask here…, Branch…, Note, Copy, and in ⋯ Go to
+  anchor and Archive; a usage line ("answered in Question 3 (turn 14)"). One search box over every
+  session's pins, in memory: literal terms and "quoted phrases" over text, note, session name, repo
+  and folder, newest first, grouped by session, "archived too" and "this session only" toggles, a
+  forgotten session still named. Checkboxes gather up to 12 pins from any session; "Ask about these…"
+  opens the box in pins mode, where the typed question is parked with `request.pins`.
+- Ask here: a question with pins pastes one message into its trunk's prompt (never sent): the marker
+  `ledgr pins <session> <item>`, the question, each pin quoted line by line with `> ` and where it
+  came from (another session's pin says "you did not write this in this conversation"), and a
+  closing line in the person's voice. The UserPromptSubmit hook emits `pins_asked`; the question
+  shows "sent at turn N", is answered at that turn's Stop, and each pin records `answeredIn`. Quoted
+  lines land nothing and are left out of the prompt's `[A3]` / `[Q3]` refs (`ledgr_map.prompt_refs`).
+- Ask in a branch: the preamble carries the pins verbatim with provenance and asks for one `pin i:`
+  line per pin in the conclusion; the manifest's Given row says "2 pins, verbatim in the preamble";
+  over 24,000 pinned characters the branch is refused. Conclude without a block prefills one entry
+  per pin, the confluence names the pins, and a landed confluence records `answeredIn` via the
+  branch. No new `config.json` key: five `LIMITS` in `config.js`. No MCP `pins` tool this round.
+- The header's session pin is now "hold" / "held" (text only), so "pin" means one thing; the
+  `localStorage` key stays "pinned". The demo gains three pins and Q9, asked with two of them.
+- An independent review found two medium seams and five low ones, all fixed: pin ids are checked
+  against the store's own keys (a `__proto__` id used to reach `Object.prototype`); the box in pins
+  mode never falls back to another session (an ended session parks from its store record, trunk
+  refused, branch allowed); a `then` carries the box's own time; a branch keeps its pin ids so the
+  numbers match the confluence ("pin 2: (deleted)"); Ask here and Copy for prompt share the
+  branch's size cap and the landing parser scans 64,000 characters; search caches folded text;
+  settled pins get the turn's uuid; a question with pins has no `/btw` and its Copy carries the pins.
+- The box key was ⌘P (`cmd-p`) as built. In his live check the same day the maintainer found it in
+  conflict with Herdr's own global ⌘P (`mod.open:picker`), so it switched to the planned fallback
+  ⌘S (`cmd-s`, bound in no shipped Herdr section, global or terminal; ⌘⇧P is Herdr's palette) in
+  `pinning.js` `PIN_KEY`, `keys.json`, `MOD_KEYS`, `words.js` `PINS_EMPTY` and the docs. The same
+  check found the ⌘J box cramped: it is now 600 × 320 (was 236; the panel's Ask about this the same,
+  pins mode 340, was 300), with more padding (20 by 18, was 16), a 10 px gap (was 8) and three lines
+  of the clipboard quote (was two). Behaviour unchanged.
+- Tests: store 881 checks (307 pins), hooks 191, no keystrokes 347, nav 269 plus compose 221 (new
+  `test_compose.mjs`, run by `test-nav.sh`), mcp 96, installer 69. `herdr-app check` passes. Of the manual
+  live check (spec 8.4), step 3 settled the key (above); the other steps are not recorded yet.
+
+### 904cba0: no names in the repo
 
 - The example of a second Claude config folder is neutral everywhere: `~/.claude-work`, profile
   `claude · work` (docs, comments, tests; two tests that compare two folders use `.claude-alt` for

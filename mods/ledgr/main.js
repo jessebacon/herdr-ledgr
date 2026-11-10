@@ -7,6 +7,9 @@
 //   props { overlay } (mod.open:ledgr) the capture box, ⌘J (capture.js)
 //   props { view: "capture", parent, session, terminal, prefill }
 //                                      the capture box opened from an item ("Ask about this")
+//   props { view: "capture", session, terminal, pins: [{id, label}], then }
+//                                      the capture box in pins mode (the panel's Ask about these…,
+//                                      Ask here…, Branch… on a pin; then: "trunk" | "branch" | null)
 //   props { demo: true } / FORCE_DEMO  fixture data (fixtures.js)
 // Commands (keys.json `mod:ledgr`, or `herdr-app do ledgr.<command>`; shown copies only):
 //   host: toggle (show or hide the panel; keys.json binds it, ⌘⇧J by default);
@@ -32,6 +35,11 @@
 //   Spaces: space:<off|on|toggle> (the session menu's switch for the focused pane's space: writes
 //   spaces.disabled in ledgr-data/config.json; demo: draws the off state, nothing saved),
 //   clear-questions (the YOUR QUESTIONS head's Clear N, as a click: twice, arm then clear).
+//   Pins (docs/design/Pins.md 4.8), on the shown session, the same code as the clicks: fold-pins (fold or
+//   unfold the PINS lane), pins-search:<text> (types into its search box; empty clears), pin-select:<P
+//   handle> (checks or unchecks it), ask-pins (Ask about these…), ask-here:<Q handle> (a question with
+//   pins: Ask here, pasted, never sent), pin-note:<P handle>:<text> (empty clears), pin-archive:<P handle>,
+//   pin-restore:<P handle>. In the box (keys.json mod:ledgr): pin (⌘S, capture.js).
 import { View } from "gpui-kit";
 import { props, nextCommand } from "herdr";
 import { Panel } from "./panel.js";

@@ -20,6 +20,8 @@
 //     (closeBranch: hc kill, then hc rm; the Branch record stays).
 //   - Resume session: for a session whose terminal is gone, `claude --resume <sid>` in a new pane
 //     (resumeSession, branch.js resumeArgs); the session's SessionStart hook re-maps it.
+//   - Pins: re-anchors a pin taken from the screen once its turn ends (reanchor); everything else a
+//     pin event does is the store's (store.js on_pin and the pin_* events).
 //   - re-reads ledgr-data/config.json whenever it changes (watchConfig): extract.threshold (which
 //     asks count on the chips), spaces.disabled (no chip for a terminal in a space where ledgr is off:
 //     its space as the hooks recorded it, else config.js terminalSpace) and branch.maxDepth apply
@@ -301,10 +303,13 @@ export class Writer {
   }
 
   // A question parked during turn N points at N's message; if its quote is not in that
-  // message, the saved turns are searched backward (spec 5.3).
+  // message, the saved turns are searched backward (spec 5.3). Pins (docs/design/Pins.md 2.4): a pin
+  // found on the screen (verified "screen") settled at turn N is looked for the same way; found at n,
+  // its anchor moves there (approx false); not found, it stays at N, approx. Either way, once.
   async reanchor({ sid, turn, textPath }) {
     const items = this.live.itemsOf(sid).filter((it) => isHuman(it) && it.anchor?.quote && it.anchor.turn === turn && !it.anchor.reanchored);
-    if (!items.length) return;
+    const pins = this.live.pinsOfSession(sid).filter((p) => p.anchor?.verified === "screen" && p.anchor.turn === turn && !p.anchor.reanchored);
+    if (!items.length && !pins.length) return;
     const read = async (n) => {
       const k = `${sid}:${n}`;
       if (this.passages.has(k)) return this.passages.get(k);
@@ -321,6 +326,21 @@ export class Writer {
         if (txt && plain(txt).includes(q)) { if (n !== turn) { it.anchor.turn = n; it.anchor.reanchoredFrom = turn; } break; }
       }
       it.anchor.reanchored = true;
+    }
+    for (const p of pins) {
+      const q = plain(p.text);
+      let found = null;
+      for (let n = turn; q && n >= Math.max(0, turn - 50); n--) {
+        const txt = await read(n);
+        if (txt && plain(txt).includes(q)) { found = n; break; }
+      }
+      if (found === null) p.anchor.approx = true;
+      else {
+        p.anchor.approx = false;
+        // Moved: turn N's message uuid (on_stop gave it) is not this passage's; that turn's, if recorded.
+        if (found !== turn) { p.anchor.turn = found; p.anchor.reanchoredFrom = turn; p.anchor.uuid = this.live.turnInfo(sid, found)?.uuid ?? null; }
+      }
+      p.anchor.reanchored = true;
     }
   }
 

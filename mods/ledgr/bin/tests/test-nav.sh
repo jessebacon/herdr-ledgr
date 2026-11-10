@@ -2,13 +2,15 @@
 # ledgr nav unit test (Node): mods/ledgr/nav.js outside Herdr with a stub `herdr` module that records
 # every run/hc/exec call and every look at focused(). Go to anchor, /btw and Copy for prompt must be
 # clipboard plus pane.focus only; Paste answer(s) and Paste into trunk add one terminal.paste, and
-# only after the target is confirmed focused. Never hc, never Enter.   bash tests/test-nav.sh
+# only after the target is confirmed focused. Never hc, never Enter. Then the pins composers and the
+# box's pin decision (tests/test_compose.mjs: confluence.js, branch.js, pinning.js, with config.js), in
+# the same folder with the same stub.   bash tests/test-nav.sh
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 cd "$(dirname "$0")/.." || exit 1
 NODE=$(command -v node) || { echo "SKIP: nav test (no node on PATH)"; exit 0; }
 MOD="$(cd .. && pwd)"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/ledgr-nav.XXXXXX")
-cp "$MOD/nav.js" "$TMP/"
+cp "$MOD/nav.js" "$MOD/config.js" "$MOD/confluence.js" "$MOD/branch.js" "$MOD/pinning.js" "$TMP/"
 echo '{"type":"module"}' >"$TMP/package.json"
 mkdir -p "$TMP/node_modules/herdr"
 echo '{"name":"herdr","type":"module","main":"index.js"}' >"$TMP/node_modules/herdr/package.json"
@@ -27,7 +29,19 @@ export const focused = () => {
   (h.order ??= []).push(["look", f?.terminal ?? null, f?.shown ?? null]);
   return f ?? null;
 };
+// What config.js imports besides (confluence.js and branch.js import it); none of them is called here.
+export const appHome = () => "/tmp/nowhere";
+export const readTextFile = async () => null;
+export const layout = () => null;
+export const shared = () => null;
 JS
-"$NODE" tests/test_nav.mjs "$TMP" 2>&1 | tail -3; rc=${PIPESTATUS[0]}
+OUT=$("$NODE" tests/test_nav.mjs "$TMP" 2>&1); rc=$?
+if [ "$rc" = 0 ]; then
+  CMP=$("$NODE" tests/test_compose.mjs "$TMP" 2>&1); rc=$?
+  # One summary line last (run-all.sh shows the last line): nav's, then compose's.
+  if [ "$rc" = 0 ]; then echo "${OUT%, 0 failure(s)}; ${CMP#OK: }"; else echo "$CMP" | tail -8; echo "FAIL: compose"; fi
+else
+  echo "$OUT" | tail -8; echo "FAIL: nav"
+fi
 rm -rf "$TMP"
 exit $rc

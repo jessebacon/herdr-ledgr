@@ -35,8 +35,12 @@ Without `instruction` but with `turn_text`, the extractor is the only channel.
 - The block grammar and the levels: `lib/parse_block.py`, `lib/ledgr_asks.py` (blocking, needed,
   optional; `extract.threshold` applies to declared and extracted asks alike).
 - The extractor and its providers: `lib/ledgr_extract.py`, `providers/`.
-- The landing markers: `lib/ledgr_landing.py` (`ledgr confluence …`, `ledgr answers …`); `detect_all`
-  finds every message in a prompt (two answer sheets pasted together land as two events).
+- The landing markers: `lib/ledgr_landing.py` (`ledgr confluence …`, `ledgr answers …`, `ledgr pins
+  <session id> <item id>`); `detect_all` finds every message in a prompt (two answer sheets pasted
+  together land as two events; a pins message and an answer sheet, two). A pins message quotes its
+  pinned passages with `> `, so a marker inside one never lands, and the prompt event's refs leave
+  those lines out (`lib/ledgr_map.prompt_refs`). An adapter's part is the paste wrapper syntax and
+  emitting the event per hit (`pins_asked` for a pins message).
 - Disabled spaces (config `spaces.disabled`): `lib/ledgr_map.py` `herdr_space()` reads the terminal's
   `herdr.space` label with one `hc get $HC_TERMINAL_ID --json` (300 ms limit; a failed lookup keeps the
   recorded space) and `space_off()` compares it. An adapter passes `fields["space"]` at its start and

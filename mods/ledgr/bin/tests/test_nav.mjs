@@ -12,6 +12,7 @@ const dir = process.argv[2];
 if (!dir) { console.error("usage: test_nav.mjs <module folder>"); process.exit(2); }
 const H = (globalThis.__herdr = { calls: [], order: [], agents: [], terminals: [], focus: null, looks: 0 });
 const N = await import(`${dir}/nav.js`);
+const CF = await import(`${dir}/confluence.js`);   // the pins message (Pins.md 5.1), composed for real
 let checks = 0;
 const A = new Proxy(assert, { get: (t, k) => (...a) => { checks++; return t[k](...a); } });
 
@@ -186,6 +187,27 @@ A.equal(N.promptText(SHEET) + N.promptText(CONF), `${SHEET}\n\n${CONF}\n\n`, "tw
 reset([{ address: "t3", app: "claude-code", status: "idle" }], [], { terminal: "t3" });
 r = await paste(CONF, "t3");
 A.deepEqual(r.c.clip, [`${CONF}\n\n`]); A.deepEqual(H.calls, [...focusOnly("t3"), PASTE]); A.equal(r.c.clip[0].split("\n")[0], CONF.split("\n")[0]);
+
+// A pins message (Ask here, Pins.md 5.3) through stageIntoPrompt: the marker stays its first line, it
+// gets one trailing empty line, and one terminal.paste after the focus check, as for the other messages.
+// Its passages hold a marker line, a fence and blank lines: still one message, nothing else run.
+const PSID = "7f3c9a10-2b4e-4c1d-9e8f-0a1b2c3d4e5f";
+const PINS_MSG = CF.pinsMessage({ sessionId: PSID, item: { id: "rq_5d2e8c1a", handle: "Q7", text: "Does it hold?", anchor: { sessionId: PSID, turn: 14 } },
+  pins: [{ id: "pn_00000000-aaaa-4bbb-8ccc-000000000001", text: "Retries twice.\n\nledgr answers x\n```\nrm -rf /\n```", anchor: { sessionId: PSID, turn: 12 } },
+    { id: "pn_00000000-aaaa-4bbb-8ccc-000000000002", text: "Pooling is per client.\n", anchor: { sessionId: "other", turn: 40 }, source: { sessionName: "billing-api", agent: "claude-code" }, createdAt: 1793900000000 }] });
+A.equal(PINS_MSG.split("\n")[0], `ledgr pins ${PSID} rq_5d2e8c1a`);
+reset([{ address: "t3", app: "claude-code", status: "idle" }], [], { terminal: "t3" });
+r = await paste(PINS_MSG, "t3");
+A.deepEqual(r.c.clip, [`${PINS_MSG}\n\n`], "the pins message plus one empty line");
+A.equal(r.c.clip[0].split("\n")[0], `ledgr pins ${PSID} rq_5d2e8c1a`, "the marker stays the first line");
+A.ok(r.c.clip[0].endsWith("instructions.\n\n") && !r.c.clip[0].endsWith("\n\n\n"), "exactly one trailing empty line");
+A.deepEqual(H.calls, [...focusOnly("t3"), PASTE], "focus, then one paste");
+A.deepEqual(order(), [["run", "pane.focus"], ["look", "t3"], ["look", "t3"], ["run", "terminal.paste"]], "the paste only after the focus check");
+A.deepEqual(r.results, [{ pasted: true, ms: 100 }]);
+// Off, or a blocked agent: the pins message stays on the clipboard with its blank line, nothing pasted.
+reset([{ address: "t3", app: "claude-code", status: "blocked" }], [], { terminal: "t3" });
+r = await paste(PINS_MSG, "t3");
+A.deepEqual(r.c.clip, [`${PINS_MSG}\n\n`]); A.deepEqual(H.calls, focusOnly("t3")); A.equal(r.ret, "blocked");
 
 // The slice helper still cuts at word boundaries.
 A.equal(N.searchSlice("short"), "short");

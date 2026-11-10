@@ -40,6 +40,7 @@ import os
 import re
 
 import ledgr_core as C
+import ledgr_landing as L
 import ledgr_spool as S
 
 REF = re.compile(r"\[([AQ]\d{1,6})\]")
@@ -263,6 +264,21 @@ def write_map(t, rec, event, now):
     C.write_json(C.path("terminals", C.tfile(t) + ".json"), map_record(t, rec, event, now))
 
 
+def prompt_refs(p):
+    """The [A3] and [Q3] handles a prompt names, in order, each once. A prompt that carries a pins
+    message (a line matching lib/ledgr_landing.PINS: `ledgr pins <session id> <item id>`) quotes its
+    pinned passages line by line with "> ": history from earlier turns or other sessions, not the
+    person's refs, so lines starting with ">" are left out of the scan (a passage naming [A3] would
+    otherwise mark A3 answered). Every other prompt is scanned whole."""
+    if "ledgr pins " in p and any(L.PINS.match(x.strip()) for x in p.splitlines()):
+        p = "\n".join(x for x in p.splitlines() if not x.lstrip().startswith(">"))
+    refs = []
+    for r in REF.findall(p):
+        if r not in refs:
+            refs.append(r)
+    return refs
+
+
 def handle(event, sid, t, agent, fields):
     """Apply one lifecycle event. Returns the new session record, or None when the event was
     ignored by the owner guard. fields["space"] (when present: a space id or None; UNKNOWN keeps the
@@ -349,10 +365,7 @@ def handle(event, sid, t, agent, fields):
                 rec.update(turn=turn, prompt_id=pid_)
             if not local:
                 rec["state"] = "working"
-            refs = []
-            for r in REF.findall(p):
-                if r not in refs:
-                    refs.append(r)
+            refs = prompt_refs(p)
             if not quiet:
                 S.prompt(t, sid, turn=turn, prompt_id=pid_, local=local, prompt_head=p, refs=refs,
                          config_dir=rec.get("config_dir"), profile=rec.get("profile"), at=now)

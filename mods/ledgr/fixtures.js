@@ -9,6 +9,9 @@
 // long URL (Q8). Severity: A6 blocking (sorted first, ◆, the chip's blocking state), A13 and A14
 // optional (the folded "suggestions (2)" line of turn 17, each with promote). A15 a blocking decide
 // with options, sorted after A6 (the staged preview expands it: docs/preview-recipe.md).
+// Pins (docs/design/Pins.md 4.10): three, Pin 1 and Pin 2 (with a note) of the demo session and Pin 1
+// of the release-notes session, and Q9, parked with two of them (one from each session), asked in the
+// trunk at turn 16 and answered, so the PINS lane, a usage line and a question with pins all show.
 // Drawn when props().demo, FORCE_DEMO (config.js) or `herdr-app do ledgr.demo`. Never saved,
 // never published to shared(), never written to ledgr-data.
 import { passageHash } from "./store.js";
@@ -130,15 +133,41 @@ export function demoData(now = Date.now()) {
   items[q3].branch = { branchId: "br_demo_q3_7c1e" };
   items[q2].branch = { branchId: "br_demo_q2_a41b" };
 
-  const sess = (sid, o) => ({ sessionId: sid, turnSource: "hooks", nextHandle: { A: 16, Q: 9 }, startedAt: now - day, updatedAt: now - 60e3, seenAt: now - 30 * min, promptAt: now - 2 * min, surfaced: false, ...o });
+  // Pins: the passage as fullscreen Claude copies it (markdown marks dropped), its anchor, its source.
+  const SRC = {
+    [SID]: { sessionName: "shop-api migration", repo: "shop-api", cwd: "/Users/example/src/shop-api", agent: "claude-code", profile: null, configDir: null },
+    [SID2]: { sessionName: "release notes", repo: "shop-web", cwd: "/Users/example/src/shop-web", agent: "codex", profile: null, configDir: null },
+  };
+  const pins = {};
+  const pin = (id, handle, sid, turn, text, o = {}) => {
+    pins[id] = { id, handle, sessionId: sid, text, note: o.note ?? null,
+      anchor: { sessionId: sid, terminal: sid === SID2 ? "t27" : "t21", turn, uuid: null, promptId: null, hash: passageHash(text), quoteSource: "clipboard",
+        verified: "turn", settled: true, approx: false },
+      source: SRC[sid], status: "open", createdAt: now - o.ago * min, createdTurn: turn, updatedAt: now - o.ago * min, usedIn: [], answeredIn: [] };
+    return id;
+  };
+  const pA = pin("pn_demo-pin-000a", "P1", SID, 12, "The release branch release/5.4 is two weeks stale and has no open PRs.", { ago: 2 * 24 * 60 });
+  pin("pn_demo-pin-000b", "P2", SID, 14, "The orders migration finished cleanly on staging, so the load test result is likely stale. The next run will confirm.",
+    { ago: 88, note: "the claim turn 16 overturned" });
+  const pC = pin("pn_demo-pin-000c", "P1", SID2, 4, "Choose the release-notes tone: terse or narrative. I recommend terse, since most readers skim the list.", { ago: 31 });
+  const QT = "If release/5.4 is stale, do the release notes still need writing before the cutover?";
+  const q9 = q({ handle: "Q9", turn: 15, kind: "question", text: QT, status: "answered", askedAtTurn: 16, askedVia: "pins", pins: [pA, pC], ago: 28,
+    pinsAsked: { turn: 16, at: now - 27 * min, promptId: null, answeredAt: now - 25 * min } });
+  for (const id of [pA, pC]) {
+    pins[id].usedIn.push({ question: q9, session: SID, handle: "Q9", head: QT.slice(0, 80), at: now - 28 * min });
+    pins[id].answeredIn.push({ question: q9, session: SID, handle: "Q9", turn: 16, via: "trunk", at: now - 25 * min });
+  }
+
+  const sess = (sid, o) => ({ sessionId: sid, turnSource: "hooks", nextHandle: { A: 16, Q: 10, P: 3 }, startedAt: now - day, updatedAt: now - 60e3, seenAt: now - 30 * min, promptAt: now - 2 * min, surfaced: false, ...o });
   return {
     v: 1,
     items,
+    pins,
     sessions: {
       [SID]: sess(SID, { agent: "claude-code", terminal: "t21", sessionName: "shop-api migration", cwd: "/Users/example/src/shop-api", repo: "shop-api", transcriptPath: null, turn: 18, state: "working",
         compactions: [{ turn: 16, at: now - 60 * min, trigger: "auto" }] }),
       [SID2]: sess(SID2, { agent: "codex", terminal: "t27", sessionName: "release notes", cwd: "/Users/example/src/shop-web", repo: "shop-web", turn: 4, state: "idle", surfaced: true, updatedAt: now - 120e3,
-        pending: { turn: 4, at: now + 365 * day } }),   // demo only: never times out
+        nextHandle: { A: 2, Q: 2, P: 2 }, pending: { turn: 4, at: now + 365 * day } }),   // demo only: never times out
       [SID3]: sess(SID3, { agent: "claude-code", terminal: "t25", sessionName: "flaky test hunt", cwd: "/Users/example", repo: null, turn: 9, state: "ended", updatedAt: now - day }),
       [SIDB]: sess(SIDB, { agent: "claude-code", terminal: "t28", sessionName: "Q3: Why does the load test still fail if the…", cwd: "/Users/example/src/shop-api",
         repo: "shop-api", turn: 1, state: "idle", parentSessionId: SID, parentItem: q3, anchorTurn: 14, forkTurn: 18, depth: 1, branchId: "br_demo_q3_7c1e", updatedAt: now - 20 * min }),

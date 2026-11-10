@@ -2,16 +2,32 @@
 // storetest/test.mjs) and the Phase 2 branch events, manifest, preamble and launch argv; Phase 3:
 // conclude, the confluence and answer-sheet messages, confluence_landed, answers_landed, close_branch.
 // Writes the composed messages to <folder>/msg-*.txt so test-store.sh can run the hooks' parser on them.
+// Pins (docs/design/Pins.md 8.1): the pin events, a question's pins, pins_asked and its Stop, the
+// confluence's answeredIn, the search, the words, and the writer's re-anchor of a screen pin; writes
+// msg-pins.txt and msg-pins-lead.txt (confluence.js pinsMessage) for test-store.sh, and msg-pins-long.txt (a
+// pins message over 45,000 characters, for the parser's scan length).
 //   node tests/test_store.mjs <folder holding store.js, branch.js, config.js, confluence.js>   (tests/test-store.sh)
 import assert from "node:assert/strict";
+import * as fsm from "node:fs";
 const dir = process.argv[2];
 if (!dir) { console.error("usage: test_store.mjs <module folder>"); process.exit(2); }
-const { Store, passageHash, norm, levelOf, isSuggestion, isBlocking, groupOpen, thresholdOf, LEVELS } = await import(`${dir}/store.js`);
+// The writer's re-anchor (pins) runs here too: writer.js and spool.js join the copies in <folder>, and
+// the stub `herdr` module gains the calls writer.js imports (re-anchoring uses none of them but
+// readTextFile, which answers from globalThis.__herdr.files). Done before the first import.
+{
+  const mod = new URL("../../", import.meta.url).pathname;
+  for (const f of ["writer.js", "spool.js"]) if (!fsm.existsSync(`${dir}/${f}`)) fsm.copyFileSync(`${mod}${f}`, `${dir}/${f}`);
+  const stub = `${dir}/node_modules/herdr/index.js`;
+  const have = fsm.existsSync(stub) ? fsm.readFileSync(stub, "utf8") : "";
+  const add = ["setShared", "writeTextFile", "watchFolder", "panes", "exec", "hc", "openOverlay", "home"]
+    .filter((k) => have && !new RegExp(`export (const|function|async function) ${k}\\b`).test(have)).map((k) => `export const ${k} = () => null;`);
+  if (add.length) fsm.appendFileSync(stub, `\n${add.join("\n")}\n`);
+}
+const { Store, passageHash, norm, levelOf, isSuggestion, isBlocking, groupOpen, thresholdOf, LEVELS, pinHaystack } = await import(`${dir}/store.js`);
 const B = await import(`${dir}/branch.js`);
 const CF = await import(`${dir}/confluence.js`);
 const CFG = await import(`${dir}/config.js`);
 const WORDS = await import(`${dir}/words.js`);
-const fsm = await import("node:fs");
 let checks = 0, keep2;
 const A = new Proxy(assert, { get: (t, k) => (...a) => { checks++; return t[k](...a); } });
 
@@ -815,4 +831,358 @@ A.ok(st.snapshot(at).items.some((i) => i.id === "rq_k2" && i.dismissedBy === "cl
 A.equal(Store.fromText(st.toText()).item("rq_k6").dismissedBy, "clear", "survives a save");
 const spaceChecks = checks - phase1 - phase2 - phase3 - sev - prof - toolChecks - settleChecks;
 
-console.log(`OK: store, ${checks} checks (${phase1} phase 1, ${phase2} phase 2, ${phase3} phase 3, ${sev} severity and resume, ${prof} profiles, handoff and paste words, ${toolChecks} tool asks, ${settleChecks} blocking while working, closed by the agent, answered then settled, ${spaceChecks} spaces off and Clear all), 0 failure(s)`);
+// ── Pins (docs/design/Pins.md 8.1) ──────────────────────────────────────
+st = Store.fromText(null);
+const PS = "pppppppp-0000-0000-0000-000000000001", PST = "t95", PS2 = "bbbbbbbb-1111-0000-0000-000000000002", PST2 = "t96";
+const piev = (type, p, sid = PS, term = PST) => ({ v: 1, id: `pi${++n}`, type, at: (at += 1000), terminal: term, session_id: sid, ...p });
+let pnN = 0;
+const pinId = () => `pn_00000000-0000-4000-8000-${String(++pnN).padStart(12, "0")}`;
+// A `pin` event as the box writes it (7.4): the anchor's hash left out unless given, so the store computes it.
+const pinEv = (text, o = {}, sid = PS, term = PST) => piev("pin", { agent: o.agent ?? "claude-code", turn: o.turn ?? 1, session_name: o.session_name, cwd: o.cwd,
+  pin: { id: o.id ?? pinId(), text, note: o.note ?? null, createdTurn: o.turn ?? 1, createdAt: at + 1000,
+    anchor: { sessionId: sid, terminal: term, turn: o.turn ?? 1, uuid: null, promptId: null, hash: o.hash, quoteSource: o.quoteSource ?? "clipboard",
+      verified: o.verified === undefined ? "turn" : o.verified, settled: o.settled ?? true, approx: o.approx ?? false } } }, sid, term);
+const pp = (h, sid = PS) => st.pinByHandle(sid, h);
+st.apply(piev("session_start", { agent: "claude-code", source: "startup", cwd: "/src/gateway", session_name: "gateway", repo: "gateway", turn: 0,
+  config_dir: "/Users/x/.claude-work", profile: "work" }));
+st.apply(piev("prompt", { turn: 1, prompt_id: "pp1", local: false, prompt_head: "go", refs: [] }));
+st.apply(piev("stop", { turn: 1, prompt_id: "pp1", text_path: null, text_head: "", message_uuid: "uuid-p1" }));
+// 1. a pin: P1, verbatim text, note squashed, source from the session, the turn record's uuid
+const T1 = "  The gateway retries each request at most twice,\r\nand only on 502 and 503.\r\n\r\n    Anything else surfaces to the caller at once.  ";
+const P1T = "The gateway retries each request at most twice,\nand only on 502 and 503.\n\n    Anything else surfaces to the caller at once.";
+st.apply(pinEv(T1, { note: "  the   key\n constraint  " }));
+const p1 = pp("P1");
+A.ok(p1, "a pin is P1 of its session"); A.equal(p1.text, P1T, "verbatim: CRLF to LF, outer whitespace trimmed, line breaks and inner spacing kept");
+A.equal(p1.anchor.hash, passageHash(P1T), "hash = passageHash(text)"); A.equal(p1.note, "the key constraint", "the note squashed");
+A.deepEqual(p1.source, { sessionName: "gateway", repo: "gateway", cwd: "/src/gateway", agent: "claude-code", profile: "work", configDir: "/Users/x/.claude-work" }, "provenance from the session");
+A.equal(p1.anchor.uuid, "uuid-p1", "settled: the turn record's uuid"); A.equal(p1.anchor.terminal, PST); A.equal(p1.anchor.turn, 1);
+A.equal(p1.anchor.verified, "turn"); A.equal(p1.anchor.settled, true); A.equal(p1.anchor.approx, false); A.equal(p1.anchor.quoteSource, "clipboard");
+A.equal(p1.status, "open"); A.deepEqual(p1.usedIn, []); A.deepEqual(p1.answeredIn, []); A.equal(p1.clipped, undefined); A.equal(p1.sessionId, PS);
+A.equal(st.d.sessions[PS].nextHandle.P, 2);
+st.apply(pinEv("x".repeat(4500), { note: "n".repeat(300) }));
+A.equal(pp("P2").text.length, 4000, "cut at LIMITS.pin"); A.equal(pp("P2").clipped, true); A.equal(pp("P2").note.length, 200, "the note cut at LIMITS.pinNote");
+let nPins = Object.keys(st.d.pins).length;
+st.apply(pinEv("a valid passage", { id: "pn_short" }));
+st.apply(pinEv("   \r\n  "));
+st.apply(pinEv("another passage", { id: p1.id }));
+A.equal(Object.keys(st.d.pins).length, nPins, "a bad id, an empty passage, an id already there: no pin");
+// 2. the same passage again: one pin per passage per session
+st.apply(pinEv(T1, { note: "second note" }));
+A.equal(Object.keys(st.d.pins).length, nPins, "the same passage again: no second pin"); A.equal(p1.note, "the key constraint", "a note it has is kept"); A.ok(p1.repinnedAt);
+st.apply(pinEv("Pooling is per client.", {}));
+st.apply(pinEv("  Pooling   is per client.  ", { note: "late note" }));
+A.equal(pp("P3").note, "late note", "...a pin without a note takes the new one"); A.equal(pp("P4"), null);
+st.apply(piev("pin_archive", { pin: pp("P3").id }));
+A.equal(pp("P3").status, "archived"); A.ok(pp("P3").archivedAt);
+st.apply(pinEv("Pooling is per client."));
+A.equal(pp("P3").status, "open", "pinned again: an archived pin is restored"); A.equal(pp("P3").archivedAt, undefined); A.equal(pp("P4"), null);
+// 3. a session the store does not know is created (as capture does); a herdr:<t> one takes its own turn, approx
+st.apply(pinEv("The cache warms in ten minutes.", { session_name: "billing-api", cwd: "/src/billing", turn: 40 }, PS2, PST2));
+const pB = pp("P1", PS2);
+A.ok(st.d.sessions[PS2], "a pin creates its session"); A.ok(pB); A.equal(pB.source.sessionName, "billing-api"); A.equal(pB.source.cwd, "/src/billing"); A.equal(pB.anchor.turn, 40);
+A.equal(st.d.sessions[PS2].nextHandle.P, 2);
+st.apply(pinEv("A passage read off a screen.", { turn: 9, verified: "screen" }, "herdr:t97", "t97"));
+const ph = pp("P1", "herdr:t97");
+A.equal(st.d.sessions["herdr:t97"].turnSource, "herdr-status"); A.equal(ph.anchor.turn, st.d.sessions["herdr:t97"].turn, "no hooks: the session's turn");
+A.equal(ph.anchor.approx, true, "...approx"); A.equal(ph.createdTurn, ph.anchor.turn);
+const PS3 = "pppppppp-0000-0000-0000-000000000003";
+st.apply(piev("session_start", { agent: "claude-code", source: "startup", cwd: "/f", session_name: "gone", turn: 0 }, PS3, "t98"));
+st.apply(pinEv("Kept before forgetting.", {}, PS3, "t98"));
+const kept = pp("P1", PS3);
+st.apply(piev("forget", {}, PS3, null));
+A.ok(st.pin(kept.id), "Forget keeps the session's pins"); A.equal(kept.source.sessionName, "gone", "...with their source");
+st.apply(pinEv("Pinned after forgetting.", {}, PS3, "t98"));
+A.equal(st.pinsOfSession(PS3).length, 1, "a pin for a forgotten session is dropped"); A.equal(st.d.sessions[PS3], undefined, "...and brings no session back");
+// 4. pin_note, pin_archive, pin_restore, pin_delete by pin id, whatever became of the session
+let ev4 = piev("pin_note", { pin: kept.id, note: "  still   here " }, PS3, null);
+st.apply(ev4);
+A.equal(st.pin(kept.id).note, "still here", "pin_note for a forgotten session's pin"); A.ok(st.d.ingested.includes(ev4.id), "its event id is ingested");
+st.apply(piev("pin_archive", { pin: kept.id }, "not-in-the-store", null));
+A.equal(st.pin(kept.id).status, "archived", "pin_archive with a session the store does not know"); A.equal(st.d.sessions["not-in-the-store"], undefined, "...creates none");
+st.apply(piev("pin_restore", { pin: kept.id }, PS3, null)); A.equal(st.pin(kept.id).status, "open", "pin_restore");
+st.apply(piev("pin_delete", { pin: kept.id }, PS3, null)); A.ok(st.pin(kept.id), "pin_delete leaves an open pin");
+st.apply(piev("pin_archive", { pin: kept.id }, PS3, null)); st.apply(piev("pin_delete", { pin: kept.id }, PS3, null));
+A.equal(st.pin(kept.id), null, "pin_delete removes an archived pin");
+st.apply(piev("pin_note", { pin: pp("P3").id, note: "" })); A.equal(pp("P3").note, null, "an empty note clears it");
+st.apply(piev("pin_note", { pin: pp("P3").id, note: "x".repeat(250) })); A.equal(pp("P3").note.length, 200);
+st.apply(piev("pin_note", { pin: "pn_00000000-0000-4000-8000-999999999999", note: "x" })); A.equal(st.pin("pn_00000000-0000-4000-8000-999999999999"), null, "an unknown pin: nothing");
+// 5. capture with request.pins: validated, never trusted; usedIn once per question
+const many = [];
+for (let i = 0; i < 12; i++) { st.apply(pinEv(`Fact ${i} about retries.`)); many.push(st.pinsIn(PS)[0].id); }
+const QP1 = "Does the retry budget still hold once the gateway pools connections?";
+st.apply(piev("capture", { request: { ...req("rq_pq1", QP1, null, {}, PS, 1), anchor: { ...req("rq_pq1", "x", null, {}, PS, 1).anchor, settled: true },
+  pins: [p1.id, "pn_00000000-0000-4000-8000-0000000000ff", p1.id, pB.id, ...many], askedVia: "pins", pinsAsked: { turn: 99 } } }));
+const pq1 = st.item("rq_pq1");
+A.deepEqual(pq1.pins, [p1.id, pB.id, ...many.slice(0, 10)], "known ids, each once, in the order given, LIMITS.pinsPerQuestion at most");
+A.equal(pq1.askedVia, undefined); A.equal(pq1.pinsAsked, undefined, "a Request cannot say it was asked");
+A.equal(p1.usedIn.length, 1); A.equal(p1.usedIn[0].question, "rq_pq1"); A.equal(p1.usedIn[0].handle, pq1.handle); A.equal(p1.usedIn[0].head, QP1.slice(0, 80));
+A.equal(p1.usedIn[0].session, PS); A.equal(pB.usedIn.length, 1, "another session's pin records the question too");
+A.equal(st.pin(many[11]).usedIn.length, 0, "a pin cut by the limit is not used");
+A.deepEqual(st.pinsOf(pq1).map((p) => p.id), pq1.pins, "pinsOf: the question's order");
+st.apply(piev("capture", { request: { ...req("rq_pq2", "A spoofed list", null, {}, PS, 1), pins: ["pn_00000000-0000-4000-8000-0000000000ff", 7, null, "rq_pq1"] } }));
+A.equal("pins" in st.item("rq_pq2"), false, "a pins list that names no pin leaves no field");
+st.apply(piev("pin_archive", { pin: pp("P2").id }));
+st.apply(piev("capture", { request: { ...req("rq_pq3", "Is the clipped one still right?", null, {}, PS, 1), pins: [pp("P2").id, p1.id] } }));
+A.deepEqual(st.item("rq_pq3").pins, [pp("P2").id, p1.id], "an archived pin can be attached");
+// 6. pins_asked: in the question's own session; in another; for an unknown item or an agent ask
+st.apply(piev("prompt", { turn: 2, prompt_id: "pp2", local: false, prompt_head: `ledgr pins ${PS} rq_pq1`, refs: [] }));
+st.apply(piev("pins_asked", { turn: 2, for_session: PS, item_id: "rq_pq1", prompt_id: "pp2" }));
+A.equal(pq1.askedAtTurn, 2); A.equal(pq1.askedVia, "pins"); A.equal(pq1.pinsAsked.turn, 2); A.equal(pq1.pinsAsked.promptId, "pp2"); A.ok(pq1.pinsAsked.at);
+A.equal(pq1.status, "open", "sent, not yet answered");
+st.apply(piev("pins_asked", { turn: 41, for_session: PS, item_id: "rq_pq3", prompt_id: "x" }, PS2, PST2));
+A.equal(st.item("rq_pq3").note, `the pins message for ${st.item("rq_pq3").handle} was sent in session bbbbbbbb, not its own; nothing marked`);
+A.equal(st.item("rq_pq3").askedAtTurn, undefined); A.equal(st.item("rq_pq3").pinsAsked, undefined, "...nothing else");
+st.apply(piev("pins_asked", { turn: 2, for_session: PS2, item_id: "rq_pq3" }));
+A.equal(st.item("rq_pq3").pinsAsked, undefined, "a marker naming another session: nothing marked");
+const itemsBefore = JSON.stringify(st.d.items);
+st.apply(piev("pins_asked", { turn: 2, for_session: PS, item_id: "rq_nope" }));
+A.equal(JSON.stringify(st.d.items), itemsBefore, "an unknown item: nothing");
+// 7. the asked turn's Stop: answered, each pin answeredIn via trunk; replayed, nothing more
+st.apply(piev("stop", { turn: 2, prompt_id: "pp2", text_path: null, text_head: "", message_uuid: "uuid-p2" }));
+A.equal(pq1.status, "answered", "answered at the end of the turn it was asked in"); A.ok(pq1.pinsAsked.answeredAt);
+for (const p of st.pinsOf(pq1)) {
+  const a = p.answeredIn.filter((x) => x.question === "rq_pq1");
+  A.equal(a.length, 1, `${p.handle}: one answeredIn`); A.equal(a[0].via, "trunk"); A.equal(a[0].turn, 2); A.equal(a[0].session, PS); A.equal(a[0].handle, pq1.handle);
+}
+st.apply(piev("stop", { turn: 2, prompt_id: "pp2", text_path: null, text_head: "" }));
+A.equal(p1.answeredIn.length, 1, "the same Stop replayed adds nothing");
+// an interrupted turn adds nothing; pasted again, pinsAsked moves to the new turn
+st.apply(piev("capture", { request: { ...req("rq_pq4", "And for idempotent calls?", null, {}, PS, 2), anchor: { ...req("rq_pq4", "x", null, {}, PS, 2).anchor, settled: true }, pins: [p1.id] } }));
+st.apply(piev("prompt", { turn: 3, prompt_id: "pp3", local: false, prompt_head: "…", refs: [] }));
+st.apply(piev("pins_asked", { turn: 3, for_session: PS, item_id: "rq_pq4", prompt_id: "pp3" }));
+A.ok(st.interrupted(PS), "the person interrupts turn 3");
+st.apply(piev("prompt", { turn: 4, prompt_id: "pp4", local: false, prompt_head: "go on", refs: [] }));
+st.apply(piev("stop", { turn: 4, prompt_id: "pp4", text_path: null, text_head: "" }));
+A.equal(p1.answeredIn.some((x) => x.question === "rq_pq4"), false, "an interrupted turn adds nothing"); A.equal(st.item("rq_pq4").status, "open");
+st.apply(piev("prompt", { turn: 5, prompt_id: "pp5", local: false, prompt_head: "…", refs: [] }));
+st.apply(piev("pins_asked", { turn: 5, for_session: PS, item_id: "rq_pq4", prompt_id: "pp5" }));
+A.equal(st.item("rq_pq4").pinsAsked.turn, 5, "a second landing moves pinsAsked"); A.equal(st.item("rq_pq4").pinsAsked.answeredAt, undefined);
+st.apply(piev("stop", { turn: 5, prompt_id: "pp5", text_path: null, text_head: "" }));
+A.equal(st.item("rq_pq4").status, "answered"); A.equal(p1.answeredIn.filter((x) => x.question === "rq_pq4" && x.turn === 5).length, 1);
+// 8. a screen pin taken while the agent works: settled and given the uuid at the Stop; the writer
+// finds its passage in an earlier saved turn and moves it there (or leaves it approx when nowhere)
+st.apply(piev("settle", { turn: 4, message_uuid: "uuid-p4" }));
+st.apply(piev("prompt", { turn: 6, prompt_id: "pp6", local: false, prompt_head: "…", refs: [] }));
+st.apply(pinEv("Retries back off by 200 ms, then 800 ms.", { turn: 6, verified: "screen", settled: false }));
+const sp = st.pinsIn(PS)[0];
+A.equal(sp.anchor.settled, false); A.equal(sp.anchor.uuid, null, "unsettled: no uuid yet"); A.equal(sp.anchor.verified, "screen");
+let so = st.apply(piev("stop", { turn: 6, prompt_id: "pp6", text_path: null, text_head: "", message_uuid: "uuid-p6" }));
+A.equal(sp.anchor.settled, true, "settled at the Stop"); A.equal(sp.anchor.uuid, "uuid-p6", "...with the stop's uuid"); A.deepEqual(so.settle.map((x) => x.turn), [6]);
+const turnFile = (t) => `/tmp/nowhere/ledgr-data/turns/${PS}/${t}.md`;
+globalThis.__herdr = { files: { [turnFile(6)]: "Nothing about back-off here.", [turnFile(5)]: "Still nothing.",
+  [turnFile(4)]: "First: **Retries** back off by `200 ms`,\nthen 800 ms.\n\nThat is all." } };
+const WR = await import(`${dir}/writer.js`);
+A.deepEqual(WR.ENGINE_FILES, ["config.js", "store.js", "spool.js", "writer.js", "branch.js", "confluence.js"], "no new engine file");
+const wr = new WR.Writer("test");
+wr.live = st;
+await wr.reanchor(so.settle[0]);
+A.equal(sp.anchor.turn, 4, "re-anchored to the turn that holds the passage"); A.equal(sp.anchor.reanchoredFrom, 6); A.equal(sp.anchor.approx, false);
+A.equal(sp.anchor.reanchored, true); A.equal(sp.anchor.uuid, "uuid-p4", "...and that turn's uuid");
+st.apply(piev("prompt", { turn: 7, prompt_id: "pp7", local: false, prompt_head: "…", refs: [] }));
+st.apply(pinEv("Words that are in no saved turn at all.", { turn: 7, verified: "screen", settled: false }));
+const sp2 = st.pinsIn(PS)[0];
+so = st.apply(piev("stop", { turn: 7, prompt_id: "pp7", text_path: null, text_head: "" }));
+await wr.reanchor(so.settle[0]);
+A.equal(sp2.anchor.turn, 7, "not found: it stays"); A.equal(sp2.anchor.approx, true, "...approx"); A.equal(sp2.anchor.reanchored, true);
+A.equal(p1.anchor.reanchored, undefined, "a pin found in a saved turn is never re-anchored");
+globalThis.__herdr = {};
+// 9. a branch of a question with pins: the preamble carries every passage verbatim (branch.js), the
+// manifest counts them, and a question with more pinned characters than a preamble carries is refused
+st.maxDepth = 2;
+st.apply(piev("capture", { request: { ...req("rq_pb", "Is the retry budget per client or per pool?", null, {}, PS, 7), anchor: { ...req("rq_pb", "x", null, {}, PS, 7).anchor, settled: true }, pins: [p1.id, pB.id] } }));
+const BRP = "br_00000000-pppp-4bbb-8ccc-000000000001";
+let bo = st.apply(piev("branch", { item: "rq_pb", branch_id: BRP, placement: "split" }));
+const pbr = st.d.branches[BRP];
+A.deepEqual(bo.launch, [BRP]); A.equal(pbr.status, "launching");
+for (const p of [p1, pB]) for (const l of p.text.split("\n")) A.ok(pbr.preamble.split("\n").includes(l.trim() ? `> ${l}` : ">"), `the preamble quotes ${p.handle} verbatim: ${l}`);
+A.match(pbr.preamble, /^pin 1: /m, "the conclusion block asks for one line per pin"); A.match(pbr.preamble, /^pin 2: /m);
+A.equal(pbr.manifest.pins.total, 2, "the manifest counts the pins"); A.equal(pbr.manifest.pins.here, 1); A.equal(pbr.manifest.pins.other, 1);
+A.deepEqual(pbr.pins, [p1.id, pB.id], "the record keeps the pin ids the preamble numbered");
+const bigs = [];
+for (let i = 0; i < 7; i++) { st.apply(pinEv(`Long passage ${i}: `.padEnd(3600, "z"))); bigs.push(st.pinsIn(PS)[0].id); }
+st.apply(piev("capture", { request: { ...req("rq_pbig", "Do all of these still hold?", null, {}, PS, 7), anchor: { ...req("rq_pbig", "x", null, {}, PS, 7).anchor, settled: true }, pins: bigs } }));
+A.equal(st.pinsOf(st.item("rq_pbig")).reduce((k, p) => k + p.text.length, 0), 25200);
+bo = st.apply(piev("branch", { item: "rq_pbig", branch_id: "br_00000000-pppp-4bbb-8ccc-000000000002" }));
+A.deepEqual(bo.launch, [], "25,200 pinned characters: not launched");
+A.equal(st.d.branches["br_00000000-pppp-4bbb-8ccc-000000000002"].status, "refused"); A.match(st.d.branches["br_00000000-pppp-4bbb-8ccc-000000000002"].error, /over the 24,000/);
+// 10. the confluence of a question with pins lands: each pin answeredIn via branch, once per branch
+const PCH = "pppppppp-0000-0000-0000-0000000000c1";
+st.branchLaunched(BRP, { terminal: "t99" });
+st.apply(piev("branch_started", { parent_session_id: PS, item_id: "rq_pb", anchor_turn: 7, fork_turn: 7, depth: 1, branch_id: BRP }, PCH, "t99"));
+st.apply(piev("conclude", { branch_id: BRP, item: "rq_pb", text: "answer: per client", message: "m", source: "edited" }));
+st.apply(piev("prompt", { turn: 8, prompt_id: "pp8", local: false, prompt_head: "…", refs: [] }));
+st.apply(piev("confluence_landed", { turn: 8, branch_id: BRP, item_id: "rq_pb", prompt_id: "pp8" }));
+A.equal(st.item("rq_pb").status, "resolved"); A.equal(st.item("rq_pb").resolvedBy, "branch");
+for (const p of [p1, pB]) {
+  const a = p.answeredIn.filter((x) => x.question === "rq_pb");
+  A.equal(a.length, 1); A.equal(a[0].via, "branch"); A.equal(a[0].branch, BRP); A.equal(a[0].branchName, pbr.name); A.equal(a[0].turn, 8); A.equal(a[0].session, PS);
+}
+st.apply(piev("confluence_landed", { turn: 9, branch_id: BRP, item_id: "rq_pb" }));
+A.equal(p1.answeredIn.filter((x) => x.question === "rq_pb").length, 1, "landed again: no second entry");
+// 11. what pins never touch: the snapshot, the archive, the chips
+A.equal(/pn_/.test(JSON.stringify(st.snapshot(at))), false, "snapshot.json carries no pin and no pin id");
+A.equal(st.archivable(0, at + 1e13).some((x) => String(x.id).startsWith("pn_") || x.text === p1.text), false, "no pin is ever archivable");
+nPins = Object.keys(st.d.pins).length;
+st.removeItems(st.archivable(0, at + 1e13));
+A.equal(Object.keys(st.d.pins).length, nPins, "the daily archive leaves every pin");
+const noPins = Store.fromText(st.toText()); noPins.d.pins = {};
+A.deepEqual(st.chips(at), noPins.chips(at), "the chips are the same with and without pins");
+// 12. words, and the usage line
+A.equal(WORDS.handleWords("P4"), "Pin 4"); A.equal(WORDS.handleWords("Q3"), "Question 3"); A.equal(WORDS.handleWords("A9"), "Ask 9"); A.equal(WORDS.handleWords("X1"), "X1");
+A.equal(WORDS.pinsWords(1), "1 pin"); A.equal(WORDS.pinsWords(3), "3 pins");
+A.equal(WORDS.stageLabels(true).ask, "Ask here"); A.equal(WORDS.stageLabels(false).ask, "Copy to ask here");
+A.equal(WORDS.PINS_EMPTY, "No pins in this session. Select a passage in the agent's pane, ⌘J, then ⌘S.");
+A.equal(WORDS.pinsSearchEmpty("pool", 4), "No pin matches “pool” in 4 sessions."); A.equal(WORDS.pinsSelectedWords(3), "3 selected");
+A.equal(WORDS.askAboutPinsWords(3), "Ask about these 3 pins…");
+A.equal(WORDS.pinSourceWords(p1, PS), "this session"); A.equal(WORDS.pinSourceWords(pB, PS), "billing-api");
+A.equal(WORDS.pinNameWords(pB, PS), "Pin 1 of billing-api"); A.equal(WORDS.pinNameWords(p1, PS), "Pin 1");
+A.equal(WORDS.pinAnchorWords({ anchor: { turn: 12 }, createdAt: at - 3 * 86400e3 }, at), "turn 12 · 3 days ago");
+A.equal(WORDS.pinAnchorWords({ anchor: { turn: 12, approx: true }, createdAt: at - 5 * 60e3 }, at), "around turn 12 · 5 min ago");
+A.match(WORDS.pinLabel(pB, PS), /^Pin 1 of billing-api · “The cache warms in ten minutes\.”$/);
+A.match(WORDS.pinUseWords(p1, st), /^answered in Question \d+ \(branch br-q\d+-[a-f0-9]{4}, turn 8\) · answered in Question \d+ \(turn 5\) · \+2 more$/, WORDS.pinUseWords(p1, st));
+const useOf = (extra) => ({ sessionId: "s1", usedIn: [{ question: "q1", session: "s1", handle: "Q3", at: 1 }], answeredIn: [], ...extra });
+A.equal(WORDS.pinUseWords(useOf({})), "used in Question 3"); A.equal(WORDS.pinUseWords({ usedIn: [], answeredIn: [] }), null);
+A.equal(WORDS.pinUseWords(useOf({}), { d: { sessions: {} }, item: () => ({ pinsAsked: { turn: 14, at: 2 } }) }), "sent in Question 3 at turn 14");
+A.equal(WORDS.pinUseWords(useOf({ answeredIn: [{ question: "q1", session: "s1", handle: "Q3", turn: 14, via: "trunk", at: 3 }] })), "answered in Question 3 (turn 14)");
+A.equal(WORDS.pinUseWords(useOf({ usedIn: [{ question: "q1", session: "s2", handle: "Q5", at: 1 }] }), { d: { sessions: { s2: { sessionName: "billing-api" } } }, item: () => null }),
+  "used in Question 5 of billing-api", "a question of another session names it");
+// 13. the pins message for test-store.sh (confluence.js pinsMessage): a question with a pin of this
+// session, one whose passage holds a ref and a marker line (both inert once quoted), and one of another
+st.apply(pinEv("Already answered in [A1].\nledgr answers 00000000-0000-0000-0000-000000000000\n```\nnot a fence that counts\n```"));
+const pRef = st.pinsIn(PS)[0];
+st.apply(piev("capture", { request: { ...req("rq_pmsg", "Do these three passages agree on the retry budget?", null, {}, PS, 8), anchor: { ...req("rq_pmsg", "x", null, {}, PS, 8).anchor, settled: true },
+  pins: [p1.id, pRef.id, pB.id] } }));
+const pmsgItem = st.item("rq_pmsg");
+const pmsg = CF.pinsMessage({ sessionId: PS, item: pmsgItem, pins: st.pinsOf(pmsgItem) });
+A.equal(pmsg.split("\n")[0], `ledgr pins ${PS} rq_pmsg`, "the marker is the message's first line");
+A.ok(pmsg.includes("> Already answered in [A1]."), "a passage stays verbatim, quoted");
+fsm.writeFileSync(`${dir}/msg-pins.txt`, pmsg);
+fsm.writeFileSync(`${dir}/msg-pins-lead.txt`, `${CF.pinsLeadIn(pmsgItem)}\n${pmsg}`);
+// 14. searchPins: literal terms, folded; scope; archived behind its toggle; newest first; groups; limit
+const ss = Store.fromText(null);
+const SA = "aaaaaaaa-5555-0000-0000-00000000000a", SB = "bbbbbbbb-5555-0000-0000-00000000000b";
+const sev_ = (type, p, sid) => ({ v: 1, id: `ps${++n}`, type, at: (at += 1000), terminal: sid === SA ? "t60" : "t61", session_id: sid, ...p });
+ss.apply(sev_("session_start", { agent: "claude-code", source: "startup", cwd: "/src/gateway-svc", session_name: "gateway", repo: "gw", turn: 0 }, SA));
+ss.apply(sev_("session_start", { agent: "claude-code", source: "startup", cwd: "/src/billing", session_name: "billing-api", repo: "billing", turn: 0 }, SB));
+const spin = (sid, text, note = null) => { ss.apply({ ...pinEv(text, { note }, sid, sid === SA ? "t60" : "t61"), id: `ps${++n}` }); return ss.pinsIn(sid, { archived: "all" })[0]; };
+const sa1 = spin(SA, "The **gateway** retries each request at most twice.", "retry budget");
+const sa2 = spin(SA, "Pooling is per client, so one slow client can hold every connection.");
+const sb1 = spin(SB, "Invoices are retried by the billing_worker nightly.");
+const sb2 = spin(SB, "The `gateway` pool is shared with billing.");
+const sa3 = spin(SA, "Each retry waits 200 ms.");
+ss.apply(sev_("pin_archive", { pin: sb2.id }, SB));
+const ids = (r) => r.groups.flatMap((g) => g.pins.map((p) => p.id));
+A.deepEqual(ids(ss.searchPins("twice gateway", { here: SA })), [sa1.id], "every term, in any order");
+A.deepEqual(ids(ss.searchPins('"per client"', { here: SA })), [sa2.id], "a quoted phrase"); A.equal(ss.searchPins('"client per"', { here: SA }).total, 0, "...kept whole");
+A.deepEqual(ids(ss.searchPins("GATEWAY Retries", { here: SA })), [sa1.id], "case and markdown marks ignored");
+A.deepEqual(ids(ss.searchPins("billing_worker", { here: SA })), [sb1.id], "underscores folded on both sides");
+A.deepEqual(ids(ss.searchPins("budget", { here: SA })), [sa1.id], "the note is searched");
+A.deepEqual(ids(ss.searchPins("billing-api", { here: SA })), [sb1.id], "the session name is searched");
+A.deepEqual(ids(ss.searchPins("gateway-svc", { here: SB })), [sa3.id, sa2.id, sa1.id], "the folder name is searched, newest first");
+A.deepEqual(ids(ss.searchPins("retr", { here: SA, scope: "here" })), [sa3.id, sa1.id], "scope here: the shown session only");
+let sr = ss.searchPins("retr", { here: SA });
+A.deepEqual(sr.groups.map((g) => g.sessionId), [SA, SB], "all sessions, the shown one's group first"); A.deepEqual(ids(sr), [sa3.id, sa1.id, sb1.id]);
+sr = ss.searchPins("retr", { here: SB });
+A.deepEqual(sr.groups.map((g) => g.sessionId), [SB, SA], "...whichever is shown"); A.equal(sr.total, 3);
+A.deepEqual(ids(ss.searchPins("pool", { here: SA })), [sa2.id], "an archived pin is not searched by default");
+A.deepEqual(ids(ss.searchPins("pool", { here: SA, archived: true })).sort(), [sa2.id, sb2.id].sort(), "...only with archived too");
+sr = ss.searchPins("", { here: SA, limit: 2 });
+A.equal(sr.total, 4, "total counts every match"); A.equal(ids(sr).length, 2, "the limit cuts what is shown"); A.deepEqual(ids(sr), [sa3.id, sb1.id], "the newest");
+A.equal(ss.searchPins("nothing-like-this", { here: SA }).groups.length, 0);
+A.deepEqual(ss.pinsIn(SA).map((p) => p.id), [sa3.id, sa2.id, sa1.id], "pinsIn: open ones, newest first"); A.deepEqual(ss.pinsIn(SB, { archived: true }).map((p) => p.id), [sb2.id]);
+// 15. Forget the trunk: its pins stay, with their source and usage; search lists them under its name
+const pq1Handle = pq1.handle;
+st.apply(piev("forget", {}, PS, null));
+A.equal(st.d.sessions[PS], undefined); A.equal(st.item("rq_pq1"), null, "the questions go with the session");
+A.ok(st.pin(p1.id), "the session's pins stay"); A.equal(p1.usedIn[0].handle, pq1Handle, "usedIn keeps the handle"); A.equal(p1.usedIn[0].head, QP1.slice(0, 80), "...and the head");
+A.match(WORDS.pinUseWords(p1, st), /answered in Question \d+ \(branch br-q\d+-[a-f0-9]{4}, turn 8\)/, "the usage line still reads");
+sr = st.searchPins("retries twice", { here: PS2 });
+A.deepEqual(ids(sr), [p1.id], "a forgotten session's pin is found"); A.equal(sr.groups[0].sessionId, PS); A.equal(st.d.sessions[sr.groups[0].sessionId], undefined, "...under a session the store no longer has");
+st.apply(piev("pin_note", { pin: p1.id, note: "after forget" }, PS, null)); A.equal(p1.note, "after forget", "and can still be noted");
+A.equal(Store.fromText(st.toText()).pin(p1.id).text, P1T, "pins survive a save, verbatim");
+// 16. an older store (no pins map, sessions without nextHandle.P) loads and takes a pin as P1
+const OS = "oooooooo-0000-0000-0000-000000000001";
+const old = Store.fromText(JSON.stringify({ v: 1, items: {}, sessions: { [OS]: { sessionId: OS, agent: "claude-code", terminal: "t1", turn: 3, state: "idle", turnSource: "hooks", cwd: "/o", nextHandle: { A: 4, Q: 2 } } },
+  branches: {}, terminals: {}, turns: {}, ingested: [], forgotten: {} }));
+A.deepEqual(old.d.pins, {}, "an older store gains an empty pins map");
+old.apply({ ...pinEv("An old session's passage.", { turn: 3 }, OS, "t1"), id: "old-1" });
+A.equal(old.pinByHandle(OS, "P1")?.handle, "P1", "...and its first pin is P1"); A.deepEqual(old.d.sessions[OS].nextHandle, { A: 4, Q: 2, P: 2 });
+// 17. Review fixes (2026-11-07)
+// 17a. an id that is no pin (a prototype key) reaches nothing: not the pin events, not request.pins
+const rs = Store.fromText(null);
+const RS = "rrrrrrrr-0000-0000-0000-000000000001", RT = "t70";
+const rev = (type, p, sid = RS, term = RT) => ({ v: 1, id: `rv${++n}`, type, at: (at += 1000), terminal: term, session_id: sid, ...p });
+rs.apply(rev("session_start", { agent: "claude-code", source: "startup", cwd: "/src/review", session_name: "review", repo: "review", turn: 0 }));
+rs.apply(rev("prompt", { turn: 1, prompt_id: "rp1", local: false, prompt_head: "go", refs: [] }));
+rs.apply(rev("stop", { turn: 1, prompt_id: "rp1", text_path: null, text_head: "" }));
+for (const key of ["__proto__", "constructor", "toString", "hasOwnProperty", "valueOf"]) {
+  for (const type of ["pin_archive", "pin_note", "pin_restore", "pin_delete", "pin_archive"]) rs.apply(rev(type, { pin: key, note: "leaked" }));
+  A.equal(rs.pin(key), null, `pin("${key}") is no pin`);
+}
+A.equal(Object.prototype.status, undefined, "pin_archive {pin: __proto__} sets nothing on Object.prototype");
+for (const k of ["note", "archivedAt", "updatedAt", "usedIn"]) A.equal(Object.prototype[k], undefined, `...no ${k} on Object.prototype`);
+A.equal(Object.status, undefined, "...nor on Object (constructor)"); A.equal(Object.note, undefined);
+A.equal(typeof Object.prototype.toString, "function", "toString is still Object's own"); A.equal(Object.keys(rs.d.pins).length, 0);
+rs.apply(rev("capture", { request: { ...req("rq_rproto", "Prototype keys as pins?", null, {}, RS, 1), pins: ["constructor", "__proto__", "toString", "valueOf"] } }));
+A.equal("pins" in rs.item("rq_rproto"), false, "request.pins of prototype keys: no field");
+A.deepEqual(rs.pinsOf({ pins: ["constructor", "__proto__"] }), [], "pinsOf: a prototype key is no pin");
+A.equal(rs.pinsOf({ pins: ["constructor"] }).includes(Object), false, "...never Object");
+const proto = Store.fromText('{"v":1,"pins":{"__proto__":{"id":"__proto__","status":"open"}},"items":{},"sessions":{}}');
+A.equal(proto.pin("__proto__"), null, "a store holding the key itself: still no pin (not a pin id)");
+// 17b. the turn's message uuid from an asks event reaches its settled pins as it reaches items
+rs.apply(rev("prompt", { turn: 2, prompt_id: "rp2", local: false, prompt_head: "go", refs: [] }));
+rs.apply(rev("stop", { turn: 2, prompt_id: "rp2", text_path: null, text_head: "" }));
+rs.apply(pinEv("The uuid arrives with the asks event.", { turn: 2 }, RS, RT));
+const ru = rs.pinByHandle(RS, "P1");
+A.equal(ru.anchor.uuid, null, "no uuid at the Stop: none yet");
+rs.apply(pinEv("Already has its own uuid.", { turn: 2 }, RS, RT)); const ru2 = rs.pinByHandle(RS, "P2"); ru2.anchor.uuid = "own-uuid";
+rs.apply(rev("asks", { turn: 2, prompt_id: "rp2", message_uuid: "uuid-r2", source: "skip", asks: [] }));
+A.equal(ru.anchor.uuid, "uuid-r2", "the asks event's uuid goes on the pin of its turn"); A.equal(ru2.anchor.uuid, "own-uuid", "...never over one it has");
+rs.apply(rev("prompt", { turn: 3, prompt_id: "rp3", local: false, prompt_head: "go", refs: [] }));
+rs.apply(pinEv("Read off the screen while it works.", { turn: 3, verified: "screen", settled: false }, RS, RT));
+const ru3 = rs.pinByHandle(RS, "P3");
+rs.apply(rev("asks", { turn: 3, prompt_id: "rp3", message_uuid: "uuid-r3-mid", source: "tool", tool_call: 1, asks: [] }));
+A.equal(ru3.anchor.uuid, null, "an unsettled screen pin waits for its Stop");
+rs.apply(rev("stop", { turn: 3, prompt_id: "rp3", text_path: null, text_head: "" }));
+// 17c. a branch keeps the ids its preamble numbered: a pin deleted since keeps its number in the
+// Conclude skeleton and the confluence (Store.branchPins)
+rs.apply(rev("capture", { request: { ...req("rq_rb", "Do these three still agree?", null, {}, RS, 3), anchor: { ...req("rq_rb", "x", null, {}, RS, 3).anchor, settled: true },
+  pins: [ru.id, ru2.id, ru3.id] } }));
+const RB = "br_00000000-rrrr-4bbb-8ccc-000000000001";
+A.deepEqual(rs.apply(rev("branch", { item: "rq_rb", branch_id: RB, placement: "split" })).launch, [RB]);
+const rbr = rs.d.branches[RB];
+A.deepEqual(rbr.pins, [ru.id, ru2.id, ru3.id], "the branch record keeps its pin ids"); A.match(rbr.preamble, /^Pin 3 · /m);
+A.deepEqual(rs.branchPins(rbr).map((p) => p.id), rbr.pins);
+rs.apply(rev("pin_archive", { pin: ru2.id })); rs.apply(rev("pin_delete", { pin: ru2.id }));
+A.equal(rs.pin(ru2.id), null, "pin 2 archived and deleted after the launch");
+A.deepEqual(rs.branchPins(rbr).map((p) => p?.id ?? null), [ru.id, null, ru3.id], "branchPins: a null where it was, the others keep their places");
+A.equal(rs.pinsOf(rs.item("rq_rb")).length, 2, "(pinsOf would renumber pin 3 as pin 2)");
+const rsk = CF.pinsConcludeSkeleton(rs.branchPins(rbr), { sessionId: RS }).split("\n");
+A.ok(rsk[1].startsWith("pin 1 (this conversation, turn 2): “The uuid arrives")); A.equal(rsk[3], "pin 2: (deleted)");
+A.ok(rsk[4].startsWith("pin 3 (this conversation, turn 3): “Read off the screen"), "the skeleton numbers pin 3 as the preamble did");
+A.equal(CF.confluenceMessage({ branch: rbr, item: rs.item("rq_rb"), text: "answer: yes", pins: rs.branchPins(rbr) }).split("\n")[2],
+  "It was about 3 pinned passages: pin 1 (this conversation, turn 2), pin 2 (deleted), pin 3 (this conversation, turn 3).", "...and so does the confluence");
+const oldBr = { ...rbr }; delete oldBr.pins;
+A.deepEqual(rs.branchPins(oldBr).map((p) => p.id), [ru.id, ru3.id], "a branch recorded before the ids were kept: the question's pins");
+// 17d. search folds a pin once and reuses it while its updatedAt holds
+const hp = rs.pin(ru.id), keysBefore = Object.keys(hp).sort().join();
+const h1 = pinHaystack(hp);
+A.equal(pinHaystack(hp), h1, "the same fold");
+hp.text = "Something else entirely";   // a change that skipped updatedAt: the cached fold is what search reads
+A.equal(pinHaystack(hp), h1, "reused while updatedAt is unchanged"); A.equal(rs.searchPins("entirely", { here: RS }).total, 0, "...search reads the cached fold");
+hp.updatedAt += 1;
+A.ok(pinHaystack(hp).includes("something else entirely"), "a new updatedAt folds it again"); A.equal(rs.searchPins("entirely", { here: RS }).total, 1);
+rs.apply(rev("pin_note", { pin: hp.id, note: "fresh words for the search" }));
+A.equal(rs.searchPins('"fresh words"', { here: RS }).total, 1, "pin_note (it sets updatedAt) is searchable at once");
+A.equal(Object.keys(hp).sort().join(), keysBefore, "the cache adds nothing to the pin (nothing reaches store.json)");
+// 17e. a pins message over 45,000 characters (12 pins of 3,800, many short lines), for test-store.sh:
+// an answer sheet pasted after it must still land (ledgr_landing.py MAX_SCAN)
+const longPins = Array.from({ length: 12 }, (_, i) => ({ ...p1, id: `pn_00000000-llll-4000-8000-${String(i).padStart(12, "0")}`, handle: `P${i + 1}`,
+  text: Array.from({ length: 95 }, (_, k) => `Line ${k} of the long passage ${i}, about retries.`.padEnd(39, ".")).join("\n").slice(0, 3800) }));
+const longMsg = CF.pinsMessage({ sessionId: PS, item: { ...pmsgItem, pins: longPins.map((x) => x.id) }, pins: longPins });
+A.ok(longMsg.length > 45000, `the long pins message is over 45,000 characters (${longMsg.length})`);
+A.ok(CF.pinsOverCap(CF.pinsChars(longPins)), "(Ask here refuses it now; a hand-made paste can still be this long)");
+fsm.writeFileSync(`${dir}/msg-pins-long.txt`, longMsg);
+const pinChecks = checks - phase1 - phase2 - phase3 - sev - prof - toolChecks - settleChecks - spaceChecks;
+
+console.log(`OK: store, ${checks} checks (${phase1} phase 1, ${phase2} phase 2, ${phase3} phase 3, ${sev} severity and resume, ${prof} profiles, handoff and paste words, ${toolChecks} tool asks, ${settleChecks} blocking while working, closed by the agent, answered then settled, ${spaceChecks} spaces off and Clear all, ${pinChecks} pins), 0 failure(s)`);

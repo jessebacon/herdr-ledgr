@@ -761,3 +761,5 @@ docstring (`bin/lib/ledgr_spool.py`) lists the new mod-written event.
   pastes one blank line apart), every staged clipboard ending with it, the clipboard check taking the
   text with or without its trailing breaks.
 - `test_no_keystrokes.py` 313, unchanged. `herdr-app check mods/ledgr` passes.
+
+Pins (2026-11-07: the PINS lane, search, Ask here, the hold control, the box's ⌘S): `BUILD-NOTES-pins.md`.

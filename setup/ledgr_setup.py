@@ -58,7 +58,7 @@ HANDOFFS = [("ledgr", "ledgr (default): the agent keeps blocking and needed item
                       "\"ledgr: N items for you, M blocking\"; the list lives in the panel, the terminal's last screen stays the work's"),
             ("both", "both: the reply lists them as usual and the agent declares them to ledgr as well; more lines in the terminal"),
             ("prose", "prose: no instruction in the agent's context; ledgr's extractor reads each reply (one model call per turn)")]
-MOD_KEYS = {"cmd-enter": "ledgr.btw", "tab": "ledgr.tab", "shift-tab": "ledgr.backtab"}
+MOD_KEYS = {"cmd-enter": "ledgr.btw", "tab": "ledgr.tab", "shift-tab": "ledgr.backtab", "cmd-s": "ledgr.pin"}
 CAPTURE_ALTS = ["cmd-j", "cmd-alt-j", "cmd-ctrl-j", "cmd-shift-k"]
 TOGGLE_ALTS = ["cmd-shift-j", "cmd-alt-shift-j", "cmd-ctrl-shift-j", "cmd-alt-l"]
 EXCLUDE = {"gpui-kit.d.ts", "jsconfig.json", "__pycache__", ".DS_Store"}

@@ -1,12 +1,19 @@
-"""ledgr landing detector (Phase 3): does a submitted prompt carry a ledgr message the panel staged?
+"""ledgr landing detector (Phase 3, pins): does a submitted prompt carry a ledgr message the panel staged?
 
-The panel never presses Enter. It puts one of two messages on the clipboard, focuses the pane and,
+The panel never presses Enter. It puts one of three messages on the clipboard, focuses the pane and,
 once the focus is confirmed, pastes it into the prompt (terminal.paste; else the person pastes);
 the person presses Enter. When that prompt is submitted, the UserPromptSubmit hook
 calls detect() on it. A message starts with a marker line (mods/ledgr/confluence.js writes them):
 
     ledgr confluence <branch id> <item id>      a branch's conclusion returning to its trunk
     ledgr answers <session id>                  the answer sheet, then "A3: <answer>" lines
+    ledgr pins <session id> <item id>           a parked question asked in its trunk with its pins
+                                                (Ask here): the question line, then each pinned
+                                                passage quoted line by line with "> "; the body is
+                                                not parsed, the marker is the whole signal
+
+A pinned passage is quoted, so a marker or a fence inside it is inert: both count only at the start
+of a stripped line, and every passage line starts with ">".
 
 Where the marker may stand:
   - Pasted blocks. When the adapter names its agent's paste wrapper (Claude Code puts pasted text
@@ -23,6 +30,9 @@ inside a code fence, with a different case, a double space or a trailing word.
 Where a message ends: at a pasted block's closing line, at the next marker line, or, for an answer
 sheet (its answers are one line each, confluence.js answersSheet), at the first empty line after its
 A<n>: lines that is not followed by another A<n>: line, so text typed below a sheet is not part of it.
+A pins message holds blank lines between its pins, so like a confluence it runs to the block's
+closing line, the next marker line or the prompt's end (text typed below it is ignored: its body is
+never read). A pins message and an answer sheet in one prompt, in either order, are two messages.
 detect_all() returns every message in prompt order; detect() the first, or None.
 The prompt is never changed. Agent-agnostic and pure (no files, no imports beyond re): the adapter
 supplies the wrapper syntax.
@@ -31,14 +41,21 @@ import re
 
 CONFLUENCE = re.compile(r"^ledgr confluence (br_[A-Za-z0-9_-]{1,80}) (rq_[A-Za-z0-9_-]{1,80})[ \t]*$")
 ANSWERS = re.compile(r"^ledgr answers ([A-Za-z0-9][A-Za-z0-9._:-]{0,127})[ \t]*$")
+# The session pattern is ANSWERS's, so a synthetic herdr:t3 session passes; the item is a parked question.
+PINS = re.compile(r"^ledgr pins ([A-Za-z0-9][A-Za-z0-9._:-]{0,127}) (rq_[A-Za-z0-9_-]{1,80})[ \t]*$")
 HANDLE = re.compile(r"^(A\d{1,6})[ \t]*:[ \t]*(.*)$")
 CONCLUSION = re.compile(r"^conclusion\s*:\s*(.*)$", re.I)
 FENCE = re.compile(r"^(```|~~~)")
-MAX_SCAN = 40_000
+MAX_SCAN = 64_000   # a pins message (Ask here) can run past 40,000 before an answer sheet pasted after it
 MAX_ANSWER = 400
 MAX_HANDLES = 60
 MAX_LEAD_IN = 200
 MAX_MESSAGES = 20
+
+
+def has_marker_text(text):
+    """The fast path: False when no marker can be in `text` (most prompts)."""
+    return "ledgr confluence " in text or "ledgr answers " in text or "ledgr pins " in text
 
 
 def _lines(prompt):
@@ -82,11 +99,14 @@ def _parse(first, rest):
             return None                                       # a marker with no answers: not a sheet
         return {"kind": "answers", "for_session": m.group(1), "handles": handles,
                 "answers": {k: v[:MAX_ANSWER] for k, v in answers.items()}}
+    m = PINS.match(first)
+    if m:                                                     # the body (question, quoted pins) is not read
+        return {"kind": "pins", "for_session": m.group(1), "item_id": m.group(2)}
     return None
 
 
 def _is_marker(s):
-    return bool(CONFLUENCE.match(s) or ANSWERS.match(s))
+    return bool(CONFLUENCE.match(s) or ANSWERS.match(s) or PINS.match(s))
 
 
 def _end(lines, bound, k):
@@ -162,13 +182,13 @@ def _unwrapped(lines, bound):
 
 def detect_all(prompt, wrapper=None):
     """Every ledgr message in the prompt, in order: {"kind": "confluence", "branch_id", "item_id",
-    "conclusion_head"} or {"kind": "answers", "for_session", "handles": [...], "answers": {handle:
-    text}}. [] when there is none. wrapper: (opening-line regex, closing-line regex) of the agent's
-    pasted blocks, or None."""
+    "conclusion_head"}, {"kind": "answers", "for_session", "handles": [...], "answers": {handle:
+    text}} or {"kind": "pins", "for_session", "item_id"}. [] when there is none. wrapper:
+    (opening-line regex, closing-line regex) of the agent's pasted blocks, or None."""
     if not isinstance(prompt, str):
         return []
     head = prompt[:MAX_SCAN]
-    if "ledgr confluence " not in head and "ledgr answers " not in head:
+    if not has_marker_text(head):
         return []                                             # fast path: most prompts end here
     lines = _lines(prompt)
     opener, closer = wrapper if wrapper else (None, None)

@@ -45,17 +45,34 @@
 // "rejoin_pending"]} (the panel's Clear N) dismisses every open or deferred parked question of the
 // session that has no branch, with `dismissedBy: "clear"` and `clearedAt`; branched and rejoin_pending
 // questions always stay. Reopen works per item (setStatus drops both marks).
+//
+// Pins (2026-11-07, docs/design/Pins.md): a passage the person keeps verbatim from an agent's reply.
+// Pins live in their own map, `d.pins` ({[pn_id]: Pin}), beside `items`, so nothing that reads items
+// (the chips, the snapshot, the archive, on_prompt's refs, Forget) ever treats one as waiting on
+// someone. `pin` (the box: ⌘J, ⌘S) creates one (P1, P2… per session; the same passage again in the
+// same session restores or re-dates the one pin); `pin_note`, `pin_archive`, `pin_restore`,
+// `pin_delete` (the panel) are applied by pin id whatever became of its session (PIN_OPS); only an
+// archived pin can be deleted, and Forget keeps a session's pins (each carries its `source`). A
+// parked question may carry pins (`capture`'s `request.pins`, validated); asked in the trunk its
+// `pins_asked` (the hook saw the `ledgr pins <session> <item>` marker) marks it sent, and that turn's
+// Stop records `answeredIn` on each pin; a confluence that lands does the same with its branch.
 import { createHash, randomUUID } from "crypto";
 import { LIMITS, agentLabel } from "./config.js";
 import { DEFAULT_MAX_DEPTH, manifest, preamble, branchName, branchLabel, depthOf } from "./branch.js";
-import { conclusionHead, decisionLine, decisionsHeader } from "./confluence.js";
+import { conclusionHead, decisionLine, decisionsHeader, pinText } from "./confluence.js";
 
-const EMPTY = () => ({ v: 1, items: {}, sessions: {}, branches: {}, terminals: {}, turns: {}, ingested: [], forgotten: {} });
+const EMPTY = () => ({ v: 1, items: {}, sessions: {}, branches: {}, terminals: {}, turns: {}, ingested: [], forgotten: {}, pins: {} });
 const OPEN_STATES = new Set(["open", "answered", "deferred", "rejoin_pending"]);
 const AGENT = "agent_to_human", HUMAN = "human_to_agent";
 const ASK_KINDS = new Set(["decide", "confirm", "do", "provide", "review"]);
 const Q_KINDS = new Set(["question", "note", "bookmark"]);
-const OWN_EVENTS = new Set(["act", "retry", "branch", "forget", "conclude", "close_branch", "resume", "clear_questions"]);
+// The panel's own pin events: applied by pin id (a pin outlives its session), never creating one.
+const PIN_OPS = new Set(["pin_note", "pin_archive", "pin_restore", "pin_delete"]);
+const OWN_EVENTS = new Set(["act", "retry", "branch", "forget", "conclude", "close_branch", "resume", "clear_questions", ...PIN_OPS]);
+export const PIN_ID = /^pn_[A-Za-z0-9-]{8,64}$/;
+// A key the map itself holds: `__proto__`, `constructor` or `toString` would otherwise reach
+// Object.prototype through a plain lookup (a pin id comes from a spool event or a Request).
+const own = (o, k) => Boolean(o) && Object.prototype.hasOwnProperty.call(o, k);
 
 export const isAgentAsk = (it) => it?.direction === AGENT;
 export const isHuman = (it) => it?.direction === HUMAN;
@@ -95,6 +112,32 @@ export function norm(s) {
 }
 
 const squash = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
+
+// Pin search folding (capture.js unmark, plus `_` and case): lower case, `*`, backtick and `_`
+// dropped, whitespace collapsed. Applied to the query's terms and to every field searched.
+export const foldPin = (s) => String(s ?? "").toLowerCase().replace(/[*`_]+/g, "").replace(/\s+/g, " ").trim();
+// The query's terms: words split on whitespace, "double-quoted phrases" (straight or curly) kept whole.
+export function pinTerms(query) {
+  const out = [], re = /["“]([^"”]*)["”]|(\S+)/g;
+  let m;
+  while ((m = re.exec(String(query ?? ""))) !== null) {
+    const t = foldPin(m[1] ?? String(m[2]).replace(/^["“”]+|["“”]+$/g, ""));
+    if (t) out.push(t);
+  }
+  return out;
+}
+// What a pin is searched by: its text, note, session name, repo and the last part of its folder.
+// Folded once per pin and kept while its `updatedAt` holds (every change to a pin sets it), so a render
+// that searches does not fold every pin again; a WeakMap, so nothing reaches store.json.
+const HAYSTACKS = new WeakMap();
+export function pinHaystack(p) {
+  const c = p && typeof p === "object" ? HAYSTACKS.get(p) : null;
+  if (c && c.at === p.updatedAt) return c.h;
+  const h = [p?.text, p?.note, p?.source?.sessionName, p?.source?.repo, String(p?.source?.cwd ?? "").split("/").filter(Boolean).pop()]
+    .map(foldPin).filter(Boolean).join(" \u0001 ");
+  if (p && typeof p === "object") HAYSTACKS.set(p, { at: p.updatedAt, h });
+  return h;
+}
 
 // The passage hash: sha1 of the whitespace-collapsed passage (quote, else text), first 12
 // hex chars. Events that carry `hash` win; this is the fallback (docs/build-notes/BUILD-NOTES-mod.md in the repo).
@@ -159,6 +202,53 @@ export class Store {
   branchesOf(sid) { return Object.values(this.d.branches).filter((b) => b.parentSessionId === sid).sort((a, b) => num(b.createdAt) - num(a.createdAt)); }
   branchesFor(itemId) { return Object.values(this.d.branches).filter((b) => b.requestId === itemId).sort((a, b) => num(b.createdAt) - num(a.createdAt)); }
   branchOfSession(sid) { return Object.values(this.d.branches).find((b) => b.sessionId === sid) ?? null; }
+  // ── pins ──
+  pins() { return Object.values(this.d.pins); }
+  // A pin by id: only an id of the pin pattern that the map itself holds (never a prototype key).
+  pin(id) { return typeof id === "string" && PIN_ID.test(id) && own(this.d.pins, id) ? this.d.pins[id] : null; }
+  // Every pin of a session, whatever its status.
+  pinsOfSession(sid) { return this.pins().filter((p) => p.sessionId === sid); }
+  // A parked question's pins in its order; ids of pins since deleted are skipped.
+  pinsOf(item) { return (Array.isArray(item?.pins) ? item.pins : []).map((id) => this.pin(id)).filter(Boolean); }
+  // A branch's pins as its preamble numbered them at launch (`br.pins`, the ids frozen then): a pin
+  // deleted since stays as null, so pin 2 is still pin 2 in the Conclude skeleton and the confluence.
+  // A branch launched before the ids were kept: the question's pins now.
+  branchPins(br) {
+    if (Array.isArray(br?.pins)) return br.pins.map((id) => this.pin(id));
+    return this.pinsOf(this.item(br?.requestId));
+  }
+  // A session's pins, newest first: open ones (archived false, the default), archived ones (true), or
+  // both ("all").
+  pinsIn(sid, { archived = false } = {}) {
+    return this.pinsOfSession(sid).filter((p) => archived === "all" || (archived ? p.status === "archived" : p.status !== "archived"))
+      .sort((a, b) => num(b.createdAt) - num(a.createdAt));
+  }
+  pinByHandle(sid, handle) {
+    const h = String(handle ?? "").replace(/[[\]]/g, "").toUpperCase();
+    return this.pinsOfSession(sid).find((p) => p.handle === h) ?? null;
+  }
+  // Search over every session's pins (the panel's PINS search box), pure and in memory: the store is
+  // the whole corpus (pins never move to archive/). Metadata first (scope "all" or "here", the shown
+  // session; status open, or open and archived with `archived`), then literal terms (pinTerms: words,
+  // "quoted phrases" whole), each of which must occur in the pin's folded text, note, session name, repo
+  // or folder name. Newest first, at most `limit`, grouped by session: the shown session's group
+  // first, the others by their newest match. Returns {total, groups: [{sessionId, pins}]}.
+  searchPins(query, { here = null, scope = "all", archived = false, limit = LIMITS.pinSearch } = {}) {
+    const terms = pinTerms(query);
+    const hit = this.pins()
+      .filter((p) => p.status === "open" || (archived === true && p.status === "archived"))
+      .filter((p) => scope !== "here" || p.sessionId === here)
+      .filter((p) => { const h = pinHaystack(p); return terms.every((t) => h.includes(t)); })
+      .sort((a, b) => num(b.createdAt) - num(a.createdAt));
+    const groups = [], by = new Map();
+    for (const p of hit.slice(0, Math.max(0, num(limit, LIMITS.pinSearch)))) {
+      let g = by.get(p.sessionId);
+      if (!g) { g = { sessionId: p.sessionId, pins: [] }; by.set(p.sessionId, g); groups.push(g); }
+      g.pins.push(p);
+    }
+    groups.sort((a, b) => Number(b.sessionId === here) - Number(a.sessionId === here));
+    return { total: hit.length, groups };
+  }
   // A parked question with a branch: a branch record that started or is starting (not refused, not
   // failed), or a confluence staged. Clear all questions never clears one.
   isBranched(it) {
@@ -199,7 +289,7 @@ export class Store {
       s = this.d.sessions[sid] = {
         sessionId: sid, agent: ev.agent ?? "claude-code", terminal: ev.terminal ?? null, sessionName: null,
         cwd: ev.cwd ?? "", repo: null, transcriptPath: null, model: null, turn: 0, turnSource: "hooks",
-        state: "idle", nextHandle: { A: 1, Q: 1 }, startedAt: ev.at ?? Date.now(), updatedAt: ev.at ?? Date.now(),
+        state: "idle", nextHandle: { A: 1, Q: 1, P: 1 }, startedAt: ev.at ?? Date.now(), updatedAt: ev.at ?? Date.now(),
         seenAt: 0, promptAt: 0, surfaced: false,
       };
     }
@@ -272,7 +362,11 @@ export class Store {
     const at = num(ev.at, Date.now());
     // The panel's own events (act, retry, branch, forget, conclude, close_branch) never create a session.
     const own = OWN_EVENTS.has(ev.type);
-    if (sid && this.isForgotten(sid)) { /* a forgotten session: recorded and dropped */ }
+    // The panel's pin events go by pin id, before the session checks: a pin outlives its session, so
+    // a forgotten (or never recorded) session's pin can still be noted, archived or deleted. Each
+    // handler finds its pin through pin(), so an id that is no pin (`__proto__`) changes nothing.
+    if (PIN_OPS.has(ev.type)) this[`on_${ev.type}`](ev, at, out);
+    else if (sid && this.isForgotten(sid)) { /* a forgotten session: recorded and dropped */ }
     else if (sid && own && !this.d.sessions[sid]) { /* unknown session: recorded and dropped */ }
     else if (sid && own) {
       const fn = this[`on_${ev.type}`];
@@ -363,13 +457,29 @@ export class Store {
         it.updatedAt = at;
       }
     }
-    // The stop event's uuid (optional) goes on every item of this turn that has none.
+    // A pin taken from the screen while the agent worked settles here; the settle entry below makes
+    // the writer look for its passage in the saved turns (writer.js reanchor).
+    const pins = this.pinsOfSession(s.sessionId);
+    for (const p of pins) {
+      if (p.anchor?.settled === false && num(p.anchor.turn) <= turn) { p.anchor.turn = turn; p.anchor.settled = true; p.updatedAt = at; }
+    }
+    // The stop event's uuid (optional) goes on every item and pin of this turn that has none.
     const uuid = str(ev.message_uuid) ?? str(ev.uuid) ?? str(ev.last_assistant_uuid);
     if (uuid) {
       ti.uuid = uuid;
       for (const it of this.itemsOf(s.sessionId)) {
         if (it.anchor && num(it.anchor.turn) === turn && !it.anchor.uuid) { it.anchor.uuid = uuid; if (ev.api_message_id) it.anchor.apiMessageId = ev.api_message_id; }
       }
+      for (const p of pins) if (p.anchor && num(p.anchor.turn) === turn && !p.anchor.uuid) p.anchor.uuid = uuid;
+    }
+    // A question asked with its pins at this turn (pins_asked): the reply ended, so each pin records
+    // where it was answered (once per question and turn). The question itself became answered above.
+    for (const it of this.itemsOf(s.sessionId)) {
+      if (!isHuman(it) || !it.pinsAsked || num(it.pinsAsked.turn, -1) !== turn || it.pinsAsked.answeredAt) continue;
+      it.pinsAsked.answeredAt = at;
+      it.updatedAt = at;
+      this.markPinsAnswered(it, { question: it.id, session: s.sessionId, handle: it.handle, turn, via: "trunk", at },
+        (a) => a.question === it.id && a.via === "trunk" && num(a.turn) === turn);
     }
     out.settle.push({ sid: s.sessionId, turn, textPath: ti.textPath });
     if (this.itemsOf(s.sessionId).some((it) => this.counts(it) && num(it.updatedAt) > num(s.seenAt))) s.surfaced = true;
@@ -384,6 +494,8 @@ export class Store {
     if (ti.retry) ti.retry = { ...ti.retry, state: ev.source === "error" ? "failed" : "done", note: ti.retry.note ?? ev.error ?? null };
     if (uuid) ti.uuid = uuid;
     if (uuid) for (const it of this.itemsOf(s.sessionId)) if (it.anchor && num(it.anchor.turn) === turn && !it.anchor.uuid) it.anchor.uuid = uuid;
+    // ...and on the session's settled pins of that turn (an unsettled screen pin waits for its Stop).
+    if (uuid) for (const p of this.pinsOfSession(s.sessionId)) if (p.anchor && p.anchor.settled !== false && num(p.anchor.turn) === turn && !p.anchor.uuid) p.anchor.uuid = uuid;
     // A declare_asks call (source "tool", bin/mcp) arrives mid-turn with its call number; the turn's
     // own asks event (the Stop hook's, which re-emits the declaration with verified quotes and the
     // message uuid) has none and settles the turn like a block's.
@@ -582,13 +694,16 @@ export class Store {
     else if (isClosed(it)) refused = "the question is closed";
     else refused = m.refused;
     const name = branchName(it?.handle, bid);
+    // The pins the preamble quotes, numbered 1 to n: their ids are frozen on the record (branchPins), so
+    // the Conclude skeleton and the confluence keep those numbers whatever happens to a pin later.
+    const pins = this.pinsOf(it);
     this.d.branches[bid] = {
       id: bid, requestId: it?.id ?? str(ev.item), parentSessionId: s.sessionId, parentTerminal: s.terminal ?? null,
       sessionId: null, childSid: refused ? null : randomUUID(), terminal: null, name, label: it ? branchLabel(it) : name,
       depth: m?.depth ?? depthOf(this, s.sessionId) + 1, anchorTurn: m?.anchorTurn ?? null, forkTurn: m?.forkTurn ?? null,
       anchorHash: it?.anchor?.hash ?? null, anchorUuid: it?.anchor?.uuid ?? null, quote: it?.anchor?.quote ?? null,
       policy: "fork_end_of_session", placement: ev.placement === "agent" ? "agent" : "split", isolate: ev.isolate === true,
-      cwd: s.cwd ?? "", manifest: m, preamble: refused ? null : preamble(it, m, name),
+      cwd: s.cwd ?? "", manifest: m, preamble: refused ? null : preamble(it, m, name, pins), ...(pins.length ? { pins: pins.map((p) => p.id) } : {}),
       status: refused ? "refused" : "launching", error: refused, createdAt: at, updatedAt: at,
     };
     if (refused) return;
@@ -672,6 +787,7 @@ export class Store {
   // {type: "forget", session_id}: the panel's Forget. The session goes with its items, turns,
   // terminal mapping and branches, and its branch sessions with theirs (recursively). Its id is
   // remembered (200 most recent) so a late hook event or the identity map does not bring it back.
+  // Its pins stay (each keeps its `source`, and its usedIn/answeredIn keep handle and head).
   on_forget(_ev, s, at) {
     const gone = new Set([s.sessionId]);
     for (let grew = true; grew;) {
@@ -750,6 +866,9 @@ export class Store {
       }
       it.resolution = { branchId: br.id, turn, at };
       delete it.rejoin;
+      // The question's pins were answered by this branch (once per question and branch).
+      this.markPinsAnswered(it, { question: it.id, session: s.sessionId, handle: it.handle, turn, via: "branch", branch: br.id, branchName: br.name ?? null, at },
+        (a) => a.question === it.id && a.via === "branch" && a.branch === br.id);
     }
     if (first) {
       const head = str(ev.conclusion_head) ? conclusionHead(ev.conclusion_head) : conclusionHead(br.conclusion?.text);
@@ -773,6 +892,120 @@ export class Store {
       it.answeredTurn = turn;
       it.answeredBy = "sheet";
       if (it.status !== "answered") this.setStatus(it, "answered", at); else it.updatedAt = at;
+    }
+  }
+
+  // {type: "pins_asked", session_id, terminal, turn, for_session, item_id, prompt_id}: the hook saw a
+  // submitted prompt holding the pins message's marker (`ledgr pins <session> <item>`): the question
+  // was asked in its trunk with its pins. Sent there, it shows "sent at turn N" (askedAtTurn) and
+  // becomes answered at that turn's Stop (on_stop, which also records answeredIn on each pin); pasted
+  // again, pinsAsked moves to the new turn. Sent in another session: noted on the question, nothing
+  // marked. Not a parked question (or unknown): nothing.
+  on_pins_asked(ev, s, at) {
+    const it = this.item(ev.item_id);
+    if (!it || !isHuman(it)) return;
+    const own = it.anchor?.sessionId;
+    if (own !== s.sessionId || (str(ev.for_session) && ev.for_session !== own)) {
+      it.note = `the pins message for ${it.handle ?? "this question"} was sent in session ${String(s.sessionId).slice(0, 8)}, not its own; nothing marked`;
+      it.updatedAt = at;
+      return;
+    }
+    const turn = num(ev.turn, s.turn);
+    it.askedAtTurn = turn;
+    it.askedVia = "pins";
+    it.pinsAsked = { turn, at, promptId: str(ev.prompt_id) };
+    it.updatedAt = at;
+  }
+
+  // ── pins ─────────────────────────────────────────────────────────────
+  // {type: "pin", session_id, terminal, agent, turn, session_name, cwd, pin: {id, text, note, anchor:
+  // {sessionId, terminal, turn, uuid, promptId, hash, quoteSource, verified, settled, approx},
+  // createdTurn, createdAt}}: the box's ⌘S. Like `capture` it may create its session (a herdr:<t> one
+  // too); a forgotten session's is dropped by apply(). The text is kept verbatim (pinText: line breaks
+  // kept, only CR/CRLF and the outer whitespace change), cut at LIMITS.pin (`clipped`). The same
+  // passage again in the same session (its anchor hash) makes no second pin: an archived one is
+  // restored, and either takes the new note when it has none and `repinnedAt`.
+  on_pin(ev, s, at) {
+    const p = ev.pin;
+    if (!p || typeof p !== "object" || !PIN_ID.test(String(p.id ?? "")) || own(this.d.pins, p.id)) return;
+    let text = pinText(p.text);
+    if (!text) return;
+    let clipped = false;
+    if (text.length > LIMITS.pin) { text = text.slice(0, LIMITS.pin); clipped = true; }
+    const a = p.anchor && typeof p.anchor === "object" ? p.anchor : {};
+    const hash = str(a.hash) ?? passageHash(text);
+    const note = squash(p.note).slice(0, LIMITS.pinNote) || null;
+    const same = this.pinsOfSession(s.sessionId).find((x) => x.anchor?.hash === hash);
+    if (same) {
+      if (same.status === "archived") { same.status = "open"; delete same.archivedAt; }
+      if (!same.note && note) same.note = note;
+      same.repinnedAt = at;
+      same.updatedAt = at;
+      return;
+    }
+    // No hooks (herdr:<t>): the box cannot know the status-driven turn; the store does.
+    const noHooks = s.turnSource === "herdr-status";
+    const turn = noHooks ? num(s.turn) : num(a.turn, s.turn);
+    const anchor = {
+      sessionId: s.sessionId, terminal: str(a.terminal) ?? str(ev.terminal) ?? s.terminal ?? null, turn,
+      uuid: str(a.uuid) ?? str(a.messageUuid), promptId: str(a.promptId), hash,
+      quoteSource: a.quoteSource === "typed" ? "typed" : "clipboard",
+      verified: a.verified === "turn" || a.verified === "screen" ? a.verified : null,
+      settled: a.settled !== false, approx: noHooks || a.approx === true,
+    };
+    if (anchor.settled && !anchor.uuid) anchor.uuid = str(this.d.turns[s.sessionId]?.[turn]?.uuid);
+    const nh = (s.nextHandle ??= { A: 1, Q: 1 });
+    if (!Number.isFinite(Number(nh.P)) || Number(nh.P) < 1) nh.P = 1;
+    this.d.pins[p.id] = {
+      id: p.id, handle: `P${nh.P++}`, sessionId: s.sessionId, text, ...(clipped ? { clipped: true } : {}), note, anchor,
+      source: { sessionName: s.sessionName ?? str(ev.session_name), repo: s.repo ?? null, cwd: s.cwd || str(ev.cwd) || "",
+        agent: s.agent ?? str(ev.agent), profile: s.profile ?? null, configDir: s.configDir ?? null },
+      status: "open", createdAt: num(p.createdAt, at), createdTurn: noHooks ? turn : num(p.createdTurn, turn), updatedAt: at,
+      usedIn: [], answeredIn: [],
+    };
+  }
+
+  // {type: "pin_note", session_id: the pin's session, pin, note}: the panel's Note; empty clears it.
+  on_pin_note(ev, at) {
+    const p = this.pin(ev.pin);
+    if (!p) return;
+    p.note = squash(ev.note).slice(0, LIMITS.pinNote) || null;
+    p.updatedAt = at;
+  }
+
+  // {type: "pin_archive", session_id, pin}: out of the lane, into "archived (N)"; nothing is moved.
+  on_pin_archive(ev, at) {
+    const p = this.pin(ev.pin);
+    if (!p || p.status === "archived") return;
+    p.status = "archived";
+    p.archivedAt = at;
+    p.updatedAt = at;
+  }
+
+  // {type: "pin_restore", session_id, pin}: back to the lane.
+  on_pin_restore(ev, at) {
+    const p = this.pin(ev.pin);
+    if (!p || p.status === "open") return;
+    p.status = "open";
+    delete p.archivedAt;
+    p.updatedAt = at;
+  }
+
+  // {type: "pin_delete", session_id, pin}: the panel's Delete (two clicks), on an archived pin only;
+  // an open one is left as it is. Nothing else ever removes a pin.
+  on_pin_delete(ev) {
+    const p = this.pin(ev.pin);
+    if (p && p.status === "archived") delete this.d.pins[p.id];
+  }
+
+  // Each pin of a parked question gains `entry` in its answeredIn, unless `same(entry)` already holds
+  // for one there.
+  markPinsAnswered(it, entry, same) {
+    for (const p of this.pinsOf(it)) {
+      const list = Array.isArray(p.answeredIn) ? p.answeredIn : (p.answeredIn = []);
+      if (list.some(same)) continue;
+      list.push({ ...entry });
+      p.updatedAt = entry.at;
     }
   }
 
@@ -832,11 +1065,26 @@ export class Store {
     // No hooks: the box cannot know the status-driven turn; the store does.
     if (s.turnSource === "herdr-status") anchor.turn = s.turn;
     if (anchor.settled === undefined) anchor.settled = s.state !== "working";
-    this.d.items[r.id] = {
+    const it = this.d.items[r.id] = {
       ...r, text, key: r.id, handle: `Q${s.nextHandle.Q++}`, direction: HUMAN,
       kind: Q_KINDS.has(r.kind) ? r.kind : text ? "question" : "bookmark", anchor, status: "open",
       createdTurn: s.turnSource === "herdr-status" ? s.turn : num(r.createdTurn, anchor.turn), createdAt: num(r.createdAt, at), updatedAt: at, seq: 0,
     };
+    // The Request is spread, so the fields only the store sets are never taken from it.
+    delete it.askedVia; delete it.pinsAsked;
+    // Its pins (the box in pins mode): the ids that name a pin (open or archived), each once, in the
+    // order given, at most LIMITS.pinsPerQuestion; none left drops the field. Each pin records the
+    // question in usedIn, with its handle and head, so the pin can say so after the question is gone.
+    const ids = [...new Set((Array.isArray(r.pins) ? r.pins : []).filter((x) => this.pin(x)))].slice(0, LIMITS.pinsPerQuestion);
+    if (!ids.length) { delete it.pins; return; }
+    it.pins = ids;
+    const head = (text || squash(anchor.quote)).slice(0, 80);
+    for (const id of ids) {
+      const p = this.pin(id);
+      const used = Array.isArray(p.usedIn) ? p.usedIn : (p.usedIn = []);
+      if (!used.some((u) => u.question === it.id)) used.push({ question: it.id, session: s.sessionId, handle: it.handle, head, at });
+      p.updatedAt = at;
+    }
   }
 
   turnRec(sid, turn) {
@@ -900,6 +1148,7 @@ export class Store {
     if (!s || s.state !== "working") return false;
     s.state = "idle";
     for (const it of this.itemsOf(sid)) if (isHuman(it) && it.anchor && !it.anchor.settled) { it.anchor.settled = true; it.anchor.interrupted = true; it.updatedAt = now; }
+    for (const p of this.pinsOfSession(sid)) if (p.anchor?.settled === false) { p.anchor.settled = true; p.anchor.interrupted = true; p.updatedAt = now; }
     if (this.itemsOf(sid).some((it) => this.counts(it) && num(it.updatedAt) > num(s.seenAt))) s.surfaced = true;
     return true;
   }
@@ -916,6 +1165,7 @@ export class Store {
     if ((status === "idle" || status === "done") && s.state === "working") {
       s.state = "idle"; s.lastStopAt = now;
       for (const it of this.itemsOf(sid)) if (isHuman(it) && it.anchor && !it.anchor.settled) { it.anchor.turn = s.turn; it.anchor.settled = true; it.updatedAt = now; }
+      for (const p of this.pinsOfSession(sid)) if (p.anchor?.settled === false) { p.anchor.turn = s.turn; p.anchor.settled = true; p.updatedAt = now; }
       if (this.itemsOf(sid).some((it) => this.counts(it) && num(it.updatedAt) > num(s.seenAt))) s.surfaced = true;
       return true;
     }
@@ -971,13 +1221,15 @@ export class Store {
 
   // ledgr-data/snapshot.json, read by the extractor: open, answered and deferred items, plus
   // items dismissed in the last 7 days (so the model can mark a re-raise with repeat_of);
-  // quotes over 200 characters dropped.
+  // quotes over 200 characters dropped. Pins never reach it (they are not items), nor do a
+  // question's pin ids: the extractor and the MCP server see no pin this round.
   snapshot(now = Date.now()) {
     const recent = (it) => it.status === "dismissed" && num(it.resolvedAt ?? it.updatedAt) >= now - 7 * 86400e3;
     const items = this.items().filter((it) => OPEN_STATES.has(it.status) || recent(it)).map((it) => {
       const c = { ...it, sessionId: it.anchor?.sessionId ?? null, anchor: { ...it.anchor } };
       if (c.anchor.quote && c.anchor.quote.length > 200) delete c.anchor.quote;
       delete c.draft;
+      delete c.pins;
       return c;
     });
     return { v: 1, updatedAt: now, items };

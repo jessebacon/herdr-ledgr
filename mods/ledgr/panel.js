@@ -5,8 +5,9 @@
 // an overlay's tab bar); every act here (resolve, defer, dismiss, reopen, draft, seen, retry) is
 // posted as a spool event. Only when no host writer answers does this copy run a fallback Writer.
 // localStorage holds UI prefs only.
-// It follows the focused agent's session unless pinned; two lanes: asks of you (agent asks,
-// grouped by turn) and your questions (parked human asks).
+// It follows the focused agent's session unless held (the header's hold control, 2026-11-07: it was
+// "pinned" before pins existed; localStorage keeps the key "pinned"); lanes: pins, your questions
+// (parked human asks) and asks of you (agent asks, grouped by turn).
 // Phase 2: "Branch…" on a parked question opens a confirmation with the context manifest; Launch
 // posts a `branch` event and the writer starts the fork (branch.js, writer.js launchBranch). The
 // branches of a session are listed under its questions with live status from Herdr, the manifest,
@@ -36,16 +37,24 @@
 // Spaces (2026-11-07): the session menu's first row turns ledgr off (or on) in the focused pane's space
 // (config.json spaces.disabled, setSpaceOff). Where it is off, the panel shows "ledgr is off in this
 // space" with the switch instead of that session's lanes (offState); a session picked in another space
-// (pinned, or from the menu) still shows. Items are kept, only hidden.
+// (held, or from the menu) still shows. Items are kept, only hidden.
 // Clear N (2026-11-07): the YOUR QUESTIONS head clears the shown session's open and deferred parked
 // questions in two clicks (one `clear_questions` event); branched and rejoin_pending ones stay, the rest
 // go to Closed labelled "cleared", each with Reopen.
+// Pins (2026-11-07, docs/design/Pins.md 4): the PINS lane, above YOUR QUESTIONS, lists the shown
+// session's pins (passages kept verbatim with ⌘J, ⌘S), newest first, five then "N more", archived ones
+// behind "archived (N)" with Restore and Delete (two clicks). Its head holds a search box over every
+// session's pins (store.js searchPins, in memory: nothing is read or posted while typing). Checkboxes
+// gather pins from any session into a selection (pinSel, at most LIMITS.pinsPerQuestion); Ask about
+// these…, Ask here… and Branch… open the capture box in pins mode (props.pins, props.then). A question
+// parked with pins shows them, and its Ask here stages the pins message (confluence.js pinsMessage)
+// through `stage`, like the answer sheet: pasted, never sent; the hook's pins_asked is the record.
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, Popup } from "gpui-base";
 import { theme, props, shared, setShared, focused, layout, run, watchFolder, readTextFile, writeTextFile, openOverlay, agents, terminals, panes, spaces, exec, home } from "herdr";
 import * as fs from "fs/promises";
 import { randomUUID } from "crypto";
-import { FORCE_DEMO, DEFAULTS, loadConfig, dataDir, turnPath, agentLabel, storePath, panelPlace, panelShown, liveHome, handoffOf, HANDOFF_WORDS, spaceOff, withSpaceOff, terminalSpace } from "./config.js";
+import { FORCE_DEMO, DEFAULTS, LIMITS, loadConfig, dataDir, turnPath, agentLabel, storePath, panelPlace, panelShown, liveHome, handoffOf, HANDOFF_WORDS, spaceOff, withSpaceOff, terminalSpace } from "./config.js";
 import { Store, isAgentAsk, isHuman, isClosed, levelOf, isSuggestion, isBlocking, thresholdOf, LEVELS, groupOpen } from "./store.js";
 import { writeEvent } from "./spool.js";
 import { Writer, writerClaim, engineDrift } from "./writer.js";
@@ -53,9 +62,12 @@ import { goToAnchor, stageText, stageIntoPrompt, promptText, PASTE, busy, btwTex
 import { demoData, FIXTURE_TURNS, DEMO_SESSION } from "./fixtures.js";
 import { manifest, manifestLines, liveStatus, maxDepthOf, preamble, branchName, transcriptPathOf } from "./branch.js";
 import { itemWords as H, paneWords as P, trunkWords, originWords, branchWords, sessionWords, resolvedByWords, stageLabels, stagedWords,
-  dismissedByWords, clearLabel, clearConfirm, clearedWords, OFF_HERE, spaceToggleWords } from "./words.js";
+  dismissedByWords, clearLabel, clearConfirm, clearedWords, OFF_HERE, spaceToggleWords, handleWords,
+  pinsWords, PINS_EMPTY, pinsSearchEmpty, pinsSelectedWords, askAboutPinsWords, pinHead, pinSourceWords, pinAnchorWords, pinNameWords, pinLabel, pinUseWords } from "./words.js";
 import { loadAdapters, adapterOf, asksMode } from "./adapters.js";
-import { confluenceMessage, answersSheet, conclusionRequest, extractConclusion, forkTurnOf, wrapperWords, leadIn, answersLeadIn } from "./confluence.js";
+import { confluenceMessage, answersSheet, conclusionRequest, extractConclusion, forkTurnOf, wrapperWords, leadIn, answersLeadIn,
+  pinsMessage, pinsLeadIn, pinQuote, pinsConcludeSkeleton, pinsChars, pinsOverCap } from "./confluence.js";
+import { thenRequest, thenStale } from "./pinning.js";
 
 const ICON = (n) => `mods/workspace-chrome/${n}.svg`;
 // The panel's one indent: every line under a row's meta line (its text, options, notes, details,
@@ -70,8 +82,12 @@ const HOUR = 3600e3;
 const TH_WORDS = { blocking: "blocking only", needed: "blocking + needed", optional: "everything" };
 const DONE_TIP = "Done: you did or decided it";
 const NOT_NEEDED_TIP = "Not needed: close it; the agent may raise it again";
-// How long Clear N waits for its second click.
+// How long Clear N (and a pin's Delete) waits for its second click.
 const CLEAR_ARM_MS = 4000;
+// The PINS lane shows this many open pins before "N more".
+const PINS_SHOWN = 5;
+// The panel's pin events (store.js PIN_OPS), applied locally until store.json carries them.
+const PIN_ACTS = new Set(["pin_note", "pin_archive", "pin_restore", "pin_delete"]);
 const obj = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : {});
 const BR_WORD = { working: "working", blocked: "needs you", done: "done", idle: "idle", starting: "starting", launching: "launching…",
   launched: "starting", running: "running", closed: "closed", ended: "ended", failed: "launch failed", refused: "refused",
@@ -117,6 +133,14 @@ function passageParts(text, quote, whole) {
   return { before: before.trim(), hit: text.slice(start, end).trim(), after: after.trim() };
 }
 
+// A pin's passage on a closed row: the first four lines or 280 characters, then "…".
+function pinPreview(text) {
+  const lines = String(text ?? "").split("\n");
+  let out = lines.slice(0, 4).join("\n"), cut = lines.length > 4;
+  if (out.length > 280) { out = out.slice(0, 280).trimEnd(); cut = true; }
+  return cut ? `${out}…` : out;
+}
+
 export class Panel {
   constructor(view, cx) {
     this.view = view;
@@ -140,10 +164,10 @@ export class Panel {
     this.folds = { older: false, deferred: false, closed: false };
     // Lane folds are the person's alone: changed only by a click (or the fold-* commands), kept
     // across reloads. ui.foldAsksWhileWorking brings back the Phase 1 auto-fold (asksOpen).
-    this.collapsed = { asks: false, mine: false };
+    this.collapsed = { pins: false, asks: false, mine: false };
     try {
       const saved = JSON.parse(localStorage.getItem("lanes") || "{}");
-      for (const k of ["asks", "mine"]) if (typeof saved?.[k] === "boolean") this.collapsed[k] = saved[k];
+      for (const k of ["pins", "asks", "mine"]) if (typeof saved?.[k] === "boolean") this.collapsed[k] = saved[k];
     } catch { /* defaults */ }
     this.confirm = null;           // { itemId, placement, isolate }: the open Branch confirmation
     this.brOpen = new Set();       // expanded branch rows
@@ -179,7 +203,26 @@ export class Panel {
     this.revAt = 0;
     this.obsVer = undefined;
     this.renders = 0;
-    try { this.pinned = localStorage.getItem("pinned") || null; } catch { this.pinned = null; }
+    // Pins (docs/design/Pins.md 4): the selection (pin ids, any session; in memory only: the overlay's
+    // and the panel's localStorage are separate files), open rows, rows showing their whole message,
+    // the note editor ({pinId, input}), Delete armed ({pinId, at}), "N more" and "archived (N)" open,
+    // the search (its InputState is made here, never in render), its "archived too" and "this session
+    // only" toggles, and a focus request's `then` waiting for its question ({item, then, at, pins}).
+    this.pinSel = new Set();
+    this.pinOpen = new Set();
+    this.pinWhole = new Set();
+    this.pinNote = null;
+    this.pinDel = null;
+    this.pinsMore = false;
+    this.pinsArch = false;
+    this.pinQuery = "";
+    this.pinArchToo = false;
+    this.pinHereOnly = false;
+    this.thenReq = null;
+    this.pinSearch = InputState.new({ placeholder: "Search pins, every session" });
+    this.pinSearch.on("change", (_e, cx) => { this.pinQuery = this.pinSearch.value(); cx.notify(); });
+    // The header's hold: the panel stays on one session instead of following the focused pane.
+    try { this.held = localStorage.getItem("pinned") || null; } catch { this.held = null; }
     // A focus request older than this copy is not a request to it.
     this.focusAt = Number(shared("ledgr.focus")?.at) || 0;
     if (this.demo) this.enterDemo();
@@ -250,6 +293,7 @@ export class Panel {
       } else if (a.action === "close_branch") { const b = this.live.d.branches[a.branchId]; if (b) b.closeRequestedAt = a.at; }
       else if (a.action === "resume") { const x = this.live.d.sessions[a.sid]; if (x && x.resume?.state !== "resumed") x.resume = { at: a.at, state: "launching" }; }
       else if (a.action === "clear_questions") { const x = this.live.d.sessions[a.sid]; if (x) this.live.on_clear_questions({}, x, a.at); }
+      else if (PIN_ACTS.has(a.action)) this.live[`on_${a.action}`]({ pin: a.pin, note: a.note }, a.at, {});
       else this.live.act(a.item, a.action, a.arg, a.at);
     }
     for (const [id, v] of this.drafts) {
@@ -331,6 +375,7 @@ export class Panel {
     if (c === "demo") {
       if (this.demo && !FORCE_DEMO) {
         this.demo = false; this.demoStore = null; this.expanded.clear(); this.flash = ""; this.conclude = null; this.confirm = null; this.prevCls = null;
+        this.pinSel.clear(); this.pinOpen.clear(); this.pinWhole.clear(); this.pinNote = null; this.pinDel = null; this.thenReq = null;
         // A threshold picked in the demo was held in memory only: read config.json again.
         cx.spawn(async (cx) => { this.cfg = await loadConfig(); this.obsVer = undefined; cx.notify(); });
       } else this.enterDemo();
@@ -411,7 +456,8 @@ export class Panel {
       if (!it) this.flash = `No ${h} in this session.`; else this.goTo(it, s, cx);
     }
     else if (c === "fold-asks") { const st = this.viewStore(), sid = this.current(st), s = sid ? st.d.sessions[sid] : null; if (s) this.setAsksOpen(s, !this.asksOpen(s)); }
-    else if (c === "collapse-all") { this.expanded.clear(); this.whole.clear(); this.brOpen.clear(); this.preOpen.clear(); this.confirm = null; this.conclude = null; this.dd = null; this.flash = ""; }
+    else if (c === "collapse-all") { this.expanded.clear(); this.whole.clear(); this.brOpen.clear(); this.preOpen.clear(); this.confirm = null; this.conclude = null; this.dd = null; this.flash = "";
+      this.pinOpen.clear(); this.pinWhole.clear(); this.pinNote = null; this.pinDel = null; }
     // Demo only, for a staged shot: hide-branch:<hc name> (br-q2-a41b) drops that branch from the demo store.
     else if (this.demo && c.startsWith("hide-branch:")) {
       const name = c.slice("hide-branch:".length), st = this.demoStore;
@@ -481,6 +527,29 @@ export class Panel {
       const st = this.viewStore(), sid = this.current(st), s = sid ? st.d.sessions[sid] : null;
       if (s) this.clearQuestions(s, cx); else this.flash = "No session shown.";
     }
+    // Pins (docs/design/Pins.md 4.8), the same code as the clicks, on the shown session: fold-pins;
+    // pins-search:<text> (empty clears); pin-select:<P handle>; ask-pins (Ask about these…);
+    // ask-here:<Q handle> (a question with pins); pin-note:<P handle>:<text>; pin-archive / pin-restore:<P handle>.
+    else if (c === "fold-pins") this.setCollapsed("pins", !this.collapsed.pins);
+    else if (c.startsWith("pins-search:")) this.setPinQuery(c.slice("pins-search:".length));
+    else if (c === "ask-pins" || /^(pin-select|pin-note|pin-archive|pin-restore|ask-here):/.test(c)) {
+      const st = this.viewStore(), sid = this.current(st), s = sid ? st.d.sessions[sid] : null;
+      const [kind, h, ...rest] = c.split(":");
+      if (!s) this.flash = "No session shown.";
+      else if (kind === "ask-pins") this.askAboutSelection(st, s, cx);
+      else if (kind === "ask-here") {
+        const it = st.byHandle(sid, h);
+        if (!it || !isHuman(it) || !st.pinsOf(it).length) this.flash = `No question ${h} with pins in this session.`;
+        else this.askPinsHere(it, s, cx);
+      } else {
+        const p = st.pinByHandle(sid, h);
+        if (!p) this.flash = `No pin ${h} in this session.`;
+        else if (kind === "pin-select") this.togglePinSel(st, p);
+        else if (kind === "pin-note") this.pinAct("pin_note", p, { note: rest.join(":") }, cx);
+        else if (kind === "pin-archive") this.pinAct("pin_archive", p, {}, cx);
+        else this.pinAct("pin_restore", p, {}, cx);
+      }
+    }
   }
 
   enterDemo() {
@@ -499,7 +568,9 @@ export class Panel {
       const fork = b.forkTurn;
       const m = manifest(this.demoStore, it, { now: b.createdAt, maxDepth: 2 });
       m.forkTurn = fork; m.later = Math.max(0, fork - m.anchorTurn);
-      b.manifest = m; b.preamble = preamble(it, m, b.name);
+      const pins = this.demoStore.pinsOf(it);
+      b.manifest = m; b.preamble = preamble(it, m, b.name, pins);
+      if (pins.length) b.pins = pins.map((p) => p.id);
       this.brOpen.add(b.id);
     }
     // And one open Branch confirmation (Q5: two later turns, a compaction after its anchor).
@@ -520,8 +591,17 @@ export class Panel {
     const f = shared("ledgr.focus");
     const ft = focused()?.terminal ?? null;
     this.away = null;
-    if (f?.session && Number(f.at) > this.focusAt) { this.focusAt = Number(f.at); this.override = { sid: f.session, terminal: ft }; }
-    if (this.pinned && st.d.sessions[this.pinned]) return this.pinned;
+    if (f?.session && Number(f.at) > this.focusAt) {
+      this.focusAt = Number(f.at);
+      this.override = { sid: f.session, terminal: ft };
+      // The box parked a question with pins: the selection is spent; `then` (trunk, branch) waits for
+      // the question to reach the store (runThen).
+      if (f.item && Number(f.pins) > 0) this.pinSel.clear();
+      // Timed by the box's message itself (f.at), so a copy that notices it late lets it go stale.
+      const tr = thenRequest(f);
+      if (tr) this.thenReq = tr;
+    }
+    if (this.held && st.d.sessions[this.held]) return this.held;
     if (this.override && st.d.sessions[this.override.sid]) {
       if (!ft || ft === this.override.terminal) return this.override.sid;
       this.override = null;
@@ -697,7 +777,7 @@ export class Panel {
 
   askAbout(it, s, cx) {
     if (this.demo) { this.flash = "(demo) Would open the capture box with “re [" + it.handle + "] ”."; cx.notify(); return; }
-    openOverlay({ mod: "ledgr", kind: "dialog", width: 600, height: 236,
+    openOverlay({ mod: "ledgr", kind: "dialog", width: 600, height: 320,
       props: { view: "capture", parent: it.id, session: s.sessionId, terminal: s.terminal, prefill: `re [${it.handle}] ` } });
   }
 
@@ -812,7 +892,7 @@ export class Panel {
     if (this.demo) { this.flash = "(demo) Would forget the session."; this.forgetAsk = null; cx.notify(); return; }
     this.forgetAsk = null;
     this.post("forget", { session_id: s.sessionId }, { action: "forget", sid: s.sessionId }, cx);
-    if (this.pinned === s.sessionId) { this.pinned = null; try { localStorage.setItem("pinned", ""); } catch { /* none */ } }
+    if (this.held === s.sessionId) { this.held = null; try { localStorage.setItem("pinned", ""); } catch { /* none */ } }
     if (this.override?.sid === s.sessionId) this.override = null;
     this.flash = `Forgot ${s.sessionName || s.sessionId.slice(0, 8)} and its branches.`;
   }
@@ -864,10 +944,14 @@ export class Panel {
   }
 
   // The prefill: the newest ledgr-conclusion block in the branch's last 10 turns, else its last
-  // message, else nothing.
+  // message, else nothing. A question with pins and no block: one entry per pin (pinsConcludeSkeleton),
+  // then the branch's last reply under it to draw from (docs/design/Pins.md 6.4).
   async branchText(st, br) {
     const c = br.sessionId ? st.d.sessions[br.sessionId] : null;
-    if (!c || !c.turn) return { source: "empty", turn: null, text: "" };
+    const it = st.item(br.requestId), pins = st.branchPins(br);   // numbered as the preamble numbered them
+    const withPins = (last) => ({ source: "pins", turn: last?.turn ?? null,
+      text: `${pinsConcludeSkeleton(pins, { sessionId: it?.anchor?.sessionId ?? br.parentSessionId })}${last ? `\n\nFrom the branch's last reply:\n${last.text.trim().slice(0, 4000)}` : ""}` });
+    if (!c || !c.turn) return pins.length ? withPins(null) : { source: "empty", turn: null, text: "" };
     let last = null;
     for (let n = c.turn; n >= Math.max(1, c.turn - 10); n--) {
       const ti = st.turnInfo(c.sessionId, n);
@@ -882,6 +966,7 @@ export class Panel {
       const block = extractConclusion(txt);
       if (block) return { source: "block", turn: n, text: block };
     }
+    if (pins.length) return withPins(last);
     return last ? { source: "last", turn: last.turn, text: last.text.trim().slice(0, 4000) } : { source: "empty", turn: null, text: "" };
   }
 
@@ -922,7 +1007,7 @@ export class Panel {
     const it = st.item(br.requestId), ts = st.d.sessions[br.parentSessionId];
     if (!text) { this.flash = "Write the conclusion first: an empty confluence is not staged."; cx.notify(); return; }
     if (!it || !ts) { this.flash = "The question or its trunk session is no longer in the ledger."; cx.notify(); return; }
-    const msg = confluenceMessage({ branch: br, item: it, text });
+    const msg = confluenceMessage({ branch: br, item: it, text, pins: st.branchPins(br) });
     if (this.demo) { this.conclude = null; cx.write_to_clipboard(promptText(msg)); this.flash = `(demo) Confluence for ${H(it)} copied; nothing is saved.`; cx.notify(); return; }
     if (!this.stage(msg, ts.terminal, cx, { what: `Confluence for ${H(it)}`, where: trunkWords(ts.terminal), lead: leadIn(it), word: this.trunkWord(ts),
       tail: `${H(it)} resolves when that prompt is sent.` })) return;
@@ -1081,6 +1166,7 @@ export class Panel {
       cx.timer.after(0, (cx) => this.post("act", { session_id: sid, action: "seen" }, { action: "seen", sid }, cx));
     }
     if (s && !off) this.pumpBranchMessages(st, s, cx);
+    if (this.thenReq) this.runThen(st, cx);
     const note = this.flash || this.writerNote || (this.fallback() ? this.writer.note : null);
     return v_flex().id("ledgr").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border)
       .text_color(t.foreground).text_size(12.5)
@@ -1176,7 +1262,7 @@ export class Panel {
   }
 
   // What the panel shows instead of lanes ({space, here}), or null: the shown session's space is off;
-  // else, unless that session was picked (pinned, or from the session menu), the focused pane's space
+  // else, unless that session was picked (held, or from the session menu), the focused pane's space
   // is off. `here`: the off space is the focused pane's.
   offState(st, s) {
     if (this.demo) return this.demoOff ? { space: null, here: true } : null;
@@ -1184,7 +1270,7 @@ export class Panel {
     if (s) {
       const sp = this.sessionSpace(st, s);
       if (spaceOff(this.cfg, sp)) return { space: sp, here: !fsp || sp === fsp };
-      if (this.pinned === s.sessionId || this.override?.sid === s.sessionId) return null;
+      if (this.held === s.sessionId || this.override?.sid === s.sessionId) return null;
     }
     return spaceOff(this.cfg, fsp) ? { space: fsp, here: true } : null;
   }
@@ -1248,6 +1334,344 @@ export class Panel {
       .child(armed ? clearConfirm(clear.length, kept.length) : clearLabel(clear.length));
   }
 
+  // ── pins (docs/design/Pins.md 4) ─────────────────────────────────────
+  // The PINS lane: its head (fold, search box, "N pins"), the selection bar while anything is
+  // selected, then the shown session's open pins (five, then "N more"), "archived (N)", or, while a
+  // query is typed, the search results of every session instead.
+  pinsLane(t, st, s) {
+    const out = [], open = !this.collapsed.pins;
+    const mine = st.pinsIn(s.sessionId);
+    out.push(this.laneHead(t, "pins", "PINS", mine.length, open, (o) => this.setCollapsed("pins", !o), null, null,
+      this.pinSearchBox(t), null, pinsWords, true));
+    if (this.selPins(st).length) out.push(this.pinSelBar(t, st, s));
+    if (!open) return out;
+    const q = this.pinQuery.trim();
+    if (q) { out.push(...this.pinResults(t, st, s, q)); return out; }
+    for (const p of this.pinsMore ? mine : mine.slice(0, PINS_SHOWN)) out.push(this.pinRow(t, st, s, p));
+    if (!mine.length) out.push(div().px(6).py(3).text_size(11.5).text_color(t.dim).child(PINS_EMPTY));
+    if (mine.length > PINS_SHOWN) out.push(this.pinFoldLine(t, "pins-more", this.pinsMore ? "fewer ‹" : `${mine.length - PINS_SHOWN} more ›`, () => { this.pinsMore = !this.pinsMore; }));
+    const arch = st.pinsIn(s.sessionId, { archived: true });
+    if (arch.length) {
+      out.push(this.pinFoldLine(t, "pins-arch", `archived (${arch.length}) ${this.pinsArch ? "▾" : "›"}`, () => { this.pinsArch = !this.pinsArch; }));
+      if (this.pinsArch) for (const p of arch) out.push(this.pinRow(t, st, s, p));
+    }
+    return out;
+  }
+
+  pinFoldLine(t, id, label, fn) {
+    return div().id(id).flex_none().px(6).py(2).text_size(11).text_color(t.dim).cursor_pointer().rounded(5)
+      .hover((x) => x.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => { fn(); cx.notify(); }).child(label);
+  }
+
+  // The search box in the lane head: typing filters at once (the store is in memory; nothing is read or
+  // posted). A click in it does not fold the lane; Esc clears the query.
+  pinSearchBox(t) {
+    return h_flex().id("pins-search").flex_1().min_w(80).h(20).px(5).gap(4).items_center().rounded(5).border_1().border_color(t.input).bg(t.background)
+      .on_click((_e, cx) => cx.stop_propagation())
+      .on_key_down((e, cx) => { if (e.key === "escape" && this.pinQuery) { this.setPinQuery(""); cx.stop_propagation(); cx.notify(); } })
+      .child(svg(ICON("search")).size(10).flex_none().text_color(t.dim))
+      .child(Input.new(this.pinSearch).flex_1().h_full().text_size(11).text_color(t.foreground));
+  }
+
+  setPinQuery(q) {
+    this.pinQuery = String(q ?? "");
+    try { this.pinSearch.set_value(this.pinQuery); } catch { /* the box follows at its next change */ }
+  }
+
+  // The selection, as pins that still exist, in pin creation order.
+  selPins(st) {
+    return [...this.pinSel].map((id) => st.pin(id)).filter(Boolean).sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+  }
+
+  togglePinSel(st, p) {
+    if (this.pinSel.has(p.id)) { this.pinSel.delete(p.id); return; }
+    if (this.selPins(st).length >= LIMITS.pinsPerQuestion) { this.flash = `A question carries at most ${LIMITS.pinsPerQuestion} pins: ${handleWords(p.handle)} was not added.`; return; }
+    this.pinSel.add(p.id);
+  }
+
+  // "3 selected · Ask about these 3 pins… · clear".
+  pinSelBar(t, st, s) {
+    const n = this.selPins(st).length;
+    return h_flex().id("pins-sel").flex_none().flex_wrap().px(6).gap(8).items_center()
+      .child(div().flex_none().text_size(11).text_color(t.accent).child(pinsSelectedWords(n)))
+      .child(this.btn(t, "pins-ask", askAboutPinsWords(n), (_e, cx) => this.askAboutSelection(st, s, cx),
+        { primary: true, tip: `Opens the capture box: the question you type there is parked here with the ${pinsWords(n)} as its context` }))
+      .child(div().id("pins-sel-x").flex_none().px(4).rounded(4).text_size(10.5).text_color(t.dim).cursor_pointer()
+        .hover((x) => x.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => { this.pinSel.clear(); cx.notify(); }).child("clear"));
+  }
+
+  // While a query is typed: every session's matches (store.js searchPins), grouped by session, the
+  // shown one first; two toggles (archived too, this session only) and the count.
+  pinResults(t, st, s, q) {
+    const scope = this.pinHereOnly ? "here" : "all";
+    const r = st.searchPins(q, { here: s.sessionId, scope, archived: this.pinArchToo, limit: LIMITS.pinSearch });
+    const tog = (id, label, on, fn) => div().id(id).flex_none().px(5).rounded(4).text_size(10.5).cursor_pointer()
+      .when(on, (x) => x.bg(t.accent + "22").text_color(t.accent)).when(!on, (x) => x.text_color(t.dim).hover((y) => y.bg(t.hover)))
+      .on_click((_e, cx) => { fn(); cx.notify(); }).child(label);
+    const shown = r.groups.reduce((n, g) => n + g.pins.length, 0);
+    const out = [h_flex().id("pins-found").flex_none().flex_wrap().px(6).gap(6).items_center()
+      .child(div().flex_1().min_w(0).text_size(10.5).text_color(t.dim).child(r.total > shown ? `first ${shown} of ${r.total}` : `${r.total} match${r.total === 1 ? "" : "es"}`))
+      .child(tog("pins-arch-too", "archived too", this.pinArchToo, () => { this.pinArchToo = !this.pinArchToo; }))
+      .child(tog("pins-here-only", "this session only", this.pinHereOnly, () => { this.pinHereOnly = !this.pinHereOnly; }))];
+    if (!r.total) {
+      const n = scope === "here" ? 1 : new Set(st.pins().filter((p) => p.status === "open" || (this.pinArchToo && p.status === "archived")).map((p) => p.sessionId)).size;
+      out.push(div().px(6).py(3).text_size(11.5).text_color(t.dim).child(pinsSearchEmpty(q, n)));
+    }
+    for (const g of r.groups) {
+      out.push(this.pinGroupHead(t, st, s, g));
+      for (const p of g.pins) out.push(this.pinRow(t, st, s, p, true));
+    }
+    return out;
+  }
+
+  // A search group's head: the session's name and agent label, "forgotten" when it is gone (the pins'
+  // own `source` names it), and "open session" (as the session menu's click; it clears the query).
+  pinGroupHead(t, st, s, g) {
+    const x = st.d.sessions[g.sessionId] ?? null, src = g.pins[0]?.source ?? {};
+    const here = g.sessionId === s.sessionId;
+    return h_flex().id(`pins-g-${g.sessionId}`).flex_none().px(6).pt(4).gap(6).items_center()
+      .child(this.pill(t, agentLabel(x?.agent ?? src.agent, x?.profile ?? src.profile)))
+      .child(div().flex_1().min_w(0).truncate().text_size(11).font_semibold().text_color(t.muted)
+        .child(`${sessionWords(x ?? { ...src, sessionId: g.sessionId })}${here ? " (this session)" : ""}`))
+      .when(!x, (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child("forgotten")))
+      .when(Boolean(x) && !here, (el) => el.child(div().id(`pins-go-${g.sessionId}`).flex_none().px(5).rounded(4).text_size(10.5).text_color(t.accent).cursor_pointer()
+        .hover((y) => y.bg(t.hover)).tooltip("Show that session in the panel, as the session menu does")
+        .on_click((_e, cx) => { cx.stop_propagation(); this.showSession(g.sessionId); cx.notify(); }).child("open session")));
+  }
+
+  // What a click in the session menu does: show that session (held: hold it instead); clears the query.
+  showSession(sid) {
+    this.menu = false;
+    if (this.held) { this.held = sid; try { localStorage.setItem("pinned", sid); } catch { /* none */ } }
+    else this.override = { sid, terminal: focused()?.terminal ?? null };
+    this.setPinQuery("");
+  }
+
+  // A pin's checkbox: in or out of the selection (any session; at most LIMITS.pinsPerQuestion).
+  pinCheck(t, st, p, found) {
+    const on = this.pinSel.has(p.id);
+    return h_flex().id(`pinc-${p.id}`).flex_none().gap(4).items_center().cursor_pointer()
+      .tooltip(on ? "In the selection: click to take it out" : `Add it to a question (${LIMITS.pinsPerQuestion} pins at most)`)
+      .on_click((_e, cx) => { cx.stop_propagation(); this.togglePinSel(st, p); cx.notify(); })
+      .child(div().w(12).h(12).flex_none().flex().items_center().justify_center().rounded(3).border_1()
+        .border_color(on ? t.accent : t.border).bg(on ? t.accent : t.background).text_size(9).text_color(t.solid_foreground ?? t.background)
+        .when(on, (x) => x.child("✓")))
+      .when(found, (el) => el.child(div().text_size(10.5).text_color(on ? t.accent : t.dim).child("add to question")));
+  }
+
+  // A pin row (4.2): checkbox, pin icon, "Pin 4", badges; the passage (four lines or 280 characters,
+  // all of it when open); the note; where and when it was taken (a search result names its session
+  // first); where it was used. Open: the actions, the note editor, the whole message, the foot line.
+  pinRow(t, st, s, p, found = false) {
+    const open = this.pinOpen.has(p.id), archived = p.status === "archived";
+    const badges = [];
+    if (!p.anchor?.verified) badges.push(["unverified", t.dim]);
+    if (p.clipped) badges.push(["clipped", t.dim]);
+    if (archived) badges.push(["archived", t.dim]);
+    const use = pinUseWords(p, st);
+    const head = v_flex().id(`pinh-${p.id}`).gap(2).cursor_pointer()
+      .on_click((_e, cx) => { if (open) this.pinOpen.delete(p.id); else this.pinOpen.add(p.id); cx.notify(); })
+      .child(h_flex().flex_wrap().gap(6).items_center()
+        .child(this.pinCheck(t, st, p, found))
+        .child(svg(ICON("pin")).size(11).flex_none().text_color(archived ? t.dim : t.accent))
+        .child(div().flex_none().font_semibold().text_size(11.5).text_color(t.muted).child(handleWords(p.handle)))
+        .children(badges.map(([b, c]) => div().flex_none().px(5).rounded(4).bg(c + "22").text_size(10).text_color(c).child(b)))
+        .when(found && !open, (el) => el.child(div().id(`pincp-${p.id}`).flex_none().px(5).rounded(4).border_1().border_color(t.border)
+          .text_size(10).text_color(t.muted).cursor_pointer().hover((x) => x.bg(t.hover).text_color(t.foreground))
+          .tooltip("Copy the passage, quoted, with where it came from").on_click((_e, cx) => { cx.stop_propagation(); this.copyPin(p, s, cx); }).child("Copy"))))
+      .child(div().pl(IND).text_size(12.5).text_color(archived ? t.dim : t.foreground).children(this.lines(open ? p.text : pinPreview(p.text))))
+      .when(Boolean(p.note), (el) => el.child(div().pl(IND).truncate().text_size(11.5).italic().text_color(t.muted).child(p.note)))
+      .child(div().pl(IND).text_size(11).text_color(t.dim).child(`${found ? `${pinSourceWords(p, s.sessionId)} · ` : ""}${pinAnchorWords(p)}`))
+      .when(Boolean(use), (el) => el.child(div().pl(IND).text_size(11).text_color(t.dim).child(use)));
+    return v_flex().id(`pin-${p.id}`).flex_none().rounded(7).px(6).py(6).gap(5)
+      .when(open, (el) => el.bg(t.raised)).hover((x) => x.bg(open ? t.raised : t.hover))
+      .child(head)
+      .when(open, (el) => el.child(this.pinDetails(t, st, s, p)));
+  }
+
+  // An open pin: "show whole message" (the saved turn, the passage marked), the note editor, the
+  // actions (4.3) and the foot line.
+  pinDetails(t, st, s, p) {
+    const archived = p.status === "archived", L = stageLabels(this.pasteOn());
+    const ps = st.d.sessions[p.sessionId] ?? null;   // null: the session was forgotten
+    const whole = this.pinWhole.has(p.id), text = this.passages.get(`${p.sessionId}:${p.anchor?.turn}`);
+    const toggle = div().id(`pinw-${p.id}`).text_size(10.5).text_color(t.accent).cursor_pointer()
+      .on_click((_e, cx) => { if (whole) this.pinWhole.delete(p.id); else { this.pinWhole.add(p.id); this.loadPassage(p.sessionId, p.anchor?.turn, cx); } cx.notify(); })
+      .child(whole ? "hide whole message" : "show whole message");
+    const passage = !whole ? toggle
+      : text === undefined ? v_flex().gap(3).child(div().text_size(11).text_color(t.dim).child("Loading the message…")).child(toggle)
+        : text === null ? v_flex().gap(3).child(div().text_size(11).text_color(t.dim).child("That message is no longer saved; the pin keeps the passage.")).child(toggle)
+          : v_flex().gap(3).child(this.passageView(t, { id: p.id, anchor: { quote: p.text } }, text, true)).child(toggle);
+    const a = [], more = [];
+    const b = (id, label, fn, o) => a.push(this.btn(t, `${id}-${p.id}`, label, fn, o));
+    const m = (id, label, fn, o) => more.push([id, label, fn, o]);
+    if (archived) {
+      b("pinrs", "Restore", (_e, cx) => this.pinAct("pin_restore", p, {}, cx), { tip: "Back to the lane" });
+      const armed = this.pinDel?.pinId === p.id && Date.now() - this.pinDel.at < CLEAR_ARM_MS;
+      a.push(div().id(`pindel-${p.id}`).flex_none().h(22).px(7).flex().items_center().rounded(6).border_1().text_size(11).cursor_pointer()
+        .when(armed, (x) => x.border_color(t.blocked).bg(t.blocked + "26").text_color(t.blocked))
+        .when(!armed, (x) => x.border_color(t.border).bg(t.background).text_color(t.foreground).hover((y) => y.opacity(0.85)))
+        .tooltip(armed ? "Click again to delete it for good" : "Delete this pin (two clicks); nothing else ever removes one")
+        .on_click((_e, cx) => { cx.stop_propagation(); this.deletePin(p, cx); })
+        .child(armed ? `Delete ${handleWords(p.handle)}? It cannot come back` : "Delete"));
+    } else {
+      const sel = this.pinsFor(st, p);
+      const what = sel.length > 1 ? `the ${pinsWords(sel.length)} selected` : "this pin";
+      b("pinask", "Ask here…", (_e, cx) => this.openPinsBox(st, s, sel, "trunk", cx),
+        { primary: true, tip: `Type a question about ${what}; it is parked here, then ${L.ask} stages it with the passages for ${P(s.terminal, "the pane")}` });
+      const ok = this.branchable(s);
+      b("pinbr", "Branch…", (_e, cx) => this.openPinsBox(st, s, sel, "branch", cx),
+        { disabled: !ok, tip: ok ? `Type a question about ${what}; it is parked here and its Branch confirmation opens` : "Branching needs a Claude Code session with the ledgr hooks" });
+      b("pinnote", p.note ? "Edit note" : "Note", (_e, cx) => this.editPinNote(p, cx));
+    }
+    b("pincopy", "Copy", (_e, cx) => this.copyPin(p, s, cx), { tip: "The passage, quoted, with where it came from, to the clipboard; nothing is pasted" });
+    const gone = !ps || this.terminalGone(st, ps);
+    const rs = ps?.resume;
+    const resuming = Boolean(rs && (rs.state === "launching" || rs.state === "launched") && Date.now() - (rs.at ?? 0) < 60000);
+    if (!gone) m("go", "Go to anchor", (_e, cx) => this.goToPin(p, ps, cx), { tip: "Show the passage in its message here, focus its pane and copy a slice to search for (no keys are sent)" });
+    else if (!ps) m("go", "Go to anchor", () => {}, { disabled: true, tip: "Its session was forgotten: the pin keeps the passage" });
+    else if (!this.branchable(ps)) m("go", "Go to anchor", () => {}, { disabled: true, tip: `Its terminal${ps.terminal ? ` (${P(ps.terminal)})` : ""} is gone, and only a Claude Code session can be resumed: the pin keeps the passage` });
+    else {
+      const tx = this.transcriptOk(ps);
+      if (tx === false) m("resume", "Transcript gone", () => {}, { disabled: true, tip: "Transcript gone: the pin keeps the passage" });
+      else m("resume", resuming ? "Resuming…" : "Resume session…", (_e, cx) => this.resume(ps, cx),
+        { disabled: resuming || tx !== true, tip: tx === undefined ? "Checking the transcript…" : `Its terminal is gone: start claude --resume ${String(ps.sessionId).slice(0, 8)} in ${ps.cwd || "its folder"}, in a new pane` });
+    }
+    if (!archived) m("pinarch", "Archive", (_e, cx) => this.pinAct("pin_archive", p, {}, cx), { tip: "Out of the lane, into archived (Restore brings it back)" });
+    if (more.length) a.push(this.menuButton(t, `pinmore-${p.id}`, "⋯", more, { anchor: "top_right", tip: "More actions" }));
+    const k = this.pinNote?.pinId === p.id ? this.pinNote : null;
+    return v_flex().id(`pind-${p.id}`).pl(IND).pt(4).gap(8)
+      .child(passage)
+      .when(Boolean(k), (el) => el.child(h_flex().id(`pinn-${p.id}`).h(28).px(8).items_center().rounded(7).border_1().border_color(t.input).bg(t.background)
+        .on_key_down((e, cx) => { if (e.key === "escape" && this.pinNote === k) { this.pinNote = null; cx.stop_propagation(); cx.notify(); } })
+        .child(Input.new(k.input).flex_1().h_full().text_size(12).text_color(t.foreground))))
+      .child(h_flex().flex_wrap().gap(6).children(a))
+      .child(div().id(`pinf-${p.id}`).text_size(10).text_color(t.dim)
+        .child(`${handleWords(p.handle)} · pinned by you · ${p.anchor?.approx ? "around turn" : "turn"} ${p.anchor?.turn ?? "?"}${p.anchor?.hash ? ` · #${p.anchor.hash}` : ""}${p.anchor?.reanchoredFrom !== undefined ? ` · re-anchored from turn ${p.anchor.reanchoredFrom}` : ""}`));
+  }
+
+  // This pin, or the whole selection when it is in it (in pin creation order).
+  pinsFor(st, p) {
+    return this.pinSel.has(p.id) ? this.selPins(st) : [p];
+  }
+
+  // Ask about these… (the selection), Ask here… and Branch… (a pin row): the capture box in pins mode
+  // (docs/design/Pins.md 3.4) for the shown session; the box composes nothing about pins but the labels
+  // given here. `then` ("trunk", "branch" or null) comes back through shared("ledgr.focus") (runThen).
+  openPinsBox(st, s, pins, then, cx) {
+    const list = [...pins].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0)).slice(0, LIMITS.pinsPerQuestion);
+    if (!list.length) { this.flash = "No pins selected."; cx.notify(); return; }
+    if (then === "branch" && !this.branchable(s)) { this.flash = "Branching needs a Claude Code session with the ledgr hooks."; cx.notify(); return; }
+    if (this.demo) { this.flash = `(demo) Would open the capture box to ask about ${list.map((p) => pinNameWords(p, s.sessionId)).join(", ")}${then === "branch" ? ", then the Branch confirmation" : ""}.`; cx.notify(); return; }
+    openOverlay({ mod: "ledgr", kind: "dialog", width: 600, height: 340,
+      props: { view: "capture", session: s.sessionId, terminal: s.terminal, pins: list.map((p) => ({ id: p.id, label: pinLabel(p, s.sessionId) })), then: then ?? null } });
+  }
+
+  askAboutSelection(st, s, cx) {
+    const sel = this.selPins(st);
+    if (!sel.length) { this.flash = "No pins selected: check one or more in the PINS lane or in a search."; cx.notify(); return; }
+    this.openPinsBox(st, s, sel, null, cx);
+  }
+
+  // A question parked from the box with `then` (Ask here…, Branch… on a pin): once it is in the store
+  // (within pinning.js THEN_MS of the box's message), it opens; "trunk" says how to send it, "branch"
+  // opens its Branch confirmation.
+  runThen(st, cx) {
+    const r = this.thenReq;
+    if (thenStale(r)) { this.thenReq = null; return; }
+    const it = st.item(r.item), s = it ? st.d.sessions[it.anchor?.sessionId] : null;
+    if (!it || !s) return;
+    this.thenReq = null;
+    cx.timer.after(0, (cx) => {
+      this.expandItem(it, cx);
+      if (r.then === "branch") this.openConfirm(it, s, cx);
+      else {
+        const n = st.pinsOf(it).length || r.pins, L = stageLabels(this.pasteOn());
+        this.flash = `${H(it)} parked with ${pinsWords(n)}. ${L.ask} ${this.pasteOn() ? "pastes it into the prompt" : "copies it and focuses the pane"}; nothing is sent.`;
+      }
+      cx.notify();
+    });
+  }
+
+  // A question with pins, asked in its trunk: the pins message (confluence.js pinsMessage: the marker
+  // line, the question, each pin quoted with where it came from, a closing line in the person's voice)
+  // staged like the answer sheet. Nothing is posted: the hook's pins_asked is the record.
+  askPinsHere(it, s, cx) {
+    const st = this.viewStore(), pins = st.pinsOf(it);
+    // The cap a branch preamble has (LIMITS.pinsPreamble), so a sheet pasted after it still lands.
+    const over = pinsOverCap(pinsChars(pins));
+    if (over) { this.flash = `${H(it)} not staged: ${over}.`; cx.notify(); return; }
+    const msg = pinsMessage({ sessionId: s.sessionId, item: it, pins });
+    if (this.demo) { cx.write_to_clipboard(promptText(msg)); this.flash = `(demo) ${H(it)} with ${pinsWords(pins.length)} copied; ${this.demoHow(pinsLeadIn(it))}.`; cx.notify(); return; }
+    this.stage(msg, s.terminal, cx, { what: `${H(it)} with ${pinsWords(pins.length)}`, where: P(s.terminal, "the pane"),
+      lead: pinsLeadIn(it), word: this.trunkWord(s), tail: `${H(it)} shows sent once that prompt is sent, answered when the reply ends.` });
+  }
+
+  // Copy for prompt on a question with pins: the whole pins message (what Ask here pastes, marker
+  // first, so it lands the same once the person pastes it), to the clipboard only: nothing is focused
+  // and nothing is pasted. The same cap as Ask here.
+  copyPinsMessage(it, s, cx) {
+    const pins = this.viewStore().pinsOf(it);
+    const over = pinsOverCap(pinsChars(pins));
+    if (over) { this.flash = `${H(it)} not copied: ${over}.`; cx.notify(); return; }
+    cx.write_to_clipboard(promptText(pinsMessage({ sessionId: s.sessionId, item: it, pins })));
+    this.flash = `${this.demo ? "(demo) " : ""}${H(it)} with ${pinsWords(pins.length)} copied, quoted with where each came from; nothing was pasted: in its pane, type “${pinsLeadIn(it)}”, then ⌘V, Enter.`;
+    cx.notify();
+  }
+
+  // Copy: one pin, quoted, with where it came from (confluence.js pinQuote), to the clipboard; nothing
+  // is focused and nothing is pasted.
+  copyPin(p, s, cx) {
+    cx.write_to_clipboard(pinQuote(p, { sessionId: s?.sessionId }));
+    this.flash = `${this.demo ? "(demo) " : ""}${pinNameWords(p, s?.sessionId)} copied, quoted with where it came from; nothing was pasted.`;
+    cx.notify();
+  }
+
+  // Go to anchor for a pin: its whole message here (the passage marked), its session's pane focused
+  // and a slice of the passage copied (nav.js goToAnchor). No keys are sent.
+  goToPin(p, ps, cx) {
+    this.pinOpen.add(p.id);
+    this.pinWhole.add(p.id);
+    this.loadPassage(p.sessionId, p.anchor?.turn, cx);
+    this.flash = this.demo ? "(demo) Would focus the agent's pane and copy a slice of the passage; the message is shown here."
+      : goToAnchor({ anchor: { quote: p.text }, terminal: p.anchor?.terminal }, ps, cx);
+    cx.notify();
+  }
+
+  // The note editor: its InputState is made here (a click), never in render. Enter saves, Esc cancels.
+  editPinNote(p, cx) {
+    const input = InputState.new({ placeholder: "A one-line note: Enter saves, Esc cancels", value: p.note ?? "" });
+    const k = { pinId: p.id, input };
+    input.on("submit", (_e, cx) => { if (this.pinNote !== k) return; this.pinNote = null; this.pinAct("pin_note", p, { note: input.value() }, cx); });
+    this.pinNote = k;
+    this.pinOpen.add(p.id);
+    cx.timer.after(30, () => { try { input.focus(); } catch { /* a click still reaches it */ } });
+    cx.notify();
+  }
+
+  // Delete (archived pins only): the first click arms it for CLEAR_ARM_MS, the second posts pin_delete.
+  deletePin(p, cx) {
+    const now = Date.now();
+    if (this.pinDel?.pinId === p.id && now - this.pinDel.at < CLEAR_ARM_MS) {
+      this.pinDel = null;
+      this.pinSel.delete(p.id);
+      this.pinOpen.delete(p.id);
+      this.flash = `${handleWords(p.handle)} deleted.`;
+      this.pinAct("pin_delete", p, {}, cx);
+      return;
+    }
+    const ask = this.pinDel = { pinId: p.id, at: now };
+    cx.timer.after(CLEAR_ARM_MS + 50, (cx) => { if (this.pinDel === ask) { this.pinDel = null; cx.notify(); } });
+    cx.notify();
+  }
+
+  // pin_note, pin_archive, pin_restore, pin_delete: a spool event (session_id: the pin's session), shown
+  // at once (overlayLocal); the demo applies it to its own store.
+  pinAct(type, p, extra, cx) {
+    if (this.demo) { this.demoStore[`on_${type}`]({ pin: p.id, ...extra }, Date.now(), {}); this.bump(); cx.notify(); return; }
+    this.post(type, { session_id: p.sessionId, pin: p.id, ...extra }, { action: type, pin: p.id, ...extra }, cx);
+  }
+
   pill(t, text, color) {
     return div().flex_none().px(5).py(0.5).rounded(4).border_1().border_color(t.border).text_size(10).text_color(color ?? t.muted).child(text);
   }
@@ -1255,7 +1679,7 @@ export class Panel {
   header(t, st, s, off = null) {
     const away = !s ? this.away : null;
     const name = s ? sessionWords(s) : away ? (away.agent ? "no ledgr session yet" : "no agent here") : "no session";
-    const pinned = Boolean(this.pinned && s && this.pinned === s.sessionId);
+    const held = Boolean(this.held && s && this.held === s.sessionId);
     return h_flex().h(42).flex_none().px(10).gap(6).items_center().border_b(1).border_color(t.border)
       .child(div().flex_none().font_semibold().text_size(13).child("ledgr"))
       .child(h_flex().id("lg-session").flex_1().min_w(0).h(26).px(6).gap(5).items_center().rounded(6).cursor_pointer()
@@ -1268,19 +1692,19 @@ export class Panel {
         .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(name))
         .when(Boolean(s?.terminal || away), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(P(s?.terminal ?? away.terminal))))
         .child(svg(ICON(this.menu ? "chevron-down" : "chevron-right")).size(11).flex_none().text_color(t.dim)))
-      // Pinned: an accent "pinned" pill, unmistakable. Following focus: a faint outline pin.
-      .when(Boolean(s), (el) => el.child(h_flex().id("lg-pin").h(22).flex_none().gap(3).items_center().justify_center().rounded(6).cursor_pointer()
-        .when(pinned, (x) => x.px(6).bg(t.accent + "26"))
-        .when(!pinned, (x) => x.w(22).opacity(0.6))
-        .tooltip(pinned ? "Pinned to this session; click to follow focus" : "Following the focused pane; click to pin this session")
+      // Held: an accent "held" pill, unmistakable. Following focus: a faint "hold". Text only: the pin
+      // icon belongs to the PINS lane (docs/design/Pins.md 4.9).
+      .when(Boolean(s), (el) => el.child(h_flex().id("lg-hold").h(22).flex_none().px(6).items_center().justify_center().rounded(6).cursor_pointer()
+        .when(held, (x) => x.bg(t.accent + "26"))
+        .when(!held, (x) => x.opacity(0.6))
+        .tooltip(held ? "Held on this session; click to follow focus" : "Following the focused pane; click to hold this session")
         .hover((x) => x.bg(t.hover).opacity(1))
         .on_click((_e, cx) => {
-          this.pinned = pinned ? null : s.sessionId;
-          try { localStorage.setItem("pinned", this.pinned ?? ""); } catch { /* none */ }
+          this.held = held ? null : s.sessionId;
+          try { localStorage.setItem("pinned", this.held ?? ""); } catch { /* none */ }
           cx.notify();
         })
-        .child(svg(ICON("pin")).size(12).text_color(pinned ? t.accent : t.dim))
-        .when(pinned, (x) => x.child(div().text_size(10.5).font_semibold().text_color(t.accent).child("pinned")))))
+        .child(div().text_size(10.5).when(held, (x) => x.font_semibold()).text_color(held ? t.accent : t.dim).child(held ? "held" : "hold"))))
       .when(Boolean(s), (el) => el.child(div().flex_none().text_size(11).text_color(s.state === "working" ? t.working : t.dim)
         .child(`turn ${s.turn}${s.state === "working" ? " · working" : s.state === "ended" ? " · ended" : ""}`)))
       .when(Boolean(off), (el) => el.child(this.pill(t, "off", t.dim)))
@@ -1330,7 +1754,7 @@ export class Panel {
         .when(s.sessionId === sid, (el) => el.bg(t.selected)).hover((x) => x.bg(t.hover))
         .on_click((_e, cx) => {
           this.menu = false;
-          if (this.pinned) { this.pinned = s.sessionId; try { localStorage.setItem("pinned", s.sessionId); } catch { /* none */ } }
+          if (this.held) { this.held = s.sessionId; try { localStorage.setItem("pinned", s.sessionId); } catch { /* none */ } }
           else this.override = { sid: s.sessionId, terminal: focused()?.terminal ?? null };
           cx.notify();
         })
@@ -1410,19 +1834,21 @@ export class Panel {
   // `note`: extraction running (spinner). `status`: a quiet word in the header, never a fold
   // (the asks lane says "agent working" while the turn runs).
   // `extra`: a control drawn before the count (the asks lane's threshold menu). `statusTip`: the
-  // status word's tooltip (the asks lane: who owns the closing list, asks.handoff).
-  laneHead(t, key, title, count, open, onToggle, note, status, extra, statusTip) {
+  // status word's tooltip (the asks lane: who owns the closing list, asks.handoff). `countWord`: how
+  // the count reads ("N open" by default; the PINS lane's "N pins"); `grow`: the extra, not the title,
+  // takes the free width (the PINS lane's search box).
+  laneHead(t, key, title, count, open, onToggle, note, status, extra, statusTip, countWord = (n) => `${n} open`, grow = false) {
     return h_flex().id(`lane-${key}`).flex_none().h(24).px(4).mt(4).gap(6).items_center().cursor_pointer()
       .on_click((_e, cx) => { onToggle(!open); cx.notify(); })
       .child(svg(ICON(open ? "chevron-down" : "chevron-right")).size(11).flex_none().text_color(t.dim))
-      .child(div().flex_1().text_size(10.5).font_semibold().text_color(t.dim).child(title))
+      .child(div().when(!grow, (x) => x.flex_1()).when(grow, (x) => x.flex_none()).text_size(10.5).font_semibold().text_color(t.dim).child(title))
       .when(Boolean(note), (el) => el.child(h_flex().flex_none().gap(4).items_center()
         .child(svg(ICON("spinner")).size(11).text_color(t.working).when(this.animOn(), (x) => x.spin(900)))
         .child(div().text_size(10.5).text_color(t.working).child(note))))
       .when(!note && Boolean(status), (el) => el.child(div().id(`lane-${key}-status`).flex_none().text_size(10.5).text_color(t.working).opacity(0.75)
         .when(Boolean(statusTip), (x) => x.tooltip(statusTip)).child(status)))
       .when(Boolean(extra), (el) => el.child(extra))
-      .child(div().flex_none().text_size(11).text_color(count ? t.accent : t.dim).child(`${count} open`));
+      .child(div().flex_none().text_size(11).text_color(count ? t.accent : t.dim).child(countWord(count)));
   }
 
   // The threshold control on the ASKED OF YOU head: which levels are open rows that count on the chip.
@@ -1466,6 +1892,8 @@ export class Panel {
     const real = (list) => list.filter((it) => !it.__ghost);
     const out = [];
 
+    out.push(...this.pinsLane(t, st, s));
+    out.push(div().h(1).mx(4).my(6).bg(t.border));
     out.push(this.laneHead(t, "mine", "YOUR QUESTIONS", mine.filter((it) => it.status === "open").length,
       !this.collapsed.mine, (open) => this.setCollapsed("mine", !open), null, null, this.clearButton(t, st, s)));
     if (!this.collapsed.mine) {
@@ -1642,6 +2070,9 @@ export class Panel {
     if (it.origin === "btw" || it.btwStagedAt) badges.push(["/btw", t.muted]);
     if (isHuman(it) && it.askedAtTurn) badges.push([`sent at turn ${it.askedAtTurn}`, t.muted]);
     if (it.status === "dismissed" && dismissedByWords(it.dismissedBy)) badges.push([dismissedByWords(it.dismissedBy), t.dim]);
+    // A question parked with pins: "2 pins", and a line naming them ("with Pin 4, Pin 2 of billing-api").
+    const qPins = isHuman(it) ? st.pinsOf(it) : [];
+    if (qPins.length) badges.push([pinsWords(qPins.length), t.accent]);
     const sub = [];
     if (isHuman(it)) {
       if (it.status === "open" && it.anchor && !it.anchor.settled) sub.push(`parked during turn ${it.anchor.turn}; anchors at end of turn`);
@@ -1653,6 +2084,7 @@ export class Panel {
         if (it.anchor?.reanchoredFrom !== undefined) bits.push(`re-anchored from turn ${it.anchor.reanchoredFrom}`);
         sub.push(bits.join(" · "));
       }
+      if (qPins.length) sub.push(`with ${qPins.map((p) => pinNameWords(p, it.anchor?.sessionId)).join(", ")}`);
     }
     if (agent && (it.status === "answered" || (it.status === "resolved" && it.resolvedBy === "answer")) && it.answer) sub.push(`→ ${squash(it.answer).slice(0, 140)}`);
     if (it.status === "rejoin_pending") {
@@ -1758,6 +2190,10 @@ export class Panel {
       ["next", "Next session", (_e, cx) => this.act(it.id, "defer", "next_session", cx), { tip: "Opens again when a session starts in the same folder" }],
     ], { width: 150 }));
     if (agent && !closed && isSuggestion(it, st.threshold)) b("promote", "Promote", (_e, cx) => this.act(it.id, "promote", null, cx), { tip: "Make it an open ask that counts on the chip" });
+    // A question with pins: Ask here stages it with its pins, quoted (askPinsHere), then Branch… as for any.
+    const qPins = isHuman(it) ? st.pinsOf(it) : [];
+    if (qPins.length && !closed && !pend) b("askhere", L.ask, (_e, cx) => this.askPinsHere(it, s, cx), { primary: true,
+      tip: `${H(it)} and its ${pinsWords(qPins.length)}, quoted with where each came from: ${this.pasteOn() ? `pasted into the prompt in ${P(s.terminal, "the pane")} once it has the focus; never sent` : `clipboard + focus ${P(s.terminal, "the pane")}`}` });
     if (isHuman(it) && !closed && !pend) {
       const ok = this.branchable(s);
       const again = st.branchesFor(it.id).some((x) => x.status !== "refused" && x.status !== "failed");
@@ -1767,7 +2203,11 @@ export class Panel {
     if (!closed && !pend) m("dismiss", "Not needed", (_e, cx) => this.act(it.id, "dismiss", null, cx), { tip: NOT_NEEDED_TIP });
     if (pend) m("calloff", "Call off the confluence", (_e, cx) => this.act(it.id, "reopen", null, cx), { tip: "Back to open; the branch keeps your edited conclusion for the next Conclude" });
     if (agent && !closed) m("ask", "Ask about this", (_e, cx) => this.askAbout(it, s, cx));
-    if (isHuman(it) && !closed && !pend && it.text) {
+    // With pins, Copy for prompt copies the whole pins message (the question alone would leave its pins
+    // behind), and there is no /btw: a /btw line cannot carry them.
+    if (isHuman(it) && !closed && !pend && it.text && qPins.length) {
+      m("prompt", "Copy for prompt", (_e, cx) => this.copyPinsMessage(it, s, cx), { tip: `Copies ${H(it)} with its ${pinsWords(qPins.length)}, quoted, as Ask here would paste it; nothing is focused or pasted` });
+    } else if (isHuman(it) && !closed && !pend && it.text) {
       m("prompt", "Copy for prompt", (_e, cx) => this.stageQuestion(it, s, false, cx), { tip: `Copies “[${it.handle}] …”: that tag in a prompt marks ${H(it)} sent` });
       m("btw", "Stage /btw", (_e, cx) => this.stageQuestion(it, s, true, cx));
     }
@@ -1789,6 +2229,11 @@ export class Panel {
       // The quote, capped: an over-long one (a whole message taken as the ask) ends in "…".
       .when(Boolean(quote) && it.kind !== "bookmark", (el) => el.child(div().text_size(11.5).italic().text_color(t.muted)
         .child(`“${quote.length > 300 ? `${quote.slice(0, 280).trimEnd()}…` : quote}”`)))
+      // Its pins: each one's name, where it was taken and its first words (Ask here carries them whole).
+      .when(qPins.length > 0, (el) => el.child(v_flex().id(`qpins-${it.id}`).gap(2).children(qPins.map((p) => h_flex().gap(5).items_start()
+        .child(svg(ICON("pin")).size(10).flex_none().mt(2).text_color(t.accent))
+        .child(div().flex_1().min_w(0).text_size(11.5).text_color(t.muted)
+          .child(`${pinNameWords(p, it.anchor?.sessionId)}, ${p.anchor?.approx ? "around turn" : "turn"} ${p.anchor?.turn ?? "?"} · “${pinHead(p.text, 90)}”`))))))
       .child(passage)
       .when(agent && !closed && Boolean(input), (el) => el.child(v_flex().gap(4)
         .child(h_flex().gap(6).items_center()
@@ -1978,9 +2423,10 @@ export class Panel {
     const k = this.conclude, it = st.item(br.requestId), L = stageLabels(this.pasteOn());
     const F = forkTurnOf(br);
     const text = String(k.text ?? "").trim();
-    const msg = it ? confluenceMessage({ branch: br, item: it, text: text || "…" }) : "";
+    const msg = it ? confluenceMessage({ branch: br, item: it, text: text || "…", pins: st.branchPins(br) }) : "";
     const src = k.source === "loading" ? "Reading the branch's messages…"
       : k.source === "block" ? `Prefilled from the branch's ledgr-conclusion block (its turn ${k.turn}). Edit freely.`
+      : k.source === "pins" ? `No ledgr-conclusion block: one entry per pinned passage, each to clarify${k.turn ? `; the branch's last reply (its turn ${k.turn}) is below it to draw from` : ""}. Edit freely.`
       : k.source === "last" ? `No ledgr-conclusion block: prefilled with the branch's last message (its turn ${k.turn}). Trim it, or ask the branch for a conclusion.`
       : k.source === "edited" ? "Your earlier edit (the confluence was called off or is being changed)."
       : "The branch has not answered yet: write the conclusion yourself, or ask the branch for one.";

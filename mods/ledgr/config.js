@@ -53,6 +53,12 @@ export const LIMITS = {
   turnsSearch: 50,    // saved turns searched backward when re-anchoring a quote
   dupWindowMs: 30000, // human double-capture guard
   conclusion: 8000,   // a branch conclusion as edited for the confluence (Phase 3)
+  // Pins (docs/design/Pins.md 7.1)
+  pin: 4000,             // a pin's passage: the box's candidate, store.js on_pin (longer: cut, `clipped`)
+  pinNote: 200,          // a pin's one-line note
+  pinsPerQuestion: 12,   // pins one parked question carries (the panel's selection, the box, on_capture)
+  pinsPreamble: 24000,   // characters of pinned passages a branch preamble carries (branch.js manifest)
+  pinSearch: 200,        // pins one search shows (store.js searchPins)
 };
 
 export const dataDir = () => `${appHome()}/ledgr-data`;

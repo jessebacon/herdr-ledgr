@@ -1256,3 +1256,28 @@ Notes: `BUILD-NOTES-mod.md` section 17, `BUILD-NOTES-hooks.md` "Off per space" a
 | Known | A branch launched into an off space records lineage but sends no `branch_started`; the capture box over an off pane stays until dismissed | |
 
 Status on 2026-11-07: offline tests pass (store 574, nav 256, no keystrokes 313, hooks 169, mcp 76 plus the off checks); `herdr-app check mods/ledgr` passes. Hook medians: SessionStart 43-45 to 51-52 ms, UserPromptSubmit 42-45 to 52-54 ms, Stop unchanged.
+
+### Pins (2026-11-07)
+
+Pins have a spec of their own: `docs/design/Pins.md` (decisions, the pin record, events, capture, panel, trunk and branch, tests, the live check). Notes: `BUILD-NOTES-pins.md`. In this spec's terms: a pin is a passage kept verbatim with an anchor (3.1's `Anchor`: session, turn and passage hash, uuid when known, never a position), held in a new `pins` map of `store.json` beside `items` (3.3), never an item; a parked question (5) may carry pins through its Request (`request.pins`); a third staged message joins 8.6's two, `ledgr pins <session id> <item id>`, landing as `pins_asked`; the Phase 2 preamble and manifest (8) quote and count a question's pins; the header's session pin (6.2) is now "hold" / "held". Jesse: pins "should actually live"; "yes trunk and branch"; "per session BUT we should have a search across all".
+
+Where the build departs from `Pins.md` (the code wins):
+
+| Topic | Built | Why |
+|---|---|---|
+| `pinText` (Pins 1.2) | Also drops control characters other than tab and LF (`confluence.js` `pinText`) | An ESC in a passage could end the bracketed paste a staged message travels in |
+| Composers (Pins 5.2, 6.1) | A bracketed handle outside the quoted lines loses its brackets (`unref`); one pin reads in the singular; the preamble's `pin i:` lines use ordinals; its compaction line names the pinned passages as verbatim | The rule "no bracketed handle outside the quotes" made mechanical |
+| Engine imports (Pins 7.4) | `branch.js` imports `confluence.js`, which imports `config.js`; `ENGINE_FILES` unchanged | Engine files importing engine files, as the rule allows |
+| Settling (Pins 2.4) | A pin also settles on an interrupt (`interrupted: true`) and on Herdr's status for a session without hooks; neither path re-anchors | The same paths settle a parked question |
+| Store (Pins 1.3, 1.4) | `on_capture` deletes `askedVia` and `pinsAsked` from the spread Request; `snapshot()` drops a question's `pins` ids | Only the store sets the first two; the extractor and the MCP server see no pin, not even an id |
+| Re-anchor (Pins 2.4) | A pin the writer moves to another turn takes that turn's uuid | The settled turn's uuid is not the passage's |
+| Search, selection (Pins 4.4, 4.5) | "archived too" and "this session only" are toggles on a count line; the selection bar sits under the lane head and shows while the lane is folded | |
+| Box words (Pins 3.2, 3.4) | Extra lines for a synthetic session ("Not on this pane's screen…"), no session, and a question's quote found on the screen while idle ("⌘S pins it."); pins mode's placeholder "Your question about these pins…", and its key row leaves out ⌘Enter and ⌘S | |
+| Key (Pins 3.1) | ⌘S (`cmd-s`), the planned fallback, since the maintainer's live check of 2026-11-07 (the first key was in conflict with Herdr's global picker). The key also lives in `pinning.js` `PIN_KEY`, checked against `keys.json` and `MOD_KEYS` by `test_compose.mjs`; `words.js` `PINS_EMPTY` spells "⌘S" too | A key change touches four places, not two |
+| Box size (5.1, Pins 3.4) | 600 × 320 from ⌘J and from an item's Ask about this, 600 × 340 in pins mode (was 236 and 300); padding 20 by 18, a 10 px gap, the clipboard quote up to three lines | The maintainer found the box cramped in the same live check, with the pin-only row, the pins' labels and the status line |
+| Box target (Pins 3.4) | Pins mode parks in the panel's session only: its map record, else `store.json`'s record (no terminal), else refused; `then: "trunk"` needs a live pane (`pinning.js` `pinsTarget`, `pinsThenRefusal`) | It fell back to the first map record, so a question and its pins could park in another session |
+| Branch numbering (Pins 6.4, 6.5) | The Branch record keeps its pin ids (`pins`); the Conclude skeleton and the confluence number from them (`Store.branchPins`), a deleted pin kept as "pin 2: (deleted)" | Numbers from `pinsOf` at Conclude time could drift from the frozen preamble |
+| Trunk cap (Pins 5.3, 5.4) | Ask here and Copy for prompt refuse over `LIMITS.pinsPreamble`, in the branch's wording (`confluence.js` `pinsOverCap`); `ledgr_landing.py` `MAX_SCAN` 64,000 | 12 pins could make a ~50,000-character message, and a sheet pasted after it never landed |
+| Questions with pins (Pins 4.6, 2.4) | No Stage /btw; Copy for prompt copies the whole pins message (clipboard only); an `asks` event's uuid reaches the turn's settled pins too | /btw and the bare question left the pins behind |
+
+Status on 2026-11-07: built, uncommitted. Offline tests pass (store 881 with 307 for pins, hooks 191, no keystrokes 347, nav 269 plus compose 221, mcp 96, installer 69); `herdr-app check` passes. The manual live check (`Pins.md` 8.4), begun by the maintainer the same day, moved the box key to ⌘S and gave the box more room (the two rows above); its other steps are not recorded yet.
