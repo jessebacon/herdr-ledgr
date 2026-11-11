@@ -228,6 +228,13 @@ Offline runs point `LEDGR_KEYCHAIN_SERVICE` at a service that does not exist, so
   matching "uncommitted" or "commit"). The runner gained `none_matching`.
 - Live, `--live status` (one call, 2274 in, 9 out, $0.00023, 1.1 s): zero asks. PASS. `statusask`
   not run live.
+- 2026-11-10, waits are not asks (Jesse's Ask 50, an orchestrator waiting on its own subagent's
+  report): `lib/extract-system.txt` adds, after the status-line rule, "Only what the USER personally
+  must do, decide, provide or review is an ask", a wait on the agent's own subagents, tools, builds,
+  tests or processes being its status even when it writes "I need"; example "I need only the agent's
+  fix report now, and nothing else can be requested until it lands" -> no ask, contrast "I need the
+  domain name from you before I can configure DNS" -> provide, blocking. Fixture `subagentwait`
+  (paraphrased shape); live, one call (2500 in, 9 out, $0.00025, 1.8 s): zero asks. PASS.
 
 ### Profiles (2026-11-06)
 

@@ -35,7 +35,7 @@
 import * as fs from "fs/promises";
 import { randomUUID } from "crypto";
 import { shared, setShared, readTextFile, writeTextFile, watchFolder, agents, terminals, panes, run, exec, hc, openOverlay, appHome, home } from "herdr";
-import { DEFAULTS, loadConfig, dataDir, spoolDir, turnPath, storePath, binDir, agentLabel, panelPlace, panelShown, showPanel, liveHome, disabledSpaces, terminalSpace } from "./config.js";
+import { DEFAULTS, loadConfig, dataDir, spoolDir, turnPath, storePath, binDir, agentLabel, panelPlace, panelShown, showPanel, liveHome, disabledSpaces, terminalSpace, textScaleOf } from "./config.js";
 import { Store, isHuman, thresholdOf } from "./store.js";
 import { SpoolReader, readMap, writeAtomic } from "./spool.js";
 import { maxDepthOf, hcRunArgs, claudeArgv, resumeArgs, transcriptPathOf } from "./branch.js";
@@ -125,15 +125,16 @@ export class Writer {
 
   // The config values the store applies itself (branch.maxDepth, extract.threshold, spaces.disabled),
   // and the ones the chips, the host and the capture box need: shared("ledgr.ui") = {animations,
-  // panel, off} (a pane-header chip cannot read ledgr-data itself; `off` is spaces.disabled, read by
-  // the capture box before it has read config.json).
+  // panel, off, textScale} (a pane-header chip cannot read ledgr-data itself; `off` is spaces.disabled,
+  // read by the capture box before it has read config.json; textScale is ui.textScale, checked, which the
+  // chip, the host button and the box draw their text with).
   applyConfig(cfg) {
     this.cfg = cfg;
     this.live.maxDepth = maxDepthOf(cfg);
     this.live.threshold = thresholdOf(cfg);
     const off = disabledSpaces(cfg);
     this.live.spacesOff = new Set(off);
-    const ui = { animations: cfg?.ui?.animations !== false, panel: panelPlace(cfg), off };
+    const ui = { animations: cfg?.ui?.animations !== false, panel: panelPlace(cfg), off, textScale: textScaleOf(cfg) };
     if (this.holds() && JSON.stringify(shared("ledgr.ui") ?? null) !== JSON.stringify(ui)) setShared("ledgr.ui", ui);
   }
 

@@ -1,0 +1,3 @@
+{"note": "an orchestrator waiting on its own subagent's report ('I need the fix agent's report before anything else moves'), then next steps it will take itself: zero asks; the wait is the agent's status, not an ask of the user (Jesse's screenshot, 2026-11-10: Ask 50, provide, blocking, found by the extractor)",
+ "offline": {"source": "error", "error": "no credential"},
+ "live": {"source": "model", "count": 0, "max_cost": 0.004}}

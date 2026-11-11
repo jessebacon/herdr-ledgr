@@ -1,12 +1,13 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { spaces, panes, run, openOverlay, theme, window, shared, layout, settings, nextCommand, appHome } from "herdr";
+import { spaces, panes, run, openOverlay, closeOverlay, theme, window, shared, layout, settings, nextCommand, appHome } from "herdr";
 import * as fs from "fs/promises";
 // The ledgr writer (spool ingest, ledgr-data/store.json, the header chips) runs here because this
 // copy is always shown: this tab bar is a ledgr host, in place of ledgr's own host block.
 // mods/my-tabs/ledgr/ is a byte-identical copy of mods/ledgr's engine (writer.js ENGINE_FILES),
 // written by ledgr's install.sh: Herdr refuses imports from outside a mod's folder.
 import { Writer } from "./ledgr/writer.js";
+import { settingsOpening } from "./ledgr/config.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -42,6 +43,16 @@ export default class Tabs extends View {
     cx.spawn(async (cx) => {
       for (;;) {
         const c = await nextCommand();
+        // ledgr-settings: ledgr's settings dialog. ledgr.settings reaches shown ledgr copies only, and here no
+        // ledgr copy is shown while the panel is hidden; this tab bar holds the writer, so it opens the dialog
+        // (ledgr's config.js settingsOpening: an open detail dialog closes first).
+        if (c === "ledgr-settings" || c === "ledgr-demo-settings") {
+          if (!this.ledgr?.holds?.()) continue;
+          const o = settingsOpening(shared("ledgr.detail"), { demo: c === "ledgr-demo-settings" });
+          if (o.close) { try { closeOverlay(o.close); } catch { /* already gone */ } }
+          openOverlay(o.spec);
+          continue;
+        }
         // toggle-ledgr (keys.json cmd-shift-j); toggle-ledger is accepted as the spec's spelling.
         const child = c === "toggle-quota" ? "quota" : c === "toggle-ledgr" || c === "toggle-ledger" ? "ledgr" : null;
         if (!child) continue;

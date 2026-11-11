@@ -65,14 +65,15 @@ export const sessionWords = (s) => s?.sessionName || s?.repo || (s?.sessionId ? 
 
 // The three actions that stage a message for a prompt (the answer sheet, one answer, the
 // confluence), by ui.pasteIntoPrompt: "Paste …" when on (nav.js stageIntoPrompt pastes it, never
-// sends it), the older "Copy …" / "Send to trunk" when off (clipboard plus focus).
+// sends it), the older "Copy …" / "Send to trunk" when off (clipboard plus focus). `quick`: the list
+// row's own button for an answer that is ready (docs/design/Detail.md 1.4).
 export function stageLabels(paste) {
   const n_ = (n) => `${n} answer${n === 1 ? "" : "s"}`;
   return paste
     ? { sheet: (n, t) => `Paste ${n_(n)}${t ? ` into ${paneWords(t)}` : ""}`, one: "Paste answer", send: "Paste into trunk",
-        again: "Paste confluence again", againMenu: "Paste the confluence again", how: "pasted into the prompt, never sent", ask: "Ask here" }
+        again: "Paste confluence again", againMenu: "Paste the confluence again", how: "pasted into the prompt, never sent", ask: "Ask here", quick: "Paste" }
     : { sheet: (n, t) => `Copy ${n_(n)}${t ? ` for ${paneWords(t)}` : ""}`, one: "Copy answer", send: "Send to trunk",
-        again: "Copy confluence again", againMenu: "Copy the confluence again", how: "clipboard + focus the pane; nothing is typed", ask: "Copy to ask here" };
+        again: "Copy confluence again", againMenu: "Copy the confluence again", how: "clipboard + focus the pane; nothing is typed", ask: "Copy to ask here", quick: "Copy" };
 }
 
 // ── pins (docs/design/Pins.md 4.7) ──────────────────────────────────────
@@ -163,3 +164,119 @@ export function stagedWords(r, { what, where, lead, word }) {
     default: return `${what} copied and ${where} focused${word === "working" ? " (working: wait for idle)" : ""}: ${typeLead}.`;
   }
 }
+
+// ── the detail dialog (docs/design/Detail.md 2) ─────────────────────────
+// The dialog's item is no longer in the store (its session forgotten, the pin deleted, the item archived
+// away by the daily housekeeping): the body says so and offers only Close.
+export const DETAIL_GONE = "This is no longer in the ledger: its session was forgotten, or it was deleted or archived away.";
+
+// The anchor turn's text was never saved, or is gone (the dialog's message column).
+export const messageGone = (turn) => `Passage not saved for turn ${turn ?? "?"} (ledgr-data/turns/…/${turn ?? "?"}.md).`;
+export const PIN_MESSAGE_GONE = "That message is no longer saved; the pin keeps the passage.";
+
+// A Copy button in the dialog (the text, the quote, the message, a passage): what went to the clipboard,
+// and that nothing was pasted. what: "The passage", "The quote", "The message"...
+export const copiedWords = (what, n) => `${what} copied (${n} character${n === 1 ? "" : "s"}); nothing was pasted.`;
+
+// The dialog closed (Esc, a click outside) while its paste waited for the focus: closing cancels the
+// paste, but the message is on the clipboard and its pane was focused (it may also have landed in the
+// last moment, hence "if it is not in the prompt"). staged: Reader `staged` ({what, where, lead}).
+export const pasteCutWords = ({ what, where, lead } = {}) =>
+  `${what || "The message"} is on the clipboard and ${where || "its pane"} is focused; the dialog closed before the paste was confirmed. If it is not in the prompt there, paste with ⌘V, add a word of your own${lead ? ` such as “${lead}”` : ""}, then Enter.`;
+
+// A link clicked in the dialog's message or an ask's text (2026-11-10; detail.js openLink): what the status
+// line says. shown: the path as a person reads it (links.js shownPath: ~/…, :line); tried: the places looked.
+const clipUrl = (u) => { const s = String(u ?? ""); return s.length > 120 ? `${s.slice(0, 119)}…` : s; };
+export const LINK_WORDS = {
+  web: (url) => `Opened ${clipUrl(url)} in the browser.`,
+  webFailed: (url, why) => `${clipUrl(url)} did not open in the browser: ${why}.`,
+  refused: (url) => `Not opened: only web links (http, https) and file paths open from here (${clipUrl(url)}).`,
+  noFolder: (p) => `${p}: no folder is recorded for this session to look in; a path from / or ~ opens anyway.`,
+  looking: (p) => `Looking for ${p}…`,
+  missing: (p, tried) => (tried?.length ? `No file or folder ${p}: looked for ${tried.join(", ")}.` : `No file or folder ${p}.`),
+  opened: (shown, how) => `Opened ${shown} with ${how}.`,
+  failed: (shown, why) => `${shown} did not open: ${why}.`,
+  revealed: (shown) => `Revealed ${shown} in Finder.`,
+  copied: (abs) => `${abs} copied; nothing was pasted.`,
+  demo: (p, tried, how) => `(demo) Would open ${p} with ${how}${tried?.length ? `, looking for ${tried.join(", ")}` : ""}; nothing is opened in the demo.`,
+};
+
+// A branch whose session has not finished a turn yet (its first one is running): the dialog's message column.
+export const BRANCH_NO_TURN = "The branch has not finished a turn yet: its last message shows here once a turn ends.";
+
+// The dialog's key hints, at the right of its footer: [key, what] pairs. Esc always; Tab when the dialog
+// has a field; Enter for the field that has one.
+export function detailHints({ answer = false, note = false, conclude = false, paste = true } = {}) {
+  const out = [["Esc", "close"]];
+  if (answer || note || conclude) out.push(["Tab", "next field"]);
+  if (answer) out.push(["Enter", paste ? "paste the turn's answers" : "copy the turn's answers"]);
+  if (note) out.push(["Enter", "save the note"]);
+  return out;
+}
+
+// Every use of a pin, newest first, one line each (the dialog's USED IN; pinUseWords is the row's two
+// line summary): {question, session, handle, at, words}, where words is the furthest that question got
+// ("used in Question 3", "sent in Question 3 at turn 14", "answered in Question 3 (turn 14)", "answered
+// in Question 5 (branch br-q5-1a2b, turn 16)"), a question of another session than the pin's naming that
+// session. `store` (optional) tells whether a question was sent and names the other sessions.
+export function pinUseLines(pin, store = null) {
+  const used = Array.isArray(pin?.usedIn) ? pin.usedIn : [], answered = Array.isArray(pin?.answeredIn) ? pin.answeredIn : [];
+  const of = (sid) => {
+    if (!sid || sid === pin.sessionId) return "";
+    const s = store?.d?.sessions?.[sid];
+    return s ? ` of ${sessionWords(s)}` : "";
+  };
+  const qs = new Map();
+  for (const u of used) if (u?.question && !qs.has(u.question)) qs.set(u.question, { handle: u.handle, session: u.session, at: Number(u.at) || 0 });
+  for (const a of answered) if (a?.question && !qs.has(a.question)) qs.set(a.question, { handle: a.handle, session: a.session, at: Number(a.at) || 0 });
+  return [...qs].map(([id, q]) => {
+    const name = `${handleWords(q.handle)}${of(q.session)}`;
+    const line = { question: id, session: q.session ?? null, handle: q.handle ?? null };
+    const a = answered.filter((x) => x?.question === id).sort((x, y) => (Number(y.at) || 0) - (Number(x.at) || 0))[0];
+    if (a) return { ...line, at: Number(a.at) || q.at, words: a.via === "branch" ? `answered in ${name} (branch ${a.branchName ?? "?"}, turn ${a.turn ?? "?"})` : `answered in ${name} (turn ${a.turn ?? "?"})` };
+    const it = typeof store?.item === "function" ? store.item(id) : null;
+    if (it?.pinsAsked) return { ...line, at: Number(it.pinsAsked.at) || q.at, words: `sent in ${name} at turn ${it.pinsAsked.turn}` };
+    return { ...line, at: q.at, words: `used in ${name}` };
+  }).sort((x, y) => y.at - x.at);
+}
+
+// ── the settings dialog (settings.js, 2026-11-10) ───────────────────────
+// The three thresholds, as the ASKED OF YOU head's menu and the settings dialog both name them.
+export const THRESHOLD_WORDS = { blocking: "blocking only", needed: "blocking + needed", optional: "everything" };
+
+// A text scale as a person reads it: 1.2 -> "120 %".
+export const scaleWords = (s) => `${Math.round(Number(s) * 100)} %`;
+
+// Each row of the dialog, in its order: [label, one line on what it does]. The keys are settings.js
+// SETTINGS' keys.
+export const SETTING_WORDS = {
+  textScale: ["Text scale", "Every text ledgr draws, times this: the panel, its dialogs, the ⌘J box, the host button and the pane chip. Icons keep their size."],
+  threshold: ["Threshold", "Which asks are open rows and count on the chip; the rest wait below the threshold, each one click from Promote."],
+  handoff: ["Who owns the closing list", "ledgr: the agent declares blocking and needed items here and ends its reply with one pointer line; both: its reply lists them too; prose: no instruction, the extractor reads each reply. A running session gets the new wording at its next prompt."],
+  pasteIntoPrompt: ["Paste into the prompt", "Paste answers, Paste answer and Paste into trunk put the message into the agent's prompt once its pane has the focus, never pressing Enter; off, they copy it and focus the pane, and you paste."],
+  animations: ["Animations", "Rows fade in and out, highlights decay, the chip pulses once; off, nothing ledgr draws moves."],
+  foldAsksWhileWorking: ["Fold asks while the agent works", "The ASKED OF YOU lane folds while the agent works and opens when its turn ends; off, only your clicks fold it."],
+  openPanelOnAsks: ["Open the panel on new asks", "When a turn ends with new asks and the panel is hidden, show it."],
+  maxDepth: ["Branch depth", "How deep branches of branches may go; 0 turns Branch off."],
+  editor: ["Open files with", "A file path you click in the detail dialog's message opens here: open (the system's default app; a script opens as text, never run), zed or code at its line, or your own command with {path}, {line} and {col}. Web links open in the browser."],
+  spaces: ["Off spaces", "Where ledgr does nothing: no chip, no ⌘J, no instruction or extraction for its agents. Their items are kept."],
+};
+
+// A config.json change the dialog wrote: "Text scale: 120 % (ui.textScale in ledgr-data/config.json)."
+export const savedWords = (label, value, key) => `${label}: ${value} (${key} in ledgr-data/config.json).`;
+// The closing list's mode changed: when the running sessions follow.
+export const handoffSavedWords = (mode) => `Closing list: ${mode} (asks.handoff in ledgr-data/config.json). A running session gets the new wording at its next prompt.`;
+// Open files with (links.editor): the custom command's field, and a command it refuses.
+export const EDITOR_PLACEHOLDER = "your own: subl {path}:{line}:{col}";
+export const EDITOR_CUSTOM_HINT = "Enter saves your own command; {path}, {line} and {col} are put in; quote an argument with spaces (\"/Apps/My Editor\"). Refused: a shell, an interpreter or a program that runs another (env, arch, sudo, python3.12), a terminal, open -a or -b with a launcher, shell or terminal.";
+// why: links.js editorRefusal's words (which part of the command is refused), else the rules in short.
+export const editorRefusedWords = (v, why = null) => `Open files with not saved: “${String(v ?? "").slice(0, 80)}”: ${why || "not a command ledgr runs (no shell, no interpreter, no terminal, no program that is the file itself, at most 300 characters)"}.`;
+// An off space by id that Herdr no longer has (spaces.disabled keeps it until it is dropped).
+export const staleSpaceWords = (id) => `${String(id ?? "").slice(0, 12)}… (no longer in Herdr)`;
+export const droppedSpaceWords = (id) => `Dropped ${String(id ?? "").slice(0, 12)}… from spaces.disabled (ledgr-data/config.json).`;
+// No spaces at all (Herdr reports none, as under herdr-app check).
+export const NO_SPACES = "Herdr reports no spaces.";
+// The footer: where the file is, and that the rest is edited there.
+export const settingsFootWords = (path) => `${path}: edit anything else there; it applies within a second.`;
+// In the demo nothing is written.
+export const SETTINGS_DEMO = "(demo) Nothing here is saved; the dialog shows the defaults and two sample spaces.";

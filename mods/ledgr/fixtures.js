@@ -12,6 +12,12 @@
 // Pins (docs/design/Pins.md 4.10): three, Pin 1 and Pin 2 (with a note) of the demo session and Pin 1
 // of the release-notes session, and Q9, parked with two of them (one from each session), asked in the
 // trunk at turn 16 and answered, so the PINS lane, a usage line and a question with pins all show.
+// The detail dialog (docs/design/Detail.md 2.10): Pin 3 of the demo session, archived ("archived (1)",
+// Restore, Delete), and Pin 1 of a session no longer in `sessions` (a search shows it as forgotten).
+// Every section of the dialog has a case: A15 (a blocking decide with options, its passage in turn 17),
+// A7 (answered), A9 (raised again), Q3 (a running branch with a ledgr-conclusion), Q2 (rejoined), Q5 (its
+// message not saved), Q6 (a bookmark), Q9 (two pins, answered), P2 (a note). DEMO_DETAIL: the dialog
+// `ledgr.demo-detail` opens without a handle. The settings dialog (2026-11-10): DEMO_SPACES and DEMO_OFF.
 // Drawn when props().demo, FORCE_DEMO (config.js) or `herdr-app do ledgr.demo`. Never saved,
 // never published to shared(), never written to ledgr-data.
 import { passageHash } from "./store.js";
@@ -20,6 +26,7 @@ const SID = "11111111-demo-4aaa-8bbb-000000000001";
 const SID2 = "22222222-demo-4aaa-8bbb-000000000002";
 const SID3 = "33333333-demo-4aaa-8bbb-000000000003";
 const SIDB = "44444444-demo-4aaa-8bbb-000000000004";
+const SIDF = "55555555-demo-4aaa-8bbb-000000000005";   // a forgotten session: only its pin is left
 
 const T17 = `I checked the migration output against the staging database for shop-api.
 
@@ -137,11 +144,13 @@ export function demoData(now = Date.now()) {
   const SRC = {
     [SID]: { sessionName: "shop-api migration", repo: "shop-api", cwd: "/Users/example/src/shop-api", agent: "claude-code", profile: null, configDir: null },
     [SID2]: { sessionName: "release notes", repo: "shop-web", cwd: "/Users/example/src/shop-web", agent: "codex", profile: null, configDir: null },
+    [SIDF]: { sessionName: "billing retries spike", repo: "billing", cwd: "/Users/example/src/billing", agent: "claude-code", profile: null, configDir: null },
   };
+  const TERM = { [SID]: "t21", [SID2]: "t27", [SIDF]: "t19" };
   const pins = {};
   const pin = (id, handle, sid, turn, text, o = {}) => {
     pins[id] = { id, handle, sessionId: sid, text, note: o.note ?? null,
-      anchor: { sessionId: sid, terminal: sid === SID2 ? "t27" : "t21", turn, uuid: null, promptId: null, hash: passageHash(text), quoteSource: "clipboard",
+      anchor: { sessionId: sid, terminal: TERM[sid] ?? "t21", turn, uuid: null, promptId: null, hash: passageHash(text), quoteSource: "clipboard",
         verified: "turn", settled: true, approx: false },
       source: SRC[sid], status: "open", createdAt: now - o.ago * min, createdTurn: turn, updatedAt: now - o.ago * min, usedIn: [], answeredIn: [] };
     return id;
@@ -150,6 +159,10 @@ export function demoData(now = Date.now()) {
   pin("pn_demo-pin-000b", "P2", SID, 14, "The orders migration finished cleanly on staging, so the load test result is likely stale. The next run will confirm.",
     { ago: 88, note: "the claim turn 16 overturned" });
   const pC = pin("pn_demo-pin-000c", "P1", SID2, 4, "Choose the release-notes tone: terse or narrative. I recommend terse, since most readers skim the list.", { ago: 31 });
+  // Pin 3, archived; a pin whose session was forgotten (its `source` still names it).
+  const pD = pin("pn_demo-pin-000d", "P3", SID, 12, "Decide whether to keep the stale release branch or delete it after tagging.", { ago: 2 * 24 * 60 - 5, note: "settled at turn 13: kept until tagging" });
+  Object.assign(pins[pD], { status: "archived", archivedAt: now - 24 * 60 * min, updatedAt: now - 24 * 60 * min });
+  pin("pn_demo-pin-000e", "P1", SIDF, 7, "Retries are capped at two per request; the third failure surfaces to the caller at once.", { ago: 9 * 24 * 60 });
   const QT = "If release/5.4 is stale, do the release notes still need writing before the cutover?";
   const q9 = q({ handle: "Q9", turn: 15, kind: "question", text: QT, status: "answered", askedAtTurn: 16, askedVia: "pins", pins: [pA, pC], ago: 28,
     pinsAsked: { turn: 16, at: now - 27 * min, promptId: null, answeredAt: now - 25 * min } });
@@ -165,7 +178,7 @@ export function demoData(now = Date.now()) {
     pins,
     sessions: {
       [SID]: sess(SID, { agent: "claude-code", terminal: "t21", sessionName: "shop-api migration", cwd: "/Users/example/src/shop-api", repo: "shop-api", transcriptPath: null, turn: 18, state: "working",
-        compactions: [{ turn: 16, at: now - 60 * min, trigger: "auto" }] }),
+        compactions: [{ turn: 16, at: now - 60 * min, trigger: "auto" }], nextHandle: { A: 16, Q: 10, P: 4 } }),
       [SID2]: sess(SID2, { agent: "codex", terminal: "t27", sessionName: "release notes", cwd: "/Users/example/src/shop-web", repo: "shop-web", turn: 4, state: "idle", surfaced: true, updatedAt: now - 120e3,
         nextHandle: { A: 2, Q: 2, P: 2 }, pending: { turn: 4, at: now + 365 * day } }),   // demo only: never times out
       [SID3]: sess(SID3, { agent: "claude-code", terminal: "t25", sessionName: "flaky test hunt", cwd: "/Users/example", repo: null, turn: 9, state: "ended", updatedAt: now - day }),
@@ -202,3 +215,13 @@ export function demoData(now = Date.now()) {
 }
 
 export const DEMO_SESSION = SID;
+// The demo item `ledgr.demo-detail` opens the dialog on when no handle is given (a blocking decide).
+export const DEMO_DETAIL = "A15";
+
+// The settings dialog's demo (settings.js, 2026-11-10): two spaces Herdr has, the first one the focused
+// pane's, ledgr off in the second, and an off space Herdr no longer has (shown by its id, with Drop).
+export const DEMO_SPACES = [
+  { id: "spa1b2c3d4e5f60718293a4b5c6d7e8f90", index: 0, name: "shop-api", named: true },
+  { id: "spb2c3d4e5f60718293a4b5c6d7e8f90a1", index: 1, name: "release-notes", named: true },
+];
+export const DEMO_OFF = ["spb2c3d4e5f60718293a4b5c6d7e8f90a1", "spdead000000000000000000000000beef"];

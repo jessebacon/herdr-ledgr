@@ -26,11 +26,13 @@
 // the question with `request.pins`; ⌘Enter and ⌘S only say why not. The question parks in the panel's
 // session and no other (pinning.js pinsTarget): without a map record, as store.json keeps it, with no
 // terminal; then "trunk" needs a live pane (pinsThenRefusal), a branch does not.
+// Text scale (2026-11-10): the box follows ui.textScale up to config.js BOX_SCALE_MAX (125 %), since its
+// popup has a fixed size; the title and key rows keep their height and the middle scrolls.
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import * as fs from "fs/promises";
 import { props, closeOverlay, focused, agents, panes, run, theme, shared, setShared, hc, readTextFile } from "herdr";
-import { LIMITS, agentLabel, dataDir, loadConfig, spaceOff, terminalSpace, storePath } from "./config.js";
+import { LIMITS, agentLabel, dataDir, loadConfig, spaceOff, terminalSpace, storePath, textScaleOf, withScale, BOX_SCALE_MAX } from "./config.js";
 import { readMap, writeEvent } from "./spool.js";
 import { passageHash, newId } from "./store.js";
 import { btwText, isLive } from "./nav.js";
@@ -395,13 +397,13 @@ export class Capture {
     return v_flex().id("ledgr-capture").track_focus(this.handle).cursor_pointer()
       .on_key_down((e, cx) => { if (e.key === "escape" || e.key === "enter") { this.close(); cx.stop_propagation(); } })
       .on_click(() => this.close())
-      .size_full().min_h(0).px(20).py(18).gap(10).bg(t.popover).text_color(t.foreground).text_size(12.5)
+      .size_full().min_h(0).px(20).py(18).gap(10).bg(t.popover).text_color(t.foreground).text_size(t.ts(12.5))
       .child(h_flex().gap(8).items_center()
-        .child(div().flex_none().text_size(14).font_semibold().child(this.title()))
+        .child(div().flex_none().text_size(t.ts(14)).font_semibold().child(this.title()))
         .child(div().flex_1())
-        .child(div().flex_none().text_size(11).text_color(t.dim).child("Esc")))
-      .child(div().text_size(12.5).text_color(t.muted).child(OFF_HERE))
-      .child(div().text_size(11).text_color(t.dim).child("Nothing is parked. The ledgr panel's session menu (›) turns it on again for this space."))
+        .child(div().flex_none().text_size(t.ts(11)).text_color(t.dim).child("Esc")))
+      .child(div().text_size(t.ts(12.5)).text_color(t.muted).child(OFF_HERE))
+      .child(div().text_size(t.ts(11)).text_color(t.dim).child("Nothing is parked. The ledgr panel's session menu (›) turns it on again for this space."))
       .child(div().flex_1())
       .child(h_flex().gap(12).items_center().child(key("Esc", "close")));
   }
@@ -411,11 +413,18 @@ export class Capture {
     return this.parent ? "Ask about this" : "Park a question";
   }
 
+  // The text scale (ui.textScale): the writer's shared("ledgr.ui").textScale follows config.json live; the
+  // file as this box read it when no writer published one. At most BOX_SCALE_MAX: the box has a fixed size.
+  scale() {
+    const live = shared("ledgr.ui")?.textScale;
+    return textScaleOf({ ui: { textScale: live ?? this.cfg?.ui?.textScale } }, { max: BOX_SCALE_MAX });
+  }
+
   render() {
-    const t = theme();
+    const t = withScale(theme(), this.scale());
     const key = (k, what) => h_flex().gap(4).items_center()
-      .child(div().px(5).rounded(4).border_1().border_color(t.border).text_size(10.5).text_color(t.muted).child(k))
-      .child(div().text_size(11).text_color(t.dim).child(what));
+      .child(div().px(5).rounded(4).border_1().border_color(t.border).text_size(t.ts(10.5)).text_color(t.muted).child(k))
+      .child(div().text_size(t.ts(11)).text_color(t.dim).child(what));
     if (this.off) return this.offBox(t, key);
     const rec = this.target();
     const label = rec
@@ -424,42 +433,44 @@ export class Capture {
     const ok = this.quoteState === "ok";
     const pinOnly = this.quoteState === "pinOnly";
     const quoteRow = this.cand && (ok || pinOnly || this.quoteState === "checking")
-      ? h_flex().id("cap-quote").gap(8).items_start().cursor_pointer()
+      ? h_flex().id("cap-quote").flex_none().gap(8).items_start().cursor_pointer()
         .on_click((_e, cx) => { if (ok) { this.useQuote = !this.useQuote; cx.notify(); } })
-        .child(div().flex_none().size(14).mt(1).rounded(3).border_1().border_color(ok && this.useQuote ? t.accent : t.input)
-          .bg(ok && this.useQuote ? t.accent : t.background).text_size(10).text_color(t.accent_foreground).flex().items_center().justify_center()
+        .child(div().flex_none().size(t.ts(14)).mt(1).rounded(3).border_1().border_color(ok && this.useQuote ? t.accent : t.input)
+          .bg(ok && this.useQuote ? t.accent : t.background).text_size(t.ts(10)).text_color(t.accent_foreground).flex().items_center().justify_center()
           .child(ok && this.useQuote ? "✓" : ""))
-        .child(div().flex_none().text_size(11).text_color(t.dim).child(ok ? "Quote (from clipboard)" : pinOnly ? `Pin only (${PIN_KEY.label})` : "Checking quote…"))
-        .child(div().flex_1().min_w(0).max_h(48).overflow_hidden().text_size(11.5).italic().text_color(ok && this.useQuote ? t.foreground : t.dim)
+        .child(div().flex_none().text_size(t.ts(11)).text_color(t.dim).child(ok ? "Quote (from clipboard)" : pinOnly ? `Pin only (${PIN_KEY.label})` : "Checking quote…"))
+        .child(div().flex_1().min_w(0).max_h(48).overflow_hidden().text_size(t.ts(11.5)).italic().text_color(ok && this.useQuote ? t.foreground : t.dim)
           .child(`“${squash(this.cand).slice(0, 220)}”`))
       : null;
     const labels = this.pinsMode ? pinLabels(this.pins) : [];
     const note = this.status ?? (this.pinsMode ? null : this.quoteNote);
+    // The title row and the key row keep their height; the middle (the field, the pins, the quote, the
+    // notes) takes the rest and scrolls when it needs more.
     return v_flex().id("ledgr-capture").track_focus(this.handle)
       .on_key_down((e, cx) => { if (e.key === "escape") { this.close(); cx.stop_propagation(); } })
-      .size_full().min_h(0).px(20).py(18).gap(10).bg(t.popover).text_color(t.foreground).text_size(12.5)
-      .child(h_flex().gap(8).items_center()
-        .child(div().flex_none().text_size(14).font_semibold().child(this.title()))
-        .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(label))
-        .when(Boolean(rec), (el) => el.child(div().flex_none().px(5).rounded(4).bg(t.raised).text_size(10).text_color(t.muted).child(agentLabel(rec.agent, rec.profile))))
-        .child(div().flex_none().text_size(11).text_color(t.dim).child("Esc")))
-      .child(h_flex().h(34).flex_none().px(10).items_center().rounded(9).border_1().border_color(t.accent).bg(t.background)
-        .child(Input.new(this.input).flex_1().h_full().text_size(12.8).text_color(t.foreground)))
-      .when(labels.length > 0, (el) => el.child(v_flex().id("cap-pins").gap(3).children(labels.map((l) =>
-        div().truncate().text_size(11).text_color(t.muted).child(l)))))
-      .when(Boolean(quoteRow) && !this.pinsMode, (el) => el.child(quoteRow))
-      .when(this.showQuoteField(), (el) => el.child(h_flex().h(28).flex_none().px(10).items_center().rounded(8).border_1().border_color(t.input).bg(t.background)
-        .child(Input.new(this.quoteInput).flex_1().h_full().text_size(11.5).italic().text_color(t.foreground))))
-      .when(Boolean(note), (el) => el.child(div().text_size(10.5).text_color(this.status ? t.foreground : t.dim).child(note)))
-      .when(Boolean(this.error), (el) => el.child(div().text_size(11.5).text_color(t.blocked).child(this.error)))
-      .child(div().flex_1())
-      .child(h_flex().gap(12).items_center()
+      .size_full().min_h(0).px(20).py(18).gap(10).bg(t.popover).text_color(t.foreground).text_size(t.ts(12.5))
+      .child(h_flex().id("cap-head").flex_none().gap(8).items_center()
+        .child(div().flex_none().text_size(t.ts(14)).font_semibold().child(this.title()))
+        .child(div().flex_1().min_w(0).truncate().text_size(t.ts(11.5)).text_color(t.dim).child(label))
+        .when(Boolean(rec), (el) => el.child(div().flex_none().px(5).rounded(4).bg(t.raised).text_size(t.ts(10)).text_color(t.muted).child(agentLabel(rec.agent, rec.profile))))
+        .child(div().flex_none().text_size(t.ts(11)).text_color(t.dim).child("Esc")))
+      .child(v_flex().id("cap-body").flex_1().min_h(0).overflow_y_scrollbar().gap(10)
+        .child(h_flex().h(t.ts(34)).flex_none().px(10).items_center().rounded(9).border_1().border_color(t.accent).bg(t.background)
+          .child(Input.new(this.input).flex_1().h_full().text_size(t.ts(12.8)).text_color(t.foreground)))
+        .when(labels.length > 0, (el) => el.child(v_flex().id("cap-pins").flex_none().gap(3).children(labels.map((l) =>
+          div().truncate().text_size(t.ts(11)).text_color(t.muted).child(l)))))
+        .when(Boolean(quoteRow) && !this.pinsMode, (el) => el.child(quoteRow))
+        .when(this.showQuoteField(), (el) => el.child(h_flex().h(t.ts(28)).flex_none().px(10).items_center().rounded(8).border_1().border_color(t.input).bg(t.background)
+          .child(Input.new(this.quoteInput).flex_1().h_full().text_size(t.ts(11.5)).italic().text_color(t.foreground))))
+        .when(Boolean(note), (el) => el.child(div().flex_none().text_size(t.ts(10.5)).text_color(this.status ? t.foreground : t.dim).child(note)))
+        .when(Boolean(this.error), (el) => el.child(div().flex_none().text_size(t.ts(11.5)).text_color(t.blocked).child(this.error))))
+      .child(h_flex().id("cap-keys").flex_none().gap(12).items_center()
         .child(key("Enter", this.saving ? "saving…" : "park"))
         .when(!this.pinsMode, (el) => el.child(key("⌘Enter", "park + /btw")).child(key(PIN_KEY.label, "pin")))
         .child(key("Esc", "cancel"))
         .child(div().flex_1())
         .when(this.records.length > 1, (el) => el.child(div().id("cap-session").px(6).py(1).rounded(5).cursor_pointer()
-          .text_size(11).text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
+          .text_size(t.ts(11)).text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
           .on_click((_e, cx) => {
             this.at = (this.at + 1) % this.records.length;
             if (this.pinsMode) this.status = pinsThenRefusal(this.target(), this.then, isLive);   // a session the person chose

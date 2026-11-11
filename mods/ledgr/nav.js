@@ -11,7 +11,11 @@
 // command ⌘V is bound to: the clipboard into the focused terminal, no Enter, no key names), and only
 // after Herdr reports the target terminal focused. It never presses Enter: the person reads what
 // landed, adds a word of their own and sends it (ui.pasteIntoPrompt false: clipboard plus focus).
+// One door (docs/design/Detail.md 3.2-3.3): stageMessage below is the only caller of stageIntoPrompt,
+// and reader.js `stage` (the panel's and the detail dialog's, both Readers) the only caller of
+// stageMessage; bin/tests/test_no_keystrokes.py enforces the chain.
 import { run, agents, terminals, focused } from "herdr";
+import { stagedWords } from "./words.js";
 
 export function agentOf(t) {
   return t ? agents().find((a) => a.address === t) ?? null : null;
@@ -142,6 +146,24 @@ export function stageIntoPrompt(text, terminal, cx, { paste = true, done } = {})
     done?.(r, cx);
   });
   return "pasting";
+}
+
+// The one staging door (reader.js `stage` is its only caller): one paste at a time per copy, the words
+// of what happened. gate: {pasting} (mutated). w: {paste, what, where, lead, word, tail, say(text, r, cx)}.
+// Returns false when a paste is still pending (nothing staged), true otherwise.
+// say: once with r (the result) when the reason is known at once (off, gone, plain, blocked); else
+// twice, first with r null ("copied; pasting it…"), then with r from the task. The gate is clear
+// before the result is said, so the copy may stage again (or close) from say. A dialog stays open
+// until then: closing it would cancel the paste task (Detail.md 3.1).
+export function stageMessage(gate, msg, terminal, cx, w) {
+  if (gate.pasting && Date.now() - gate.pasting < PASTE.waitMs + 400) { w.say(`Still pasting into ${w.where}…`, null, cx); return false; }
+  gate.pasting = Date.now();
+  const ret = stageIntoPrompt(msg, terminal, cx, { paste: w.paste, done: (r, cx) => {
+    gate.pasting = 0;
+    w.say(`${stagedWords(r, w)}${w.tail ? ` ${w.tail}` : ""}`, r, cx);
+  } });
+  if (ret === "pasting") w.say(`${w.what} copied; pasting it into the prompt in ${w.where}…`, null, cx);
+  return true;
 }
 
 // The answer sheet's one message (spec 6.4) moved to confluence.js (answersSheet) in Phase 3: it now

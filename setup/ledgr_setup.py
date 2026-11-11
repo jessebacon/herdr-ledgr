@@ -603,6 +603,76 @@ def host_mods(ctx):
     return out
 
 
+# The config.json choices the installer writes that ledgr's settings dialog (and the panel's threshold
+# menu) write too, in answers terms, with their words for the summary. A --yes run keeps the value
+# config.json holds when the person changed it there since the last install (keep_config_edits).
+CFG_SHARED = {"threshold": "threshold", "asks_handoff": "closing list", "animations": "animations",
+              "fold_asks_while_working": "fold while working"}
+
+
+def cfg_answers(cfg):
+    """The CFG_SHARED values a config.json holds, in answers terms (a key it lacks is left out)."""
+    a = {}
+    if not isinstance(cfg, dict) or not cfg:
+        return a
+    ex = cfg.get("extract") if isinstance(cfg.get("extract"), dict) else {}
+    if ex.get("threshold"):
+        a["threshold"] = ex["threshold"]
+    ui = cfg.get("ui") if isinstance(cfg.get("ui"), dict) else {}
+    if "animations" in ui:
+        a["animations"] = ui["animations"] is not False
+    if "foldAsksWhileWorking" in ui:
+        a["fold_asks_while_working"] = ui["foldAsksWhileWorking"] is True
+    h = cfg["asks"].get("handoff") if isinstance(cfg.get("asks"), dict) else None
+    if cfg.get("instruct_block") is False:
+        a["asks_handoff"] = "prose"
+    elif h in [v for v, _ in HANDOFFS]:
+        a["asks_handoff"] = h
+    return a
+
+
+def keep_config_edits(ctx, st, ans, flags, file_answers=None):
+    """--yes (2026-11-10): for each CFG_SHARED key, config.json's value wins over the answers when the person
+    changed it since the last install (in the settings dialog or the threshold menu: it differs from what
+    that install wrote, install-state config_written.wrote), and stays while the answers still say what
+    they said then (config_written.said), so a stale answers file never reverts it on a later run. An
+    answer changed since then applies; a flag on the command line always wins. An older state (no
+    config_written): its answers are what it wrote and what was said. Returns [(key, value)] for each
+    value kept over a different answer (the run says so); ans["_said"] holds what the answers said there."""
+    ans["_said"] = {}
+    if not ctx.yes:
+        return []
+    rec = st.d.get("config_written")
+    if isinstance(rec, dict) and isinstance(rec.get("wrote"), dict):
+        wrote, said_then = rec["wrote"], rec.get("said") if isinstance(rec.get("said"), dict) else rec["wrote"]
+    else:
+        wrote = said_then = {k: st.d["answers"][k] for k in CFG_SHARED if k in st.d["answers"]}
+    now = cfg_answers(read_cfg(ctx))
+    given = set(flags or {})
+    if "instruct_block" in given:
+        given.add("asks_handoff")
+    fa = file_answers or {}
+    kept = []
+    for k in CFG_SHARED:
+        if k in given or k not in now:
+            continue
+        # What the answers would write: an answers file's instruct_block false with no asks_handoff is prose.
+        said = "prose" if k == "asks_handoff" and fa.get("instruct_block") is False and not fa.get("asks_handoff") else ans.get(k)
+        changed_here = k in wrote and now[k] != wrote[k]
+        answers_same = k in said_then and said == said_then[k]
+        if now[k] == said or not (changed_here or answers_same):
+            continue
+        kept.append((k, now[k]))
+        ans["_said"][k] = said
+        ans[k] = now[k]
+    return kept
+
+
+def kept_words(k, v):
+    shown = ("on" if v else "off") if isinstance(v, bool) else v
+    return f"kept your {CFG_SHARED[k]}: {shown} (changed in ledgr since the last install; config.json wins over the answers)"
+
+
 def derive(ctx, st, f):
     """The answers that reproduce what is installed now."""
     a = {}
@@ -612,19 +682,8 @@ def derive(ctx, st, f):
         a["provider"] = "none" if ex.get("mode") == "block-only" else (ex.get("provider") or "anthropic")
         a["model"] = ex.get("model")
         a["base_url"] = ex.get("base_url")
-        if ex.get("threshold"):
-            a["threshold"] = ex["threshold"]
-        ui = cfg.get("ui") or {}
-        if "animations" in ui:
-            a["animations"] = ui["animations"] is not False
-        if "foldAsksWhileWorking" in ui:
-            a["fold_asks_while_working"] = ui["foldAsksWhileWorking"] is True
         a["instruct_block"] = cfg.get("instruct_block") is True
-        h = (cfg.get("asks") or {}).get("handoff") if isinstance(cfg.get("asks"), dict) else None
-        if cfg.get("instruct_block") is False:
-            a["asks_handoff"] = "prose"
-        elif h in [v for v, _ in HANDOFFS]:
-            a["asks_handoff"] = h
+        a.update(cfg_answers(cfg))
     keys, _, _ = load_json(os.path.join(ctx.home, "keys.json")) if os.path.exists(os.path.join(ctx.home, "keys.json")) else (None, None, None)
     g = (keys or {}).get("global") or {}
     for k, v in g.items():
@@ -832,6 +891,9 @@ def gather(ctx, st, f, a, file_answers, flags):
     ans = merge(ans, file_answers)
     ans = merge(ans, flags)
     head("Questions" if not ctx.yes else "Answers")
+    ans["_kept"] = keep_config_edits(ctx, st, ans, flags, file_answers)
+    for k, v in ans["_kept"]:
+        say(f"  {kept_words(k, v)}")
     ov = overlay_manifest(ans.get("overlay"))
     if ov:
         say(f"  overlay: {tilde(ov['_dir'])} (mods {', '.join(ov.get('mods') or [])}; host {ov.get('host')}; chip {ov.get('chip')})")
@@ -887,6 +949,8 @@ def gather(ctx, st, f, a, file_answers, flags):
     # off, and an older answers file or flag that turns instruct_block off (with no asks_handoff) means prose.
     given = {**(file_answers or {}), **(flags or {})}
     hand = "prose" if given.get("instruct_block") is False and not given.get("asks_handoff") else ans.get("asks_handoff")
+    if any(k == "asks_handoff" for k, _ in ans["_kept"]):
+        hand = ans["asks_handoff"]
     ans["asks_handoff"] = ask.choose("Who owns the closing list the agent gives you?",
                                      "If ledgr is installed, let it be authoritative: the end of a reply is the terminal's most valuable "
                                      "screen. ledgr and both add a ~200 to 260-word instruction to each session's context (at start, clear and "
@@ -1179,6 +1243,9 @@ def apply_config(ctx, ans, changes):
             ctx.backup(p)
         write_atomic(p, dump(new, style))
         changes.append(f"ledgr-data/config.json: {'created' if raw is None else 'updated'} (provider {prov}, threshold {ans['threshold']}, closing list {hand})")
+    # What this install wrote there (install-state config_written): the next --yes run keeps a value the
+    # person changed since (keep_config_edits).
+    return cfg_answers(new)
 
 
 def apply_keys(ctx, st, ans, changes):
@@ -1767,6 +1834,9 @@ def cmd_install(ctx, args, flags):
     say(f"  mods        ledgr {f['repo_version']}" + (", ledgr-pane" if lay.get("chip") == CHIP else "") +
         (f", overlay {', '.join(ov.get('mods') or [])} from {tilde(ov['_dir'])}" if ov else ""))
     say(f"  config      provider {ans['provider']}{' ' + ans['model'] if ans['provider'] != 'none' and ans.get('model') else ''}; closing list {ans['asks_handoff']}; threshold {ans['threshold']}; animations {'on' if ans['animations'] else 'off'}; fold while working {'on' if ans['fold_asks_while_working'] else 'off'}")
+    kept = [CFG_SHARED[k] for k, _ in ans.get("_kept") or []]
+    if kept:
+        say(f"              (kept from config.json, changed in ledgr since the last install: {', '.join(kept)})")
     say(f"  keys        {ans['keys']['capture']} park a question; {ans['keys']['toggle']} -> {ans['keys']['toggle_command']}" +
         (f"; replaces {', '.join(f'{s}:{c}' for s, c in ans['keys']['replaced'])}" if ans['keys']['replaced'] else ""))
     say(f"  layout      {('layouts/' + lay['name'] + '.json') if lay.get('name') else 'none'}" +
@@ -1810,7 +1880,10 @@ def cmd_install(ctx, args, flags):
             changes.append(f"Keychain: ledgr / {ans['provider']} stored")
             ans["api_key"] = "keep"
     apply_layout(ctx, st, f, ans, changes)
-    apply_config(ctx, ans, changes)
+    st.d["config_written"] = {"wrote": apply_config(ctx, ans, changes),
+                              "said": {**{k: ans[k] for k in CFG_SHARED if k in ans}, **(ans.get("_said") or {})}}
+    for k, v in ans.get("_kept") or []:
+        changes.append(kept_words(k, v))
     apply_keys(ctx, st, ans, changes)
     apply_hooks(ctx, st, ans, changes)
     apply_mcp(ctx, st, ans, changes, f["warn"])

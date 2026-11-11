@@ -40,13 +40,19 @@ DEFAULT_CONFIG = {
     "branch": {"maxDepth": 2},
     "ui": {"foldAsksWhileWorking": False,     # the panel's: True = the asks lane folds while the agent works
            "animations": True,                # the panel's and chip's: False = no motion at all
-           "pasteIntoPrompt": True},          # the panel's: True = Paste answer(s) / Paste into trunk paste
+           "pasteIntoPrompt": True,           # the panel's: True = Paste answer(s) / Paste into trunk paste
                                               # the message into the target's prompt (terminal.paste, once
                                               # its pane has the focus; never Enter); False = clipboard + focus
+           "textScale": 1},                   # the mod's: every text size it draws times this, 0.8 to 1.6 in
+                                              # steps of 0.05 (config.js textScaleOf); the settings dialog writes it
     "spaces": {"disabled": []},       # Herdr space ids where ledgr is off: no instruction and no
                                       # extraction for a session there (the hooks), no chip, no capture,
                                       # the panel says so; items are kept. The panel's session menu
                                       # writes it. A list: a config.json value replaces it whole
+    "links": {"editor": "open"},      # the mod's: what a file path clicked in the detail dialog opens
+                                      # with: open (the default app; a script opens as text, never run),
+                                      # zed, code (at its line), or a command of your own with {path},
+                                      # {line}, {col}, never a shell or a terminal (links.js openerArgv)
     "retention_days": 14,
 }
 

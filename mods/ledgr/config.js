@@ -1,6 +1,7 @@
 // ledgr settings: paths under <Herdr home>/ledgr-data, the defaults of ledgr-data/config.json, and
-// where the panel sits in the person's layout. The mod only reads config.json; the hooks and
-// install.sh create it.
+// where the panel sits in the person's layout, the text scale. The hooks and install.sh create
+// config.json; the mod writes it only through reader.js editConfig (the settings dialog, the threshold
+// menu, the space switch: one compare-and-swap writer).
 import { appHome, readTextFile, layout, run, shared, agents, terminals } from "herdr";
 
 // true: every copy draws the fixture store (fixtures.js) instead of live data.
@@ -32,16 +33,23 @@ export const DEFAULTS = {
   // pasteIntoPrompt: true (the default) makes Paste answer(s) and Paste into trunk put the message
   // into the target's prompt with Herdr's terminal.paste once that pane has the focus (nav.js
   // stageIntoPrompt; never Enter); false keeps them clipboard plus focus, and the person pastes.
+  // textScale (2026-11-10, TEXT_SCALE): every text size ledgr draws, times this (the panel, the dialogs,
+  // the ⌘J box, the host button, the pane chip), 0.8 to 1.6 in steps of 0.05; the settings dialog writes it.
   // panel: the layout node ids the panel lives in (install.sh writes them when it puts the block
   // somewhere else): `column` is shown and hidden, `stack` (null: none) selects `child`. The default
   // is the right-hand panel stack of Herdr's `main` layout and its clones.
-  ui: { foldAsksWhileWorking: false, animations: true, pasteIntoPrompt: true, panel: { column: "panel", stack: "panel-body", child: "ledgr" } },
+  ui: { foldAsksWhileWorking: false, animations: true, pasteIntoPrompt: true, textScale: 1, panel: { column: "panel", stack: "panel-body", child: "ledgr" } },
   // The spaces where ledgr is off (Herdr space ids, `sp` + 32 hex; names change, ids do not). A
   // session in one of them gets no instruction and no extraction (the hooks), no chip (the writer),
   // no ⌘J (capture.js), and the panel shows "ledgr is off in this space" instead of its lanes; its
   // items are kept and come back when the space is on again. The panel's session menu writes it
   // (panel.js setSpaceOff). An array: a config.json value replaces the default whole.
   spaces: { disabled: [] },
+  // links.editor (2026-11-10, links.js): what a file path clicked in the detail dialog opens with: "open"
+  // (the system's default app; a script opens as text, never run), "zed", "code" (at the path's line), or a
+  // command of your own with {path}, {line}, {col} (never a shell or a terminal). Web links open in the
+  // browser whatever this says. The settings dialog writes it.
+  links: { editor: "open" },
   retention_days: 14,
 };
 
@@ -69,6 +77,7 @@ export const turnPath = (sid, turn) => `${dataDir()}/turns/${sid}/${turn}.md`;
 export const terminalFile = (t) => `${terminalsDir()}/${String(t).replace(/\//g, "__")}.json`;
 export const binDir = () => `${appHome()}/mods/ledgr/bin`;
 export const storePath = () => `${dataDir()}/store.json`;
+export const configPath = () => `${dataDir()}/config.json`;
 
 function merge(base, over) {
   if (!over || typeof over !== "object" || Array.isArray(over)) return base;
@@ -82,12 +91,49 @@ function merge(base, over) {
 // ledgr-data/config.json merged over the defaults. A missing or broken file means defaults.
 export async function loadConfig() {
   try {
-    const text = await readTextFile(`${dataDir()}/config.json`);
+    const text = await readTextFile(configPath());
     if (!text) return { ...DEFAULTS, _source: "defaults" };
     return { ...merge(DEFAULTS, JSON.parse(text)), _source: "file" };
   } catch (e) {
     return { ...DEFAULTS, _source: "defaults", _error: String(e?.message ?? e) };
   }
+}
+
+// ── the text scale (ui.textScale, 2026-11-10) ───────────────────────────
+// Every text_size ledgr draws goes through the theme's `ts` (withScale): the size times the scale,
+// rounded to a half pixel; so do the fixed heights of the rows and buttons that hold one line of text.
+// Each copy reads the scale from its merged config at render time (the chip and the host from
+// shared("ledgr.ui").textScale, which the writer publishes), so a change shows at the next render.
+export const TEXT_SCALE = { min: 0.8, max: 1.6, step: 0.05, def: 1 };
+
+// ui.textScale as a number in [0.8, 1.6] on a 0.05 step (a number, or a numeric string, clamped, then
+// rounded to the step); anything else (missing, null, not a number) is 1. max (optional): a lower ceiling
+// for a copy whose box has a fixed size (the ⌘J box: BOX_SCALE_MAX).
+export function textScaleOf(cfg, { max = TEXT_SCALE.max } = {}) {
+  const raw = cfg?.ui?.textScale;
+  const v = typeof raw === "number" || (typeof raw === "string" && raw.trim()) ? Number(raw) : NaN;
+  if (!Number.isFinite(v)) return TEXT_SCALE.def;
+  const top = Number.isFinite(Number(max)) ? Math.min(TEXT_SCALE.max, Math.max(TEXT_SCALE.min, Number(max))) : TEXT_SCALE.max;
+  const c = Math.min(top, Math.max(TEXT_SCALE.min, v));
+  return Number((Math.round(c / TEXT_SCALE.step) * TEXT_SCALE.step).toFixed(2));
+}
+
+// The ⌘J box is a popup of a fixed size (mod.json overlay, 600 × 320; 340 from the panel's pins): its text
+// stops growing at 125 %, so its bottom row (the keys, the session switcher) stays inside it. Its middle
+// scrolls when a note or a quote still needs more room (capture.js).
+export const BOX_SCALE_MAX = 1.25;
+
+// One step up (dir 1) or down (-1) from scale s, within the range.
+export const stepScale = (s, dir) => textScaleOf({ ui: { textScale: textScaleOf({ ui: { textScale: s } }) + (dir < 0 ? -1 : 1) * TEXT_SCALE.step } });
+
+// A size n at scale s, rounded to a half pixel.
+export const scaleText = (n, s) => Math.round(Number(n) * Number(s) * 2) / 2;
+
+// The theme a copy draws with: Herdr's theme() as is, plus `ts(n)` (scaleText at this scale) and
+// `scale`. Herdr's theme is not changed (a new object on top of it, read through its prototype).
+export function withScale(t, s) {
+  const scale = Number.isFinite(Number(s)) ? Number(s) : TEXT_SCALE.def;
+  return Object.create(t ?? null, { ts: { value: (n) => scaleText(n, scale) }, scale: { value: scale } });
 }
 
 // The effective asks.handoff, as the hooks read it (bin/lib/ledgr_config.py handoff()): "prose" when
@@ -158,6 +204,19 @@ export function profileWord(profile) {
 // from a check would leave a claim nobody holds. Every Herdr home has AGENTS.md.
 export async function liveHome() {
   try { return (await readTextFile(`${appHome()}/AGENTS.md`)) !== null; } catch { return false; }
+}
+
+// ── the settings dialog without the panel (2026-11-10) ──────────────────
+// `ledgr.settings` reaches shown copies only, so with the panel hidden a host opens the dialog: the ledgr
+// host block (host.js, the public install) on ledgr.settings, an overlay host with an engine copy on a
+// command of its own (the maintainer's my-tabs: my-tabs.ledgr-settings). What it takes: the open detail
+// dialog to close first (one dialog at a time, shared("ledgr.detail")), and the OverlaySpec, the one
+// detailing.js settingsSpec gives the panel's gear (bin/tests/test_settings.mjs holds them equal). Pure:
+// the caller closes and opens (config.js takes no overlay call from herdr).
+export function settingsOpening(detail, { demo = false } = {}) {
+  const open = detail && typeof detail === "object" && detail.open && typeof detail.open === "object" ? detail.open.overlay : null;
+  return { close: typeof open === "string" && open ? open : null,
+    spec: { mod: "ledgr", kind: "dialog", width: 0.5, height: 0.7, props: { view: "settings", opener: null, demo: demo === true } } };
 }
 
 // ── where the panel lives ─────────────────────────────────────────────

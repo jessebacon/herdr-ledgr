@@ -7,6 +7,8 @@ libraries, against a scratch data folder), never edited. Authoritative event con
 `bin/lib/ledgr_spool.py` docstring and `BUILD-NOTES-hooks.md`. Herdr 0.1.13 at build time.
 (Sections 1 to 9 describe Phase 1 as built. Since 0.1.0 the chip is the public `ledgr-pane`, `my-pane`
 is retired and `my-tabs` is the maintainer's overlay; later sections say so where it matters.)
+(Since 2026-11-10 the panel is a one-line list, rows open in a detail dialog, and the panel's reading
+half is `reader.js`, so the `panel.js` line numbers here predate it: `BUILD-NOTES-detail.md`.)
 
 ## 1. Architecture (coordinator decision: option c)
 

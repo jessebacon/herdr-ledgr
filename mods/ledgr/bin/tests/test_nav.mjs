@@ -6,6 +6,8 @@
 // or waits on its own prompt, or ui.pasteIntoPrompt is off. Never `hc` (no keys, no send), never a
 // find bar, never Enter, "\r" or "\n" in any command's arguments. A staged message goes on the clipboard
 // with one empty line at its end (promptText), pasted or not; its first line stays the marker.
+// stageMessage, the one staging door (Detail.md 3.2): one paste at a time per copy, and the words of
+// what happened said through its `say` (words.js stagedWords plus the tail).
 //   node tests/test_nav.mjs <folder holding nav.js and node_modules/herdr>   (tests/test-nav.sh)
 import assert from "node:assert/strict";
 const dir = process.argv[2];
@@ -209,6 +211,94 @@ reset([{ address: "t3", app: "claude-code", status: "blocked" }], [], { terminal
 r = await paste(PINS_MSG, "t3");
 A.deepEqual(r.c.clip, [`${PINS_MSG}\n\n`]); A.deepEqual(H.calls, focusOnly("t3")); A.equal(r.ret, "blocked");
 
+// ── stageMessage (Detail.md 3.2, 6.3): the one staging door. The gate is the copy ({pasting}); say
+// gets (text, r, cx). A paste says twice (r null while it waits, then the result), a reason known at
+// once says once, and a second staging while one is pending stages nothing.
+const WD = await import(`${dir}/words.js`);
+const WHO = { what: "Answer for Ask 27", where: "pane t3", lead: "My answer to A27:", word: "idle", tail: "Ask 27 shows answered once that prompt is sent." };
+const said = (log) => (text, r, cx2) => log.push({ text, r, cx: cx2 });
+const ANSWER = (r, w = WHO) => `${WD.stagedWords(r, w)}${w.tail ? ` ${w.tail}` : ""}`;
+
+// Pasted: "copied; pasting it…" with r null at once, the gate held; then the result with r, the gate
+// clear before it is said (the copy may close or stage again from say). One focus, one paste.
+reset([{ address: "t3", app: "claude-code", status: "idle" }], [], { terminal: "t3" });
+let gate = { pasting: 0 }, log = [], sc = cx(), held = [];
+let ret = N.stageMessage(gate, SHEET, "t3", sc, { ...WHO, paste: true, say: (text, r, c2) => { held.push(gate.pasting); said(log)(text, r, c2); } });
+A.equal(ret, true, "staged");
+A.equal(log.length, 1, "one line while the paste waits"); A.equal(log[0].text, `${WHO.what} copied; pasting it into the prompt in ${WHO.where}…`); A.equal(log[0].r, null);
+A.equal(log[0].cx, sc, "said with the handler's cx"); A.ok(gate.pasting > 0, "the gate is held while the task waits");
+await Promise.all(sc.tasks);
+A.equal(log.length, 2, "then the result");
+A.deepEqual(log[1].r, { pasted: true, ms: 100 }); A.equal(log[1].text, ANSWER({ pasted: true, ms: 100 }));
+A.ok(log[1].text.endsWith(` ${WHO.tail}`) && log[1].text.includes("not sent"), log[1].text);
+A.equal(gate.pasting, 0, "the gate is clear after the paste"); A.equal(held[1], 0, "...and already clear when the result is said");
+A.deepEqual(sc.clip, [STAGED]); A.deepEqual(H.calls, [...focusOnly("t3"), PASTE]); noHc();
+
+// No tail: the result alone, no trailing space.
+reset([{ address: "t3", app: "claude-code", status: "idle" }], [], { terminal: "t3" });
+gate = { pasting: 0 }; log = []; sc = cx();
+N.stageMessage(gate, SHEET, "t3", sc, { ...WHO, tail: undefined, paste: true, say: said(log) });
+await Promise.all(sc.tasks);
+A.equal(log[1].text, WD.stagedWords({ pasted: true, ms: 100 }, WHO), "no tail, no trailing space");
+
+// paste left out of w: stageIntoPrompt's default (on) applies.
+reset([{ address: "t3", app: "claude-code", status: "idle" }], [], { terminal: "t3" });
+gate = { pasting: 0 }; log = []; sc = cx();
+N.stageMessage(gate, SHEET, "t3", sc, { ...WHO, say: said(log) });
+await Promise.all(sc.tasks);
+A.deepEqual(log[1].r, { pasted: true, ms: 100 }); A.deepEqual(H.calls, [...focusOnly("t3"), PASTE]);
+
+// A second staging while one is pending: false, "Still pasting into …" with r null, no clipboard, no
+// focus, no task. The first one ends as it would have; after it the door is open again.
+reset([{ address: "t3", app: "claude-code", status: "idle" }], [], { terminal: "t3" });
+gate = { pasting: 0 }; log = []; sc = cx();
+N.stageMessage(gate, SHEET, "t3", sc, { ...WHO, paste: true, say: said(log) });
+const calls1 = H.calls.length, log2 = [], sc2 = cx();
+A.equal(N.stageMessage(gate, CONF, "t3", sc2, { ...WHO, paste: true, say: said(log2) }), false, "nothing staged while a paste is pending");
+A.deepEqual(log2.map((x) => [x.text, x.r]), [[`Still pasting into ${WHO.where}…`, null]]);
+A.deepEqual(sc2.clip, [], "no clipboard written"); A.equal(sc2.spawned, 0); A.equal(H.calls.length, calls1, "nothing focused");
+await Promise.all(sc.tasks);
+A.deepEqual(log.map((x) => x.r), [null, { pasted: true, ms: 100 }]); A.deepEqual(sc.clip, [STAGED]);
+A.deepEqual(H.calls, [...focusOnly("t3"), PASTE], "one focus, one paste: the first message only");
+const sc3 = cx(), log3 = [];
+A.equal(N.stageMessage(gate, CONF, "t3", sc3, { ...WHO, paste: true, say: said(log3) }), true, "the door is open once the first is decided");
+await Promise.all(sc3.tasks);
+A.deepEqual(sc3.clip, [`${CONF}\n\n`]); A.deepEqual(log3[1].r, { pasted: true, ms: 100 });
+
+// A gate older than PASTE.waitMs + 400 (a task that never reported) lets the next one through; a
+// recent one does not.
+reset([{ address: "t3", app: "claude-code", status: "idle" }], [], { terminal: "t3" });
+gate = { pasting: Date.now() - (N.PASTE.waitMs + 400) - 50 }; log = []; sc = cx();
+A.equal(N.stageMessage(gate, SHEET, "t3", sc, { ...WHO, paste: true, say: said(log) }), true, "a stale gate does not block");
+await Promise.all(sc.tasks);
+A.deepEqual(sc.clip, [STAGED]); A.equal(gate.pasting, 0);
+gate = { pasting: Date.now() - N.PASTE.waitMs }; log = []; sc = cx();
+A.equal(N.stageMessage(gate, SHEET, "t3", sc, { ...WHO, paste: true, say: said(log) }), false, "a gate inside the window blocks");
+A.deepEqual(sc.clip, []); A.equal(log[0].text, `Still pasting into ${WHO.where}…`);
+
+// Known at once (off, blocked, plain, gone): said once, synchronously, with r; no task; the gate clear.
+for (const [why, agents, terms, paste, calls] of [
+  ["off", [{ address: "t3", app: "claude-code", status: "idle" }], [], false, focusOnly("t3")],
+  ["blocked", [{ address: "t3", app: "claude-code", status: "blocked" }], [], true, focusOnly("t3")],
+  ["plain", [], [{ address: "t3", state: "live" }], true, focusOnly("t3")],
+  ["gone", [], [{ address: "t3", state: "finished" }], true, []],
+]) {
+  reset(agents, terms, { terminal: "t3" });
+  gate = { pasting: 0 }; log = []; sc = cx();
+  A.equal(N.stageMessage(gate, SHEET, "t3", sc, { ...WHO, paste, say: said(log) }), true, why);
+  A.equal(log.length, 1, `${why}: said once, at once`); A.equal(sc.spawned, 0, `${why}: no task`);
+  A.deepEqual(log[0].r, { pasted: false, why }); A.equal(log[0].text, ANSWER({ pasted: false, why }), why); A.equal(log[0].cx, sc);
+  A.equal(gate.pasting, 0, `${why}: the gate clear`); A.deepEqual(sc.clip, [STAGED], `${why}: on the clipboard`); A.deepEqual(H.calls, calls, why); A.equal(H.looks, 0);
+}
+
+// The focus never confirmed: twice, the second with why "focus"; nothing pasted; the gate clear.
+reset([{ address: "t3", app: "claude-code", status: "idle" }], [], { terminal: "t1" });
+gate = { pasting: 0 }; log = []; sc = cx();
+N.stageMessage(gate, SHEET, "t3", sc, { ...WHO, paste: true, say: said(log) });
+await Promise.all(sc.tasks);
+A.deepEqual(log.map((x) => x.r), [null, { pasted: false, why: "focus" }]); A.equal(log[1].text, ANSWER({ pasted: false, why: "focus" }));
+A.equal(gate.pasting, 0); A.deepEqual(H.calls, focusOnly("t3"));
+
 // The slice helper still cuts at word boundaries.
 A.equal(N.searchSlice("short"), "short");
 A.equal(N.searchSlice("ab"), "");
@@ -227,4 +317,4 @@ for (const x of ALL) {
 }
 A.ok(ALL.filter((x) => x[1] === "terminal.paste").every((x) => x[2] === null), "terminal.paste takes no arguments");
 
-console.log(`OK: nav, ${checks} checks (clipboard + pane.focus; terminal.paste once and only after the focus is confirmed; a staged message ends with one empty line; no hc keys, no hc send, no find bar, no Enter), 0 failure(s)`);
+console.log(`OK: nav, ${checks} checks (clipboard + pane.focus; terminal.paste once and only after the focus is confirmed; a staged message ends with one empty line; stageMessage: one paste at a time, its words; no hc keys, no hc send, no find bar, no Enter), 0 failure(s)`);

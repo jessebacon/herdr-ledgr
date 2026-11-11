@@ -365,7 +365,7 @@ I am asking Q7 about these pinned passages. They are quotes ledgr kept verbatim 
   A.equal(CF.pinsOverCap(CF.pinsChars(capPins(6, 4000))), null, "24,000 pinned characters: Ask here stages it");
   A.equal(CF.pinsOverCap(CF.pinsChars(capPins(7, 3600))), "the pinned passages are 25,200 characters, over the 24,000 a pins message carries: attach fewer pins", "over: refused");
   A.equal(CF.pinsOverCap(25200, { branch: true }), "the pinned passages are 25,200 characters, over the 24,000 a branch preamble carries: ask here instead, or attach fewer pins", "the branch's wording, from the same function");
-  A.ok(/const over = pinsOverCap\(pinsChars\(pins\)\);\s*if \(over\)[^\n]*return; \}\s*const msg = pinsMessage/.test(panelSrc), "askPinsHere refuses over the cap before it composes or stages");
+  A.ok(/const over = pinsOverCap\(pinsChars\(pins\)\);\s*if \(over\)[^\n]*return; \}\s*const msg = pinsMessage/.test(src0("detail.js")), "askPinsHere refuses over the cap before it composes or stages");
   // The Conclude skeleton and the confluence number a branch's pins as its preamble did: a deleted one keeps its number.
   const skd = CF.pinsConcludeSkeleton([P1, null, P2], { sessionId: SID }).split("\n");
   A.equal(skd[3], "pin 2: (deleted)"); A.ok(skd[4].startsWith("pin 3 (billing-api, turn 40): ")); A.equal(skd.length, 7, "answer, two entries and the deleted line, changes");

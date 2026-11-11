@@ -267,6 +267,10 @@ def main():
     check("instructions: answered or dropped asks go to resolve_asks, by handle, before declaring",
           "resolve_asks" in r.get("instructions", "") and "answers or drops" in r.get("instructions", "")
           and "before declaring anything new" in r.get("instructions", ""), r.get("instructions"))
+    check("instructions: only what the user personally must do; a wait on the agent's own subagents is not an ask",
+          "user personally must do, decide, provide or review" in r.get("instructions", "")
+          and "your own subagents" in r.get("instructions", "") and "\"I need\"" in r.get("instructions", ""),
+          r.get("instructions"))
     check("notifications/initialized: no response", c.silent())
     r = c.req("initialize", {"protocolVersion": "1999-01-01", "capabilities": {}, "clientInfo": {"name": "x"}})["result"]
     check("initialize: an unknown version is answered with the newest legacy one (2025-11-25)", r.get("protocolVersion") == "2025-11-25", r)
@@ -285,6 +289,9 @@ def main():
           all(len(t["description"]) < 700 for t in tl) and all(w in d["description"] for w in
                                                                 ("blocking", "needed", "one line", "verbatim", "only for a choice", "pointer line", "list nothing in prose")),
           [len(t["description"]) for t in tl])
+    check("declare_asks: only what the user personally must do, never a wait on your own subagents",
+          "user personally must do, decide, provide or review" in d["description"]
+          and "your own subagents" in d["description"] and "\"I need\"" in d["description"], d["description"])
     check("open_asks and parked_questions take no parameters",
           all(tool[n]["inputSchema"] == {"type": "object", "additionalProperties": False} for n in ("open_asks", "parked_questions")))
     ra = tool["resolve_asks"]

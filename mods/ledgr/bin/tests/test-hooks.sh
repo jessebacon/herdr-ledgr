@@ -542,6 +542,7 @@ H4=99999999-0000-0000-0000-0000000000e4; H5=99999999-0000-0000-0000-0000000000e5
 hset ledgr true; out=$(rstart "$HM" t80 $H1)
 t "ledgr: SessionStart prints the ledgr wording, instruct_mode ledgr" test "$out" = "$WL" -a "$(imode $H1)" = ledgr
 t "ledgr wording: the pointer line, no prose list, the bullet example" bash -c 'grep -q "ledgr: 3 items for you, 1 blocking" "$1" && grep -q "do not list it in your prose" "$1" && grep -q "^- blocking · decide · " "$1"' _ "$BIN/lib/asks-instruction-ledgr.txt"
+t "both wordings: only what the user personally must do; a wait on your own subagents is not an ask" bash -c 'for f in "$@"; do tr "\n" " " <"$f" | grep -q "user personally must do, decide, provide or review. Something you are waiting on from your own subagents" || exit 1; done' _ "$BIN/lib/asks-instruction-ledgr.txt" "$BIN/lib/asks-instruction-both.txt"
 out=$(rprompt "$HM" t80 $H1 h1 "go"); t "same mode: the next prompt prints nothing" test -z "$out"
 hset both true; out=$(rprompt "$HM" t80 $H1 h2 "go")
 t "live switch to both: the next prompt prints the both wording once" test "$out" = "$WB" -a "$(imode $H1)" = both

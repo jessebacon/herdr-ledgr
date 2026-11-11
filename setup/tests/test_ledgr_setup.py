@@ -277,6 +277,84 @@ def test_handoff():
         shutil.rmtree(root)
 
 
+def test_keep_config_edits():
+    """--yes and an answers file (2026-11-10): a config.json value the settings dialog changed since the last
+    install is kept and named in the summary; an answer changed while config.json was left alone still
+    applies; a flag still wins. The whole cmd_install runs in a scratch home (preflight and the herdr-app
+    checks stubbed; no tests, no MCP, no claude)."""
+    root, ctx, st = scratch()
+    saved = (L.preflight, L.herdr_checks)
+    try:
+        write(os.path.join(ctx.home, "AGENTS.md"), "x\n")
+        write(os.path.join(ctx.home, "keys.json"), '{"global": {}}\n')
+        f = {"hard": [], "warn": [], "claude": None, "security": None, "layouts": [], "active": None, "claude_configs": [],
+             "repo_version": "0.1.0"}
+        L.preflight = lambda ctx, quiet=False: json.loads(json.dumps(f))
+        L.herdr_checks = lambda ctx, mods: True
+        af = os.path.join(root, "answers.json")
+        cfgp = os.path.join(ctx.data, "config.json")
+
+        def install(answers, flags=None):
+            write(af, json.dumps(answers))
+            out = []
+            say = L.say
+            L.say = lambda m="": out.append(m)
+            try:
+                L.cmd_install(ctx, argparse.Namespace(answers=af, save_answers=None, no_tests=True), flags or {})
+            finally:
+                L.say = say
+            return json.loads(read(cfgp)), "\n".join(out)
+
+        ans = {"provider": "anthropic", "api_key": "skip", "threshold": "needed", "asks_handoff": "ledgr", "animations": True,
+               "fold_asks_while_working": False, "mcp": False, "layout": {"name": None, "panel": "skip", "host": "none", "chip": "none"}}
+        cfg, _ = install(ans)
+        ok(cfg["extract"]["threshold"] == "needed", "keep: the first install writes the answers' threshold")
+        state = json.loads(read(ctx.state_file))
+        first = {"threshold": "needed", "asks_handoff": "ledgr", "animations": True, "fold_asks_while_working": False}
+        ok(state.get("config_written") == {"wrote": first, "said": first},
+           f"keep: install-state records what it wrote to config.json and what the answers said ({state.get('config_written')})")
+        # The settings dialog changes the threshold and the closing list; the answers file is unchanged.
+        cfg["extract"]["threshold"] = "blocking"
+        cfg["asks"]["handoff"] = "prose"
+        cfg["instruct_block"] = False
+        write(cfgp, json.dumps(cfg, indent=2) + "\n")
+        st2 = L.State(ctx)
+        cfg, out = install(ans)
+        ok(cfg["extract"]["threshold"] == "blocking", "keep: a second --yes install keeps the threshold the dialog wrote")
+        ok(cfg["asks"]["handoff"] == "prose" and cfg["instruct_block"] is False, "keep: and the closing list (instruct_block with it)")
+        ok("kept your threshold: blocking" in out and "kept your closing list: prose" in out, "keep: the run says what it kept")
+        cw = json.loads(read(ctx.state_file))["config_written"]
+        ok(cw["wrote"]["threshold"] == "blocking" and cw["said"]["threshold"] == "needed", "keep: the kept value is what the install wrote; the answer is what was said")
+        # The same answers file again (the maintainer runs it after every change): the dialog's values stay.
+        cfg, out = install(ans)
+        ok(cfg["extract"]["threshold"] == "blocking" and cfg["asks"]["handoff"] == "prose", "keep: a third run with the same answers does not revert them")
+        # The answers change while config.json stays as the last install wrote it: the answer applies.
+        cfg, out = install({**ans, "threshold": "optional", "animations": False})
+        ok(cfg["extract"]["threshold"] == "optional", "keep: a changed answer with an unchanged config.json still applies")
+        ok(cfg["ui"]["animations"] is False and "kept your threshold" not in out and "kept your animations" not in out,
+           "keep: animations from the changed answer too, neither said kept")
+        ok(cfg["asks"]["handoff"] == "prose" and "kept your closing list: prose" in out, "keep: the closing list the dialog wrote still stays")
+        # A flag wins over a value the dialog changed.
+        cfg["extract"]["threshold"] = "needed"
+        write(cfgp, json.dumps(cfg, indent=2) + "\n")
+        cfg, out = install(ans, {"threshold": "blocking"})
+        ok(cfg["extract"]["threshold"] == "blocking" and "kept your threshold" not in out, "keep: a --threshold flag wins over config.json")
+        # An older state (no config_written): its answers are what it wrote.
+        sd = json.loads(read(ctx.state_file))
+        sd.pop("config_written", None)
+        sd["answers"]["threshold"] = "blocking"
+        write(ctx.state_file, json.dumps(sd))
+        cfg["extract"]["threshold"] = "needed"
+        write(cfgp, json.dumps(cfg, indent=2) + "\n")
+        cfg, out = install({**ans, "threshold": "optional"})
+        ok(cfg["extract"]["threshold"] == "needed" and "kept your threshold: needed" in out, "keep: an older state compares against the answers it recorded")
+        ok(st2 is not None and L.keep_config_edits(L.Ctx(argparse.Namespace(**{**vars(ns(root)), "yes": False})), L.State(ctx), {}, {}) == [],
+           "keep: an interactive run keeps nothing by itself (the current value is its default)")
+    finally:
+        L.preflight, L.herdr_checks = saved
+        shutil.rmtree(root)
+
+
 def test_mcp():
     """The MCP server: `claude mcp add --scope user` per config folder (a fake claude here), and the
     allow entries; idempotent; a declined folder is left alone. Nothing under the real home."""
@@ -356,7 +434,8 @@ def test_mcp():
 
 
 if __name__ == "__main__":
-    for t in (test_dump, test_settings_write, test_mend_newline, test_restore_original, test_retire, test_settings_list, test_handoff, test_mcp):
+    for t in (test_dump, test_settings_write, test_mend_newline, test_restore_original, test_retire, test_settings_list, test_handoff,
+              test_keep_config_edits, test_mcp):
         t()
     print(f"setup: {PASS} passed, {FAIL} failed" + ("" if FAIL else "  OK"))
     sys.exit(1 if FAIL else 0)

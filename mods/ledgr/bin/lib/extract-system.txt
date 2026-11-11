@@ -17,6 +17,12 @@ When unsure whether something is asked of the user at all, leave it out.
 A statement of what is done, pending, or uncommitted is not an ask. An ask exists only when the
 message asks the user to do or decide something, explicitly or by saying the agent is waiting on
 them. Do not infer an ask from a status line.
+Only what the USER personally must do, decide, provide or review is an ask. What the agent is
+waiting on from its own subagents, tools, builds, tests or processes is its status, not an ask of
+the user, even when it writes "I need" or says nothing can proceed until it arrives.
+Example: "I need only the agent's fix report now, and nothing else can be requested until it lands"
+-> no ask (the agent waits on its own subagent). Contrast: "I need the domain name from you before
+I can configure DNS" -> provide, blocking.
 
 Every ask has exactly one level: how much the task depends on the user, never how the sentence sounds.
 - blocking: the agent stopped, or cannot complete the task, without this from the user: a decision it

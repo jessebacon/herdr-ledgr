@@ -4,7 +4,142 @@
 
 First public shape of the mod. Built on Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311.
 
-### Pins (2026-11-07)
+### List and detail dialog, settings, links (2026-11-10)
+
+- Jesse: "when trying to view the side bar entries, I can't interact with the text. what if the
+  sidebar was a bit more simplified list and clicking on an item opened a larger central modal".
+  The cause: a row's text was a plain element, which Herdr cannot select, inside the row head whose
+  click folded the row. Herdr selects text only in a markdown view with `.selectable(true)` or a
+  read-only Editor. Spec: `docs/design/Detail.md`; notes: `docs/build-notes/BUILD-NOTES-detail.md`.
+- The panel is a scan list: one line per ask, question, pin or branch (glyph, handle, one pill, the
+  text's first line, a state word such as "answer ready", "sent at turn 14" or "branch working";
+  `listing.js` `rowModel`). Only Done (on the hovered and the cursor row), Paste answer (an answer is
+  ready) and Promote (a row below the threshold) stay on a row. A click gives the list the keyboard:
+  ↑ ↓, PageUp / PageDown, Home / End move a cursor over every line a click acts on, Enter does what
+  its click does, Space checks a pin, Esc clears. `ledgr.focus-list` (bound to no key) does the same
+  without the pointer; `mod.json` gains no `focusable`, so the host block is no pane stop.
+- A click on a row, or Enter, opens the detail dialog (`detail.js`, props `{view: "detail", session,
+  kind, id, …}`, opened with `openOverlay`; `mod.json` still declares one overlay): centered, 0.6 ×
+  0.75 of the window, the window dimmed, two scrolling columns from 760 px (the item; the message with
+  the passage marked and scrolled into view). Every reading text is a selectable, scrollable markdown
+  view, the person's and pinned text escaped so it shows as stored, with Copy beside it. It holds
+  every action the expanded row had: answering, Defer, Branch… and its manifest, Conclude… and Paste
+  into trunk, a pin's Ask here…, Note, Archive, Delete. One at a time: a second open replaces the
+  first; a sub-row retargets it in place. Esc or a click outside closes it, and nothing typed is
+  lost (drafts flushed, the Conclude text kept in `localStorage` `detail.conclude`).
+- The dialog is its own copy of the mod. `reader.js` `Reader` is the panel's reading and acting half
+  moved out (store.json reading, acts, drafts, `flushPending`, staging, Herdr lookups), extended by
+  `Panel` and by `Detail`, which reads store.json and the turn files itself and never pings or claims
+  the writer. It writes `shared("ledgr.detail")` on open and close, so the panel draws the open row
+  raised, restores its cursor, shows the dialog's last words and takes the keyboard back (30 ms, again
+  at 300 ms). The renderers moved to `views.js`, the pure parts to `listing.js` and `detailing.js`;
+  `panel.js` went from 2,454 to 1,592 lines. No engine file, store, spool event or key changed.
+- One staging door: nav.js `stageIntoPrompt` is called only by nav.js `stageMessage` (one paste at a
+  time, the words of what happened), which only `Reader.stage` calls; neither `panel.js` nor
+  `detail.js` defines `stage`, and copy methods never stage. The dialog stays open until the paste is
+  decided, then closes and leaves the keyboard in the pane; acts that close it (Done, Not needed,
+  Defer, Archive, Delete) write their spool event first. `test_no_keystrokes.py` enforces 11 rules
+  and prints every failure.
+- Probe P1 first, on a throwaway scratch mod and cat-like panes: a dialog survives `pane.focus`,
+  `terminal.paste` lands while it is open (1 ms, no CR or LF), `closeOverlay` from the dialog's own
+  task works, closing cancels the dialog's pending tasks once `close()` resolves (work after a close
+  lives only while `close()` awaits, at most 250 ms; `main.js` now awaits `release`), and the keyboard
+  goes to the focused terminal after a close.
+- Tests: list 242 and detail 609 (new `test_list.mjs`, `test_detail.mjs`, run by the new
+  `test-detail.sh` in `run-all.sh`), nav 364 plus compose 221, no keystrokes 541, store 881, hooks
+  191, mcp 96, installer 69. `herdr-app check` passes. The live check (`Detail.md` 6.5, the parts
+  that need real keys, panes and selection) is not done.
+- `preview.png`, the recipe's look at the panel and `docs/preview-recipe.md` (its `expand-all` step,
+  which now only says where rows open) show the expanded rows; a retake is pending.
+- Asks of the user only. Jesse's panel showed Ask 50 (provide, blocking, found by the extractor)
+  built from "I need only the agent's fix report now, and nothing else can be requested until it
+  lands": an orchestrator waiting on its own subagent. "The agent didn't need something _from me_ it
+  was just stating that it was waiting on something." Both instruction wordings
+  (`asks-instruction-ledgr.txt`, `-both.txt`), the MCP server's `instructions` and the `declare_asks`
+  description now say to declare only what the user personally must do, decide, provide or review:
+  a wait on the agent's own subagents, tools, builds, tests or processes is not an ask, even when it
+  writes "I need". `extract-system.txt` gives the fallback model the same rule, with that sentence as
+  the worked example (no ask) against "I need the domain name from you before I can configure DNS"
+  (provide, blocking); the JSON schema is unchanged. New fixture `subagentwait` (an orchestrator's
+  reply waiting on a fix agent's report, paraphrased, "I need" in it): offline PASS; live, one call,
+  zero asks (2,500 in, 9 out, $0.00025). Hooks 192, mcp 98. After an install, a running session gets
+  the wording at its next SessionStart (resume, clear, compact) and the server's text after `/mcp`.
+- Settings dialog. Jesse, after "this is REALLY good. Where is the 'settings' for this? for example
+  font size, threshold": "build the settings dialog with text scale". `settings.js` (`class Settings
+  extends Reader`, props `{view: "settings", opener, demo}`, `kind: "dialog"`, 0.5 × 0.7) opens from a
+  gear at the right of the panel's header, `ledgr.settings` (the host opens it when no panel is shown)
+  and `ledgr.demo-settings`. Rows, each with its value, a control and one line (`words.js`
+  `SETTING_WORDS`): Text scale (− 120 % + and 100 %), Threshold (the lane head's three words), Who owns
+  the closing list (ledgr / both / prose, writing `instruct_block` as the installer does; running
+  sessions follow at their next prompt), Paste into the prompt, Animations, Fold asks while the agent
+  works, Open the panel on new asks (on / off), Branch depth (0 to 4), and Off spaces (on / off per
+  space Herdr has, by name; an off id Herdr no longer has, by id, with Drop); the footer names
+  `config.json` for everything else. Every click writes at once through `Reader.saveConfig`, now the
+  one writer of `config.json` (`reader.js` `editConfig`, moved from the panel's `saveConfig`, which
+  the lane head's threshold menu and the space switch now share): changes queue so quick clicks never
+  collide, and a write that finds the file changed under it writes nothing, reads it again and says
+  so. One dialog at a time: it writes `shared("ledgr.detail")` like the detail dialog (kind
+  "settings", no id), so whichever is open closes before the other opens, and its closed record puts
+  its last words in the panel's status line. It stages, copies, runs and opens nothing
+  (`test_no_keystrokes.py` rule 12).
+- `ui.textScale` (default 1, 0.8 to 1.6 in steps of 0.05; `config.js`, `ledgr_config.py`): every
+  copy draws with `withScale(theme(), textScaleOf(cfg))`, whose `t.ts(n)` is n times the scale to a
+  half pixel. All 176 `text_size(` calls go through it (panel 68, views 43, detail 29, capture 21,
+  settings 13, host 2), and so do the heights of the rows and buttons that hold a line of text, the
+  row glyph column and the checkboxes; icons keep their size. The writer publishes the scale as
+  `shared("ledgr.ui").textScale` for the host button, the pane chip (ledgr-pane scales its chip only;
+  the header's own text stays Herdr's) and the ⌘J box; the host's and the chip's heights stop at 26 px
+  to stay inside their bars. A change shows at the next render of every copy.
+- Tests: settings 711 (new `test_settings.mjs`, run by `test-detail.sh`: the clamp and step, half
+  pixels, rows and edits, `editConfig` with a stale file, every control through its click, the demo,
+  the panel's gear and one dialog at a time, the panel, detail and settings dialogs drawn at 100 and
+  160 % with every size scaled, and a static scan that every `text_size(` goes through `t.ts(` with `t`
+  in scope), no keystrokes 492 (rule 12). `herdr-app check` passes for ledgr and ledgr-pane; in
+  scratch copies it also rendered the settings dialog (80, 100 and 160 %), the demo panel (100 and
+  160 %), the detail dialog (160 %), the demo host and the box (both at 100 %: they take the scale
+  from the writer's `shared("ledgr.ui")`, which a check has not). Not tried live.
+- Links. Jesse: "the big modal is working GREAT! any chance it could resolve relative links or
+  weblinks?" In the dialog's message (the whole turn, every block) and an ask's text and quote, a web
+  link opens in the browser (`on_link_click` in `views.js` `readable`, `cx.open_url`: http and https
+  only), and a file path becomes a link: `links.js` `findPaths` / `linkify` (pure) rewrite
+  `src/app.js:12`, `./x`, `~/x`, `/abs/x`, `docs/a.md`, `#L12` and a code span that is exactly a path
+  to `https://ledgr.invalid/path/<the path, encoded>[?line=N&col=M]` (never fetched: the handler
+  takes the click), and leave fences, indented code, existing links and URLs alone; the false
+  positives kept out are listed in its header (and/or, 1.5, e.g., Node.js, /btw, github.com/a/b, …).
+  A click (`detail.js` `openLink`) looks for the path as given when absolute or under ~, else in the
+  record's folder (the session's `cwd`; a pin's `source.cwd`; a branch's own session), then in its
+  git toplevel, and opens the first that exists with `links.editor` (new, default `"open"`; also
+  `"zed"`, `"code"` at the line, or a command of your own with `{path}`, `{line}`, `{col}`; a row in
+  the settings dialog, "Open files with"; `config.js`, `ledgr_config.py`). The `open` preset never
+  launches: an app, package, disk image or jar is revealed, a script or a file with no extension opens
+  as text (`open -t`). Found nowhere, the status line names the places it looked; found, it offers
+  Reveal in Finder (`open -R`) and Copy path. `opener.js` holds the mod's reading copies' only process
+  calls (`openPath`, `revealPath`, and `gitToplevel`, which the Branch confirmation's worktree check
+  now uses too), each with a 5 s limit; a custom command naming a shell, an interpreter, a terminal or
+  the file itself is refused. This carves one exception into "no other applications": a link or path
+  the person clicks in the dialog opens in the browser or the chosen editor, never on ledgr's own
+  initiative. Pins, questions, answers and conclusions render verbatim (escaped), so they stay
+  unlinked this round.
+- Tests: links 436 (new `test_links.mjs`, run by `test-detail.sh`: the path corpus and its false
+  positives, `linkify` round trips, `parseLink`, `resolvePath`, `openerArgv` per preset and custom,
+  `opener.js` through a recording `exec`), detail 609 (the handler: a web link, a path from the
+  folder and from the git toplevel with `open` and `zed`, a path found nowhere, Reveal, Copy path, the
+  demo running nothing), settings 643 (the new row), no keystrokes 538 (rule 13: `exec(` only in
+  `opener.js` among the reading copies, in three argv shapes; `detail.js` reaches it only through
+  `openPath`, `revealPath`, `gitToplevel`). `run-all.sh`, `herdr-app check` and the installer's test
+  pass. Not tried live: whether Herdr's markdown autolinks a bare URL, how a relative markdown link
+  reaches `on_link_click`, whether a click in a selectable view fires it, `zed` and `code` on the
+  login shell's PATH, and Herdr's `fs.stat` / `fs.exists` on paths outside home.
+- An independent review of the settings, scale and links found two medium and six low issues, all
+  fixed: the installer no longer reverts what the settings dialog or the threshold menu wrote (it
+  keeps a value config.json changed since the last install and says so); the ⌘J box caps its scale
+  at 125 % and scrolls its middle; the `open` preset judges by where a path really leads and opens
+  byte-code and scripts as text; the custom editor command is checked in every argument, with
+  shell-style quoting in the field; fast stepper clicks are not lost; `linkify` strips trailing `_`
+  and `-`, needs a known root for bare absolute paths, is linear and cached; the overlay's tab bar
+  gets `my-tabs.ledgr-settings` for a hidden panel. Setup 82 checks.
+
+### 4433d65: pins
 
 - A pin is a passage kept verbatim from an agent's reply before any question exists (Jesse: pins
   "should actually live"; Claude Code deletes transcripts after about a month). Pins live in their

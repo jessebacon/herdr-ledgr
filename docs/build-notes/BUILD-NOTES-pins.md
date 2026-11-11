@@ -7,7 +7,9 @@ that is asked in the trunk (pasted, marker `ledgr pins <session> <item>`) or in 
 the fork's preamble). Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311. Spec: `docs/design/Pins.md`, the
 contract; Section 11 of `docs/design/Herdr ledger mod design.md` points to it and lists where the
 build departs. Earlier notes: `BUILD-NOTES-mod.md`, `BUILD-NOTES-hooks.md`, `BUILD-NOTES-phase2.md`,
-`BUILD-NOTES-phase3.md`.
+`BUILD-NOTES-phase3.md`. Since 2026-11-10 a pin's open row, Ask here, Copy and the Conclude skeleton
+live in the detail dialog (`detail.js`, `views.js`), so the `panel.js` line numbers below predate it:
+`BUILD-NOTES-detail.md`.
 
 Jesse, 2026-11-07: while reading a reply he wants to pin statements with no question yet, and later
 ask a larger question with the pins as its context. Pins "should actually live" (he once wrote a whole

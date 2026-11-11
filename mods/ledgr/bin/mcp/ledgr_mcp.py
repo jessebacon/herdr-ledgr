@@ -86,13 +86,15 @@ def _version():
 SERVER_INFO = {"name": "ledgr", "title": "ledgr", "version": _version()}
 
 INSTRUCTIONS = (
-    "ledgr keeps the list of what the user must decide or do beside this conversation. When a reply "
-    "leaves something blocking or needed for the user, call declare_asks once, when the work of the "
-    "reply is done, and end the reply with the pointer line it returns, instead of a closing list or a "
-    "ledgr-asks block. open_asks shows what is already recorded, with handles such as A7; when the user's "
-    "message answers or drops one of them, call resolve_asks with its handle before declaring anything new. "
-    "When a ledgr tool answers off: true, ledgr is off in this space: list what you need from the user in "
-    "your reply instead.")
+    "ledgr keeps the list of what the user must decide or do beside this conversation. When a reply leaves "
+    "something blocking or needed for the user, call declare_asks once, when the work of the reply is done, "
+    "and end the reply with the pointer line it returns, instead of a closing list or a ledgr-asks block. "
+    "Declare only what the user personally must do, decide, provide or review. Something you are waiting on "
+    "from your own subagents, tools, builds, tests or processes is not an ask of the user, even when you "
+    "write \"I need\": say it in prose and declare nothing. open_asks shows what is already recorded, with "
+    "handles such as A7; when the user's message answers or drops one of them, call resolve_asks with its "
+    "handle before declaring anything new. When a ledgr tool answers off: true, ledgr is off in this space: "
+    "list what you need from the user in your reply instead.")
 
 # A session where ledgr is off (spaces.disabled): (the result's note, its text) per tool.
 OFF_WORDS = {
@@ -135,11 +137,13 @@ TOOLS = [
         "title": "Declare asks for the user",
         "description": (
             "Hand what you need from the user to ledgr instead of listing it in your reply. Declare only "
-            "blocking items (you stopped or cannot finish without it) and needed items (you went on, but "
-            "the work is unfinished until the user acts); never suggestions or offers. text: one line. "
-            "quote: the sentence of your reply it comes from, verbatim. options: only for a choice. Call it "
-            "once, when the work of the reply is done; a second call in the same turn replaces the first. "
-            "Then end your reply with the pointer line it returns, and list nothing in prose."),
+            "blocking items (you stopped or cannot finish without it) and needed items (you went on, but the "
+            "work is unfinished until the user acts); never suggestions or offers. Only what the user "
+            "personally must do, decide, provide or review: never a wait on your own subagents, tools, builds "
+            "or tests, even when you write \"I need\". text: one line. quote: the sentence of your reply it "
+            "comes from, verbatim. options: only for a choice. Call it once, when the work of the reply is "
+            "done; a second call in the same turn replaces the first. Then end your reply with the pointer "
+            "line it returns, and list nothing in prose."),
         "inputSchema": {"type": "object", "properties": {"items": {"type": "array", "items": ITEM_SCHEMA,
                                                                     "maxItems": A.MAX_ASKS}},
                         "required": ["items"], "additionalProperties": False},

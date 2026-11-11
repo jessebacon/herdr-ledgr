@@ -18,6 +18,8 @@
 // halo under it fades out over ~0.9 s, natively. The pulse fires on that transition only (the
 // previous chip is kept per pane); shared("ledgr.ui").animations false (ledgr's ui.animations)
 // turns the pulse and the spinner's motion off. No toast, no sound, no periodic timers.
+// shared("ledgr.ui").textScale (ledgr's ui.textScale, 0.8 to 1.6) scales the chip's text, and its height up
+// to CHIP_H so it stays inside the 30 px header; the header's own text (Herdr's pane header) keeps its size.
 // Click: show the ledgr panel on that session (where the panel is: shared("ledgr.ui").panel, from
 // ledgr's config.json ui.panel; default the `panel` column's `panel-body` stack, child `ledgr`).
 // `herdr-app do ledgr-pane.demo-chip:<surfaced|blocking|blocking-working|seen|collecting|off>` draws that chip state on
@@ -51,6 +53,15 @@ function ledgrChip(p) {
   const c = p?.terminal ? shared("ledgr.chips")?.[p.terminal] : null;
   return c && (c.q || c.a || c.p != null) ? c : null;
 }
+
+// ledgr's text scale for the chip (ledgr's config.js textScaleOf and scaleText: a mod cannot import another
+// mod's files): shared("ledgr.ui").textScale clamped to 0.8-1.6, else 1; a size rounded to a half pixel.
+const CHIP_H = 26;
+function chipScale() {
+  const v = Number(shared("ledgr.ui")?.textScale);
+  return Number.isFinite(v) && v > 0 ? Math.min(1.6, Math.max(0.8, v)) : 1;
+}
+const sz = (n, s) => Math.round(n * s * 2) / 2;
 
 // How the asks arrived (the chip's `o`), the words the ledgr panel uses (mods/ledgr/words.js originWords).
 const ORIGIN = { tool: "declared by the agent (tool)", extract_block: "declared by the agent", extract_model: "found by the extractor" };
@@ -114,6 +125,7 @@ export default class Pane extends View {
 
   chip(t, c, pane) {
     const motion = shared("ledgr.ui")?.animations !== false;
+    const z = chipScale();
     const pu = this.pulse && Date.now() - this.pulse.at < 1200 ? this.pulse : null;
     const surfaced = c.st === "surfaced", collecting = c.st === "collecting", blocking = c.st === "blocking" && c.b > 0;
     const pending = c.p != null;
@@ -128,11 +140,11 @@ export default class Pane extends View {
       .flex_none()
       .relative()
       .px(6)
-      .h(18)
+      .h(Math.min(CHIP_H, sz(18, z)))
       .flex()
       .items_center()
       .rounded(5)
-      .text_size(10.5)
+      .text_size(sz(10.5, z))
       .when(blocking, (el) => el.bg(t.blocked + "26").text_color(t.blocked).font_semibold())
       .when(surfaced && !blocking, (el) => el.bg(t.accent + "26").text_color(t.accent).font_semibold())
       .when(collecting, (el) => el.text_color(t.dim))

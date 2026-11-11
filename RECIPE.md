@@ -3,7 +3,8 @@
 A side panel that keeps a two-direction list of asks around one agent conversation. Questions you
 park while reading (⌘J, even while the agent is still streaming) sit in the top lane; the asks the
 agent made of you at the end of each turn (decide, confirm, do, provide, review) sit in the lane below,
-one row each, answerable in place. Every ask has a level: blocking (the agent stopped or cannot finish
+one line each; a click opens one whole in a centered dialog, its text selectable, where it is
+answered. Every ask has a level: blocking (the agent stopped or cannot finish
 without you), needed (the task is not truly done until you act), optional (an offer or suggestion).
 Asks below the threshold are kept in a folded "below threshold" line. A small always-visible ledgr
 button counts what is open and opens the panel; an optional chip in each pane header counts that
@@ -85,9 +86,18 @@ Tell the person all of this before copying anything (the manual's step 1).
   `python3`, `/usr/bin/security find-generic-password` (the key), `/usr/bin/curl` (the call) and,
   at SessionStart and each prompt, `hc get $HC_TERMINAL_ID --json` (read only, killed after 300 ms)
   for the terminal's `herdr.space` label, to know whether ledgr is off in that space.
+- **May launch your browser or an editor, only when you click a link in the detail dialog.** In the
+  dialog's message and an ask's text and quote, a web link you click opens in your browser
+  (`cx.open_url`, http and https only), and a file path you click opens with `links.editor`: by
+  default `open <path>` (the system's default app; an app, package, disk image or jar is only revealed
+  in Finder, `open -R`, and a script or a file with no extension opens as text, `open -t`, never run),
+  or `zed <path>:<line>`, `code -g <path>:<line>`, or a command of your own (a shell, an interpreter or
+  a terminal is refused). Before opening it, ledgr looks for the path in the session's folder, then at
+  its git toplevel (`git -C <cwd> rev-parse --show-toplevel`); Reveal in Finder runs `open -R`. Each
+  has a 5 s limit, all in `mods/ledgr/opener.js`. Nothing opens without your click.
 - **Reads the clipboard and pastes into a prompt.** The capture box reads the clipboard when it opens,
   to offer the copied passage as the question's quote (attached only if it matches the agent's saved
-  turn text or screen) or to pin it with ⌘S (pins mode reads none). The panel writes the clipboard for
+  turn text or screen) or to pin it with ⌘S (pins mode reads none). The panel and the detail dialog write the clipboard for
   Paste answer, Paste answers, Paste into trunk, Ask here (a question with its pins), `/btw`, Copy for
   prompt, a pin's Copy and Go to anchor, and, except for a pin's Copy, focuses the pane
   (`pane.focus`). For the Paste actions and Ask here it then runs Herdr's `terminal.paste` (what ⌘V
@@ -105,7 +115,8 @@ Tell the person all of this before copying anything (the manual's step 1).
 - **Never:** sends keystrokes to a terminal (no `hc keys`, no `hc send`, no find bar; Enter is never
   pressed, and the one paste above is the only text that reaches a prompt;
   `bin/tests/test_no_keystrokes.py` checks the source and allows `terminal.paste` in one function);
-  reaches the network beyond the one extraction provider; contacts any other application; reads files
+  reaches the network beyond the one extraction provider; contacts any other application (except the
+  browser or editor a link you click in the detail dialog opens); reads files
   outside the Herdr home and the Claude config folders you chose (the installer also reads
   `~/.local/bin` wrappers and shell start-up files to find those folders, and `~/.local/state/ledgr/`).
 
@@ -127,7 +138,8 @@ Tell the person all of this before copying anything (the manual's step 1).
     panel follows focus; held, an `accent` pill "held" whose tooltip says "Held on this session; click
     to follow focus"; text only, since the `pin` icon belongs to the PINS lane; it read "pinned" before
     2026-11-07), `turn N` (in `working` colour with "· working" while the agent works), an `off` pill
-    where ledgr is off, and a `demo` pill in demo mode.
+    where ledgr is off, a `demo` pill in demo mode, and at the right a gear (`settings.svg`, 13 px,
+    `dim`; tooltip "Settings: text size, threshold, closing list, …") that opens the settings dialog.
   - The session list's first row is the switch for the focused pane's space: "ledgr off in this
     space" (or "ledgr on in this space", in `accent`) with the space's name small and dim beside it;
     rows of sessions in an off space read "off" instead of "N open".
@@ -151,52 +163,92 @@ Tell the person all of this before copying anything (the manual's step 1).
     "archived (N) ›" at the bottom; with none, "No pins in this session. Select a passage in the
     agent's pane, ⌘J, then ⌘S." The head: chevron, "PINS", a search box ("Search pins, every
     session", a small `search` icon) taking the free width, and "N pins"; while pins are checked, a
-    bar under it reads "3 selected · Ask about these 3 pins… · clear". A row: a 12 px checkbox, the
-    `pin` icon in `accent`, `Pin 4`, badges `unverified`, `clipped`, `archived` (dim); the passage
-    (four lines or 280 characters, then "…"; all of it when open); the note in italics, `muted`; a dim
-    `turn 12 · 3 days ago` (`around turn 12` when approximate); a dim usage line ("used in Question 3",
-    "sent in Question 3 at turn 14", "answered in Question 3 (turn 14)", "answered in Question 5
-    (branch br-q5-1a2b, turn 16)"). Open: "show whole message" (the saved turn with the passage marked,
-    or "That message is no longer saved; the pin keeps the passage."), Ask here… (primary), Branch…,
-    Note, Copy, ⋯ (Go to anchor, Archive), and a dim foot line `Pin 4 · pinned by you · turn 12 ·
-    #<hash>`. Archived rows: Restore, and Delete, which reads "Delete Pin 4? It cannot come back" in
-    `blocked` for 4 s after the first click. While a query is typed the lane shows every session's
-    matches instead: a count ("3 matches", "first 200 of N") with the toggles "archived too" and "this
-    session only", one group per session (agent pill, name, "(this session)", "forgotten", or "open
-    session" in `accent`), compact rows with "add to question" and Copy.
-  - **YOUR QUESTIONS** lane (second): parked questions, newest first. Each row: status glyph,
-    `Question 3`, kind (`question`, `bookmark`), text, and a dim line `turn 14 · re Ask 5 · “quote…”`; a
-    question parked mid-turn reads "parked during turn 17; anchors at end of turn" with a hollow glyph.
-    Badges: `/btw`, `sent at turn 18`, `branched`, and `2 pins` (`accent`) for a question parked with
-    pins, which adds a line "with Pin 4, Pin 2 of billing-api" and, open, one line per pin (the `pin`
-    icon, its name, turn and first words) above its buttons, Ask here first. The lane head carries
-    a quiet `Clear 3` (10.5 px, `dim`) while the session has open or deferred parked questions without a branch; clicked once it
+    bar under it reads "3 selected · Ask about these 3 pins… · clear". A row is one line (26 px): a
+    12 px checkbox (tooltip "add to question"), the `pin` icon (`accent`, `dim` when archived),
+    `Pin 4`, the passage's first line cut with "…", and a state word: its age ("3 days ago"), `unverified`, `used`, `sent`, `answered` (`done`) or
+    `archived`; the tooltip holds the passage's first 300 characters and the note. The rest (the
+    passage whole, the note, the anchor, the usage lines, Ask here…, Branch…, Note, Copy, Go to anchor,
+    Archive; Restore and Delete for an archived pin) is in its dialog (below). While a query is typed
+    the lane shows every session's matches instead: a count ("3 matches", "first 200 of N") with the
+    toggles "archived too" and "this session only", one group per session (agent pill, name, "(this
+    session)", "forgotten", or "open session" in `accent`), and the same one-line pin rows.
+  - **YOUR QUESTIONS** lane (second): parked questions, newest first, then the session's branches. A
+    row is one line: the status glyph (hollow while a question parked mid-turn waits for its anchor),
+    `Question 3`, one pill (`2 pins` in `accent`, `bookmark`, `/btw`), the text's first line (a
+    bookmark: its quote's first line in quotes), and a state word: `parked`, `anchoring`, `sent at
+    turn 18`, `branch working` / `needs you` / `idle` / `concluded`, `rejoining`, `answered`, `done`,
+    `resolved by branch`, `not needed`, `cleared`, `deferred`. A question about an ask hangs indented
+    under it. A branch row: the `git-branch` icon (a spinner while it works), "branch of Question 3",
+    its short id (`br-q3-c51e`) as a dim pill, the question's first line dim, and its live word. The
+    lane head carries a quiet `Clear 3` (10.5 px, `dim`) while the session has open or deferred parked questions without a branch; clicked once it
     reads "Clear 3 questions? 1 branched kept" in `blocked` on a faint `blocked` tint for 4 s, then
-    "Clearing 3…" until the writer has applied it. Cleared rows sit in the closed fold with a dim
-    `cleared` badge.
+    "Clearing 3…" until the writer has applied it. Cleared rows sit in the closed fold reading
+    `cleared`.
   - **ASKED OF YOU** lane (third): folded or open only when you click its head (kept across reloads);
     while the agent works the head says "agent working" in `working`. The head carries the threshold
     control, a quiet `blocking only ▾` / `blocking + needed ▾` / `everything ▾` menu that writes
     `extract.threshold` to `config.json`. Grouped by turn: the newest group and any group holding an
     open blocking ask are open, older groups one line (`turn 12 · 2 asks, 1 open`); your click wins,
-    and a group you folded that still holds a blocker adds `◆ 1 blocking` in `blocked`. Each row:
-    glyph, `Ask 5`, kind, text, `raised again` (in `accent`) for an ask you dismissed that the agent
-    raised again; decide rows show option chips, the
-    recommended one marked "(rec.)". Blocking asks sort first in their group with a `◆` glyph and a
-    `blocking` tag (both `blocked`). Asks below the threshold sit in one folded line at the bottom of
-    their group, `below threshold (N)`: open, each row is dim with a hollow glyph, its level tag and a
-    `promote` pill; they never count. A spinner and "extracting turn N" sit in the lane head while
-    extraction runs; a failed turn shows "asks not extracted for turn N: <error>" with Retry. Under an
+    and a group you folded that still holds a blocker adds `◆ 1 blocking` in `blocked`. Each row is one
+    line: glyph, `Ask 5`, one pill (its kind; `blocking` in `blocked` for a blocking ask), the text's
+    first line, and a state word (`open`, `answer ready`, `raised again` in `accent` for an ask you
+    dismissed that the agent raised again, `answered`, `answered by you`, `closed by agent`, `done`,
+    `not needed`, `deferred`). Blocking asks sort first in their group with a `◆` glyph (`blocked`).
+    Asks below the threshold sit in one folded line at the bottom of their group, `below threshold
+    (N)`: open, each row is dim with a hollow glyph, its level as the pill, the state `below
+    threshold` and a Promote button; they never count. A spinner and "extracting turn N" sit in the
+    lane head while extraction runs; a failed turn shows "asks not extracted for turn N: <error>" with Retry. Under an
     open group with answers typed or picked: **Paste 2 answers into pane t21** and a dim "pasted into
     the prompt, never sent" ("Copy 2 answers for pane t21" and "clipboard + focus the pane; nothing is
     typed" with `ui.pasteIntoPrompt` off).
-  - Clicking a row expands it: the quote in italics (over 300 characters cut with "…"), then "show
-    whole message", which opens the anchoring message as markdown at full height, the paragraph holding
-    the quote marked with a 2 px `accent` bar on an `accent` tint; for asks an Answer field with Paste
-    answer beside it (Copy answer with `ui.pasteIntoPrompt` off); the buttons; a dim line in words:
-    `Ask 13 · found by the extractor · needed · turn 19`.
+  - Row buttons, 18 px, bordered: Done on the row under the pointer and on the cursor row; Paste (Copy
+    with `ui.pasteIntoPrompt` off) in place of the state word once an ask's answer is typed or picked;
+    Promote on an ask below the threshold. A click anywhere else on a row opens its dialog; the row
+    whose dialog is open is drawn `raised`. Once a click has given the list the keyboard, the cursor
+    row is `selected` with a 2 px `accent` left edge.
   - Footer, 30 px: `older than a day (n) ›  deferred (n) ›  closed (n) ›` folds; a status line below for
     the last action's result.
+- **Detail dialog** (props `{view: "detail", …}`; a click or Enter on a row): centered, 0.6 × 0.75 of
+  the window, which dims; `popover` fill inside Herdr's dialog frame. Header, 44 px: glyph, `Ask 15`
+  (13 px semibold), its pill, the facts (`decide · turn 17 · declared by the agent`), the state word,
+  the session (agent pill, name, `pane t21`) and `Esc`. From 760 px wide two columns, each scrolling
+  on its own: the item on the left (46 %), THE MESSAGE on the right (its turn as markdown, the passage
+  marked with a 2 px `accent` bar on an `accent` tint and scrolled into view, `around` / `whole`,
+  Copy); narrower, one column with the message last. Left sections: an ask's TEXT, QUOTE, OPTIONS
+  (chips, the recommended one "(rec.)"), ANSWER (the Answer… field with Paste answer, and "Enter
+  pastes the answers for turn N"), RESULT, QUESTIONS ABOUT IT; a question's TEXT, QUOTE (BOOKMARKED
+  PASSAGE for a bookmark), ABOUT, PINS (N), BRANCHES, the Branch confirmation, RESULT; a pin's PASSAGE
+  (badges `unverified`, `clipped`, `archived`), NOTE, ANCHOR, USED IN ("used in Question 3", "sent in
+  Question 3 at turn 14", "answered in Question 5 (branch br-q5-1a2b, turn 16)") and ITS MESSAGE (or
+  "That message is no longer saved; the pin keeps the passage."); a branch's status, QUESTION,
+  MANIFEST, ASKED IN THIS BRANCH, its confluence or CONCLUSION, the Conclude editor, PREAMBLE, with
+  THE BRANCH'S LAST MESSAGE on the right. A dim foot line in words (`Ask 13 · found by the extractor
+  · needed · turn 19 · #<hash>`, `Pin 4 · pinned by you · turn 12 · #<hash>`). Lines inside it (a
+  question's pins, a branch's question) are one-line rows that open in place. Footer: the status line,
+  the buttons (primary, Done, Defer ▾, the kind's own, ⋯ for the rest; an archived pin's Restore and
+  Delete, which reads "Delete Pin 4? It cannot come back" in `blocked` for 4 s), and key hints `Esc
+  close · Tab next field · Enter paste the turn's answers`. Every text meant for reading is
+  selectable, the person's and pinned text exactly as stored, with Copy beside the text, the quote,
+  the passage and the message. While a paste is pending or a closing act is written, the body and the
+  buttons dim. An item no longer in the ledger reads "This is no longer in the ledger…" with Close.
+  (Described from the code on 2026-11-10; the preview retake checks it against the live look.)
+- **Settings dialog** (props `{view: "settings", opener, demo}`; the header's gear or `ledgr.settings`):
+  centered, 0.5 × 0.7 of the window, `popover` fill. Header, 44 px: the gear in `accent`, "ledgr
+  settings" (13 px semibold), a `demo` pill in the demo, `Esc`. One scrolling column of rows, each a
+  semibold label with its control at the right (wrapping under it when narrow) and one dim line in
+  words below: Text scale (`−` `120 %` `+` and a `100 %` reset), Threshold (`blocking only`, `blocking
+  + needed`, `everything`, the chosen one in `accent`), Who owns the closing list (`ledgr`, `both`,
+  `prose`), Paste into the prompt, Animations, Fold asks while the agent works, Open the panel on new
+  asks (`on` / `off` each), Branch depth (`−` `2` `+`, 0 to 4, "0 (off)"), and Off spaces: one line
+  per Herdr space by name ("this space" beside the focused pane's) with `on` / `off`, then an off id
+  Herdr no longer has (`spdead000000… (no longer in Herdr)`) with Drop. Footer: the status line (what
+  the last click saved, or why not), then "~/.config/herdr-app/ledgr-data/config.json: edit anything
+  else there; it applies within a second." and an `Esc close` hint.
+- **Text scale** (`ui.textScale`, 0.8 to 1.6, default 1): every text size above is its size times the
+  scale, to a half pixel (the panel, both dialogs, the box, the host button, the chip), and so are the
+  heights of one-line rows and buttons, the row glyph column and the checkboxes; icons keep their size.
+  The host button and the chip stop growing at 26 px so they stay inside their bars; the pane header's
+  own name and folder keep Herdr's size.
 - **Capture box** (⌘J): a popup at the top of the window, 600 × 320, no dimming, so the stream stays
   visible. Title "Park a question", then `t21 · <name> · turn N (working)` and the agent pill; the
   question field (placeholder "Park a question about what you are reading… (⌘S pins the passage;
@@ -262,6 +314,21 @@ Tell the person all of this before copying anything (the manual's step 1).
   joins at its next prompt or turn end; a Claude Code with its own `CLAUDE_CONFIG_DIR` needs the hook
   entries in that folder's settings.json) instead of showing a session from elsewhere; a shell in the
   same space keeps the last session.
+- The list and the dialog. A click on a row, or Enter on the cursor row, opens its dialog; one dialog
+  at a time (opening another closes the first; a line inside it opens that item in place). A click
+  gives the list the keyboard: ↑ ↓ (one), PageUp / PageDown (eight), Home / End move the cursor over
+  every row, lane head and fold line, scrolling only as far as needed; Enter does what a click there
+  does; Space checks a pin; Esc clears the cursor. ↑ ↓ also work from the pins search box, where Enter
+  opens the cursor's pin, else the first result. `ledgr.focus-list` (no key bound) gives the list the
+  keyboard without the pointer. The dialog takes the keyboard: Esc or a click outside closes it; Tab
+  and Shift-Tab move between its fields; Enter in the answer pastes the turn's answers, in a note
+  saves it. Its text is selected with the pointer and copied with ⌘C, or with its Copy buttons. When
+  it closes, the list keeps its place: the cursor returns to that row, the dialog's last words show
+  in the status line, an answer typed there shows on the row (Paste), and the keyboard returns to the
+  list after Esc or a closing act (Done, Not needed, Defer, Archive, Delete, each written to the spool
+  before the dialog closes), stays in the pane after a paste, Go to anchor or Focus, and stays where
+  you clicked after a click outside. Answers typed in the dialog are posted when it closes; a Conclude
+  text being edited is kept for a day and offered back.
 - ⌘J opens the capture box over a streaming agent; the box takes the keyboard. Enter parks; Enter on an
   empty question with a quote parks a bookmark; Enter with nothing closes. ⌘Enter parks and puts
   `/btw About "<quote>": <question>` on the clipboard, then focuses the agent's pane. Esc cancels. Tab
@@ -279,8 +346,8 @@ Tell the person all of this before copying anything (the manual's step 1).
 - Asking about pins: check pins (any session, 12 at most) and Ask about these…, or Ask here… /
   Branch… on one pin (or on the selection it belongs to). The box opens in pins mode; Enter with a
   question parks it with `request.pins` (no text: "Type the question: the pins are its context.";
-  ⌘Enter and ⌘S only say why not). From Ask here… the panel then opens the question and says Ask here
-  pastes it; from Branch… it opens the Branch confirmation. A question with pins has **Ask here**
+  ⌘Enter and ⌘S only say why not). From Ask here… the panel then opens the question's dialog and says
+  Ask here pastes it; from Branch… the dialog opens on its Branch confirmation. A question with pins has **Ask here**
   (Copy to ask here with `ui.pasteIntoPrompt` off): it pastes `ledgr pins <session> <item>`, the
   question, one sentence, each pin as "Pin i · <where it came from>[ · my note: …]" and its lines
   quoted with `> ` (another session's pin adds "you did not write this in this conversation"), and a
@@ -297,12 +364,13 @@ Tell the person all of this before copying anything (the manual's step 1).
   `answer:`, then per pin its first 100 characters and `clarification:`, then the branch's last
   reply; the confluence names the pins in one added line, and once it lands each pin reads "answered
   in Question 5 (branch br-q5-…, turn N)".
-- Row actions: **Done**, **Defer ▾** (tomorrow, in a week, next session), the row's own step (Promote,
-  Branch… on a question, Paste confluence again, Reopen), and **⋯** holding **Not needed**, Ask about
-  this, Copy for prompt (`[Q3] <question>`), Stage /btw, Call off, and Go to anchor (opens the row on
-  its whole message with the passage marked, focuses the pane, puts a 20-40 character slice of the
-  quote on the clipboard, and says how to search for it: in Claude, ctrl+o for the transcript, then
-  `/`, ⌘V, Enter; it presses no keys itself). A session whose terminal is gone offers **Resume
+- The dialog's actions: **Done**, **Defer ▾** (tomorrow, in a week, next session), the item's own step
+  (Promote, Branch… on a question, Paste confluence again, Reopen), and **⋯** holding **Not needed**,
+  Ask about this, Copy for prompt (`[Q3] <question>`), Stage /btw, Call off, and Go to anchor
+  (switches the dialog's message to whole with the passage marked, focuses the pane, puts a 20-40
+  character slice of the quote on the clipboard, says how to search for it: in Claude, ctrl+o for the
+  transcript, then `/`, ⌘V, Enter; and closes the dialog; it presses no keys itself). Done, Not needed,
+  Defer, Archive and Delete close the dialog; on the list row only Done, Paste answer and Promote. A session whose terminal is gone offers **Resume
   session…** (`claude --resume` in a new pane) or **Transcript gone**. "Paste answers" (a turn's) and
   "Paste answer" (one ask's) build `ledgr answers <session id>`, `Answers to your asks from turn N:`,
   then `A5: …` lines and paste them into that session's prompt (below); when that prompt is sent, the
@@ -311,7 +379,7 @@ Tell the person all of this before copying anything (the manual's step 1).
   ask closes by itself when that turn's asks arrive, unless the reply raised it again ("answered by
   you at turn N"); with the MCP server the agent closes the asks your message answered or dropped
   (`resolve_asks`, "closed by the agent at turn N"). Done stays your override, and Reopen undoes either.
-- Branch… on a parked question: a confirmation shows the context manifest (what the fork knows and does
+- Branch… on a parked question (in its dialog): a confirmation shows the context manifest (what the fork knows and does
   not know) and its placement; Launch starts the fork beside the trunk. Conclude… opens an editor
   prefilled with the branch's `ledgr-conclusion` block; Paste into trunk stages `ledgr confluence
   <branch> <item>` + the question + "Conclusion:" + your text + a closing line in your voice, pastes
@@ -325,7 +393,10 @@ Tell the person all of this before copying anything (the manual's step 1).
   pasted into the prompt in pane t3, not sent: add a word of your own, such as “My answer to A2:”,
   then press Enter." Nothing is pasted when the target is not live, runs no agent, or waits on its
   own prompt (a permission menu), or when the focus does not arrive in time; the status line says so
-  and how to paste with ⌘V. A second click while a paste is pending is ignored. A paste joins a draft
+  and how to paste with ⌘V. A second click while a paste is pending stages nothing ("Still pasting
+  into …"). From the dialog, the dialog stays open, dimmed, until the paste is decided, then closes
+  with the keyboard in that pane (pasted, or on the clipboard with the pane focused); when nothing was
+  focused it stays open and says what to do. A paste joins a draft
   already in the prompt. With the switch off the buttons read Copy answers, Copy answer, Send to trunk,
   Copy confluence again and Copy to ask here, and the person types a lead-in, then ⌘V, Enter.
   Either way the message ends with one empty line (marker line still first), so two pastes into one prompt stay apart; the
@@ -345,6 +416,37 @@ Tell the person all of this before copying anything (the manual's step 1).
   off state. Items are kept, hidden, and return when the space is on again. A space the hooks cannot
   name (no label, no `hc`) counts as on; a lookup that fails or takes over 300 ms keeps the space
   recorded before.
+- Settings: every click in the settings dialog is written to `config.json` at once and shows at once
+  (the dialog redraws at a new text scale as it is clicked). One writer for the mod: `reader.js`
+  `editConfig` reads the file, changes the one key (`ui.textScale`, `extract.threshold`,
+  `asks.handoff` with `instruct_block` as the installer writes it, `ui.pasteIntoPrompt`,
+  `ui.animations`, `ui.foldAsksWhileWorking`, `surface.openPanelOnAsks`, `branch.maxDepth`,
+  `links.editor`, `spaces.disabled`), keeps every other key as it was, and writes it back only if the file still holds
+  what it read (Herdr's `writeTextFile` compare-and-swap); a missing file starts from the defaults.
+  Clicks queue, so quick ones never collide; a write that finds the file changed (the hooks creating
+  it, another copy, an editor) writes nothing, reads the file again (the dialog shows what is there)
+  and says "… not saved: config.json changed while it was being saved …; try once more". The lane
+  head's threshold menu and the session menu's space switch go through the same writer. Every copy
+  follows the file within a second (the writer republishes the chips, the threshold and
+  `shared("ledgr.ui")`; the panel and the dialogs read it again). A running session gets a new closing
+  list wording at its next prompt. The dialog stages, copies, runs and opens nothing. It is one dialog
+  at a time with the detail dialog (opening either closes the other); Esc or a click outside closes it,
+  writing any click still queued first, and the panel's status line then shows its last words. The
+  demo (`ledgr.demo-settings`) shows the defaults and two sample spaces and saves nothing.
+- Links in the detail dialog (2026-11-10). In the agent's message and an ask's text and quote, a web
+  link opens in the browser on a click, and a file path the agent wrote is a link too: `src/app.js:12`,
+  `./x`, `~/x`, `/etc/hosts`, `docs/a.md`, `foo.py#L12`, or a code span that is exactly a path
+  (`links.js` `linkify` rewrites each to `https://ledgr.invalid/path/<the path>?line=N`, an address
+  that leads nowhere, and the dialog's `on_link_click` takes the click). Fenced and indented code,
+  existing links and URLs are left as written; so is prose that only looks like a path ("and/or",
+  "1.5", "e.g.", "Node.js", `/btw`, `github.com/x/y`). A click looks for the path as given (absolute,
+  or under ~), else in the record's folder (the session's; a pin's own; a branch's own session's),
+  then at that folder's git toplevel, and opens the first that exists with `links.editor` (`open` by
+  default; the settings dialog's "Open files with" sets `zed`, `code` or a command of your own with
+  `{path}`, `{line}`, `{col}`). The status line says what opened, or which places were looked in;
+  once a path is found, Reveal in Finder and Copy path sit beside it. The dialog stays open. The
+  person's words, pins, answers and conclusions are shown exactly as stored, so their paths are not
+  links. The demo opens web links and says where it would look for a path.
 
 ## Built from
 
@@ -358,10 +460,19 @@ Tell the person all of this before copying anything (the manual's step 1).
   `floating` entry of the tab block, edge `bottom`, align `end`). Optional: the tab block's pane header
   `content.mod` set to `ledgr-pane`. Exact pieces: `setup/layout-blocks.json`.
 - **`mods/ledgr/`**: `mod.json` (`place: none`, popup overlay at top, offset 40, 600 × 320, `version`);
-  `main.js` routes on props (`view: "host"` → `host.js`; `view: "panel"` → `panel.js`; an `overlay` or
-  `view: "capture"` → `capture.js`); `writer.js` (the single writer); `store.js`, `spool.js`, `nav.js`,
+  `main.js` routes on props (`view: "host"` → `host.js`; `view: "detail"` → `detail.js` and `view:
+  "settings"` → `settings.js`, tested before the capture box; `view: "panel"` → `panel.js`; an
+  `overlay` or `view: "capture"` → `capture.js`); `reader.js` (the `Reader` the panel and both dialogs
+  extend: reading `store.json`, acts, drafts, staging, and `editConfig` / `saveConfig`, the one writer
+  of `config.json`), `settings.js` (the settings dialog: its rows, `editFor`, `spaceRows`),
+  `listing.js` (pure: a list row's model and the cursor), `detail.js` (the dialog),
+  `views.js` (its renderers), `detailing.js` (pure: its props and overlay spec and the settings
+  dialog's, verbatim text, the close rules), `links.js` (pure: the paths in a message, `linkify`,
+  `parseLink`, where a path is looked for, `links.editor` and the argv that opens it), `opener.js`
+  (the reading copies' only process calls: `openPath`, `revealPath`, `gitToplevel`, each 5 s);
+  `writer.js` (the single writer); `store.js`, `spool.js`, `nav.js`,
   `config.js` (defaults, paths, where the panel lives, `liveHome`, `LIMITS` with the five pin
-  limits), `branch.js`, `confluence.js` (the composers, the pins message among them, and `pinText`,
+  limits, the text scale: `TEXT_SCALE`, `textScaleOf`, `withScale`), `branch.js`, `confluence.js` (the composers, the pins message among them, and `pinText`,
   the one normaliser of a pinned passage), `pinning.js` (pure: what ⌘S pins and its anchor, the box
   key `PIN_KEY`; not an engine file), `words.js`, `adapters.js` (reads each
   `bin/adapters/<name>/adapter.json` capability manifest for the session menu's "declares asks / extractor only / no asks"), `fixtures.js` (demo), `ledgr.svg`;
@@ -370,6 +481,26 @@ Tell the person all of this before copying anything (the manual's step 1).
   the block parser, the extractor and its providers, `mcp/ledgr_mcp.py` (the stdio MCP server:
   `declare_asks`, `resolve_asks`, `open_asks`, `parked_questions`; JSON-RPC over stdin and stdout,
   tools only inside a Herdr terminal: `HC_TERMINAL_ID`, or `LEDGR_TERMINAL`), the offline tests.
+- **Detail dialog**: `openOverlay({mod: "ledgr", kind: "dialog", width: 0.6, height: 0.75, props:
+  {view: "detail", session, kind, id, open, sel, opener, demo}})` (`detailing.js` `detailSpec`;
+  `mod.json` keeps its one overlay, the capture box). Its own copy of the mod: it reads `store.json` and
+  the turn files, posts the same spool events as the panel did, never pings or claims the writer, and
+  writes only `shared("ledgr.detail")` `{open, closed}`, which the panel reads to raise the open row
+  and, on close, to restore its cursor, flash, typed answers and keyboard. Staging has one door:
+  `nav.js` `stageIntoPrompt` ← `nav.js` `stageMessage` ← `reader.js` `Reader.stage` ← the staging
+  methods (`bin/tests/test_no_keystrokes.py`, 11 rules; rule 13: `exec(` only in `opener.js` among the
+  reading copies, reached from `detail.js` only through `openPath`, `revealPath`, `gitToplevel`).
+  Links: `TextView.markdown(…).on_link_click` in `views.js` `readable`, `detail.js` `openLink`. Spec
+  `docs/design/Detail.md`; notes `docs/build-notes/BUILD-NOTES-detail.md`.
+- **Settings dialog**: `openOverlay({mod: "ledgr", kind: "dialog", width: 0.5, height: 0.7, props:
+  {view: "settings", opener, demo}})` (`detailing.js` `settingsSpec`), from the panel (an open detail
+  dialog closed first) or, with no panel shown, from the host holding the writer. A third reading
+  copy on `Reader`: it reads `config.json` (never `store.json`), writes it only through
+  `Reader.saveConfig` → `reader.js` `editConfig` (compare-and-swap, queued), and writes
+  `shared("ledgr.detail")` like the detail dialog (kind "settings", no id), so the panel's
+  `closeDetail` closes whichever dialog is open. `bin/tests/test_no_keystrokes.py` rule 12: it stages,
+  copies, runs and opens nothing. Every copy's theme is `withScale(theme(), textScaleOf(cfg))`; the
+  writer publishes `ui.textScale` in `shared("ledgr.ui")` for the host, the chip and the box.
 - **Writer election**: only the holder of `shared("ledgr.writer")` `{id, by, at}` writes
   `ledgr-data/store.json`. The host block runs a writer (role `host`); a mod that imports an engine
   copy from its own `ledgr/` folder runs one under its own name; the panel runs one only as a fallback
@@ -390,16 +521,18 @@ Tell the person all of this before copying anything (the manual's step 1).
   the marker is there (`ledgr_map.prompt_refs`). Spec `docs/design/Pins.md`; notes
   `docs/build-notes/BUILD-NOTES-pins.md`.
 - **Shipped mods used**: `workspace-chrome` icons (`spinner.svg`, `pin.svg` for the PINS lane,
-  `search.svg` for its search box, chevrons),
+  `search.svg` for its search box, `settings.svg` for the gear, chevrons),
   the `worktree` dialog (Branch's "isolate in a worktree"), and `pane` (what `ledgr-pane` clones).
 - **herdr**: `watchFolder`, `readTextFile`, `writeTextFile`, `fs/promises`, `shared`/`setShared`
   (`ledgr.writer`, `ledgr.ping`, `ledgr.chips` (`a` counts at or above the threshold, `b` the blocking
-  ones, `w` the agent working), `ledgr.focus`, `ledgr.ui` `{animations, panel, off}`), `focused`
+  ones, `w` the agent working), `ledgr.focus`, `ledgr.ui` `{animations, panel, off, textScale}`, `ledgr.detail`), `focused`
   (its `space` too), `agents` (their `space`), `panes`, `terminals` (the `herdr.space` label),
   `spaces` (a space's name for the switch), `layout`, `placement`, `run` (`pane.focus`, `layout.select`,
   `layout.show`, `layout.hide`, `mod.open`, `terminal.keep`, `terminal.peek`; `terminal.paste` in
-  `nav.js` `stageIntoPrompt` only), `openOverlay`, `closeOverlay`, `nextCommand`, `hc`, `exec`;
-  `cx.read_from_clipboard`, `cx.write_to_clipboard`.
+  `nav.js` `stageIntoPrompt` only), `openOverlay` (the capture box, the detail and settings dialogs),
+  `closeOverlay`, `nextCommand`, `hc`, `exec`; `cx.read_from_clipboard`, `cx.write_to_clipboard`,
+  `cx.focus_handle`, `cx.open_url` (a web link clicked in the dialog), `ScrollHandle`,
+  `TextView.markdown(…).selectable(true)` and its `on_link_click`.
 - **Data**, `<Herdr home>/ledgr-data/`: `store.json` (written only by the writer; items, sessions,
   branches and the `pins` map), `spool/` (one JSON
   event per file), `terminals/<t>.json` (identity map, with the terminal's `space`),
@@ -407,7 +540,8 @@ Tell the person all of this before copying anything (the manual's step 1).
   `sessions/<sid>/decisions.md`, `turns/<sid>/<n>.md`, `mcp/<sid>/<turn>.json` (tool declarations),
   `snapshot.json`, `archive/`, `log/`, `tmp/`, `config.json` (`extract.provider`, `model`,
   `base_url`, `mode`, `threshold`; `asks.handoff`, `instruct_block`, `instruct_reinject`;
-  `ui.animations`, `ui.foldAsksWhileWorking`, `ui.pasteIntoPrompt`, `ui.panel`; `spaces.disabled`;
+  `ui.animations`, `ui.foldAsksWhileWorking`, `ui.pasteIntoPrompt`, `ui.textScale`, `ui.panel`; `spaces.disabled`;
+  `links.editor`;
   the full list with defaults is in the README's Configuration table).
 - **Install.** Both paths end in the same files:
   - `./install.sh` asks each question with its reason (defaults in brackets are what is installed
@@ -450,20 +584,47 @@ Tell the person all of this before copying anything (the manual's step 1).
   can hide the ledgr panel. The host button and ⌘⇧J bring it back.
 - Saving any file under `mods/ledgr/` (including `bin/`) reloads every ledgr copy; the hooks keep their
   bytecode under `ledgr-data/.pycache` for that reason.
-- Panel text wraps by itself. Never cap a text box with `max_h` plus `overflow_hidden`: the default line
+- Dialog text wraps by itself (list rows are one line, cut with "…"). Never cap a text box with `max_h` plus `overflow_hidden`: the default line
   height is about 1.6, so a 34 px cap cut a 12.5 px ask inside its second line. Preview boxes that must
   stay short scroll instead. For shots (`docs/preview-recipe.md` stages `preview.png` with them):
-  `ledgr.fold-mine`, `ledgr.fold-asks`, `ledgr.expand-all`, `ledgr.collapse-all` (rows, boxes and the note line),
+  `ledgr.fold-mine`, `ledgr.fold-asks`, `ledgr.collapse-all` (closes the open dialog; `expand-all` and
+  `expand-branches` are gone, rows open in the dialog), `ledgr.open:<handle>` (the dialog on A3, Q2,
+  P4 or a branch's hc name), `ledgr.cursor:<handle>`,
+  `ledgr.list-key:<up|down|pageup|pagedown|home|end|enter|space|escape>`, `ledgr.focus-list`,
+  `ledgr.demo-detail[:<handle>]` (the demo, then the dialog on that item, A15 by default), the dialog's
+  `ledgr.detail:close`, `detail:done`, `detail:whole`, `detail:pick:<n>`, `detail:answer:<text>`,
+  `ledgr.settings` and `ledgr.demo-settings` (the settings dialog; the demo saves nothing), its
+  `ledgr.settings:close` and `ledgr.settings:scale:<up|down|reset|0.8…1.6>`,
   `ledgr.hide-branch:<hc name>` (demo only),
   `ledgr.pick:<handle>:<n>`, `ledgr.copy-answer:<handle>`, `ledgr.session:<terminal>`,
   `ledgr.below-threshold`, `ledgr.act:<handle>:<resolve|dismiss|reopen|promote>`,
-  `ledgr.whole:<handle>`, `ledgr.menu:<handle>:<defer|more>` / `menu:threshold` / `menu:off`,
+  `ledgr.whole:<handle>` and `ledgr.menu:<handle>:<defer|more>` (both open the dialog in that state) /
+  `menu:threshold` / `menu:off`,
   `ledgr.threshold:<level>`, `ledgr.space:<off|on|toggle>` (the focused pane's space; in the demo it
   only draws the off state), `ledgr.clear-questions` (a click on Clear N: twice to clear), for pins
   `ledgr.fold-pins`, `ledgr.pins-search:<text>`, `ledgr.pin-select:<P handle>`, `ledgr.ask-pins`,
   `ledgr.ask-here:<Q handle>`, `ledgr.pin-note:<P handle>:<text>`, `ledgr.pin-archive:<P handle>`,
   `ledgr.pin-restore:<P handle>` (the shown session), in the demo
   `ledgr.demo-ask:<level>` and `ledgr.demo-answer:<handle>`, and `ledgr-pane.demo-chip:<state|off>`.
+- One dialog at a time, and every command reaches every shown copy, the dialog included: each is
+  handled by one copy. The dialog takes its own (`detail:*`, `launch-branch`, `send-to-trunk`, …) only
+  while `ledgr.detail` names it as open; the panel leaves `go:`, `whole:`, `pick:`, `copy-answer:`
+  and the Phase 3 commands to a dialog already open on that item. Tab and Shift-Tab (`mod:ledgr`)
+  reach the dialog too; it takes them only while it or one of its fields has the keyboard, so a Tab in
+  a capture box opened on top is not taken.
+- Closing an overlay cancels its copy's tasks once `close()` resolves (Probe P1, 2026-11-10; work
+  survives only while `close()` awaits, at most 250 ms). So the dialog stages while open and closes
+  only once the paste is decided, an act that closes it writes its spool event first, and `main.js`
+  `close` awaits `release` (the closed record, then every unwritten event and draft).
+- The list's keyboard needs a click, or `ledgr.focus-list`: `mod.json` has no `focusable`, since one
+  `mod.json` serves the panel, the host block and the dialogs, and a focusable host would be a pane
+  stop with nothing to do. After a dialog closes, Herdr gives the keyboard to the focused terminal;
+  the panel takes it back (30 ms, again at 300 ms) when the dialog closed by Esc or an act.
+- A selection cannot run across the message's three blocks (before, the passage, after); the Copy
+  beside the message copies the turn whole.
+- The live check of the list and the dialog (`docs/design/Detail.md` 6.5: drag-select and ⌘C in a
+  dialog, Esc against a click outside, where the keyboard goes after a close, ⌘J over an open dialog)
+  has not been done.
 - The box's pin key is ⌘S, in the box's own section (`mod:ledgr`). Pick an in-box key no Herdr
   section binds: the first one shared its chord with Herdr's global picker (`mod.open:picker`) and
   was in conflict with it in the live check (2026-11-07), and ⌘⇧P is Herdr's palette. `cmd-s` is
@@ -478,8 +639,8 @@ Tell the person all of this before copying anything (the manual's step 1).
   marks `clipped`), a question carries at most 12 pins (the 13th check is refused), and a branch is
   refused over 24,000 pinned characters, because the preamble is one argv element and neither the
   `hc run` nor the worktree dialog's limit has been measured. Search shows 200 at most ("first 200 of
-  N"). The hooks keep the newest 50 turns per session, so an old pin's "show whole message" often
-  says the message is gone; the pin keeps the passage.
+  N"). The hooks keep the newest 50 turns per session, so an old pin's dialog often says its
+  message is gone; the pin keeps the passage.
 - A pin holds the text fullscreen Claude copies (markdown marks dropped), not the saved markdown. A
   screen pin whose turn is interrupted, or taken in a session without hooks, keeps the turn the box
   recorded and is never re-anchored.
@@ -518,11 +679,22 @@ Tell the person all of this before copying anything (the manual's step 1).
 - `herdr-app do ledgr.demo` (panel shown) draws the three lanes with every status (PINS with Pin 1
   and Pin 2, Question 9 with "2 pins"); turn 17 shows Ask 6 ("Run
   the load test after tonight's deploy") first with `◆` and `blocking`, and `below threshold (2)` (A13,
-  A14) folded at the bottom; the long cases (A10-A12, Q8) wrap in full at 280 and 360 px.
-- In the demo, `ledgr.session:t27`, then `ledgr.whole:A1`, opens the 1,511-word message at full
-  height; the list scrolls to its last line ("LAST LINE OF THE 1,500-WORD MESSAGE").
+  A14) folded at the bottom; every row is one line at 280 and 360 px (nothing wraps; Done and Paste fit),
+  and the long cases (A10-A12, Q8) show whole in their dialogs.
+- In the demo, `ledgr.session:t27`, then `ledgr.whole:A1`, opens Ask 1's dialog on the whole
+  1,511-word message; its message column scrolls to the last line ("LAST LINE OF THE 1,500-WORD
+  MESSAGE").
+- `herdr-app do ledgr.demo-detail` opens the dialog on Ask 15, centered at about 60 % × 75 %, the
+  passage marked in THE MESSAGE; `demo-detail:Q3`, `:Q9`, `:P2`, `:br-q3-7c1e` and `:Q5` each draw
+  their sections, in two columns and, in a narrow window, one; Esc closes it and the cursor is on that
+  row.
 - Editing `extract.threshold` in `ledgr-data/config.json`, or choosing on the lane head's menu, changes
   the counts and the lanes within a couple of seconds, with no restart.
+- The header's gear opens the settings dialog (about 50 % × 70 %, an open detail dialog closed first);
+  `+` on Text scale redraws the dialog, the panel, the host button and the chips larger within a
+  second, and `config.json` holds `ui.textScale` 1.05 with every other key as it was; Esc closes it and
+  the panel's status line says what was saved. `herdr-app do ledgr.demo-settings` shows two sample
+  spaces and a stale id with Drop, and saves nothing.
 - `./install.sh --check` reports the three hooks registered, a writer holding the role and the Keychain
   item resolving; when the MCP server was chosen, `ledgr` registered (user scope) and the four allow
   entries present for each chosen config folder.
@@ -532,3 +704,6 @@ Tell the person all of this before copying anything (the manual's step 1).
   "unverified", and no other Herdr action ran); Ask about it, then Ask here pastes a message whose first
   line is `ledgr pins <session> <item>`, and once sent `hook.log` has `pins_asked` and the pin reads
   "answered in Question N (turn M)" (the full walk-through: `docs/design/Pins.md` 8.4).
+- In a throwaway session, the live check of `docs/design/Detail.md` 6.5 passes: a sentence
+  drag-selected in the dialog copies with ⌘C, Paste answer leaves the sheet in the prompt unsent with
+  the keyboard in that pane, and ↓, Enter and Esc work on the list.
