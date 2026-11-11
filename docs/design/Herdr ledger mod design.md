@@ -1305,3 +1305,9 @@ Where the build departs from `Detail.md` (the code wins):
 | Tests (Detail 6.2, 6.3) | `test_detail.mjs` also renders `detail.js` with stub gpui modules and walks its flows; `test-nav.sh` copies every module; `test_no_keystrokes.py` prints every failure | |
 
 Status on 2026-11-10: built, uncommitted, after Probe P1 (a dialog survives `pane.focus`; `terminal.paste` lands while it is open; closing cancels its tasks once `close()` resolves; the keyboard then goes to the focused terminal). Offline tests pass (list 229, detail 505, nav 364 plus compose 221, no keystrokes 458, store 881, hooks 191, mcp 96, installer 69); `herdr-app check` passes. The manual live check (`Detail.md` 6.5) is not done; `preview.png` needs a retake.
+
+### Whole-turn text (2026-11-10)
+
+| Topic | Built | Why |
+|---|---|---|
+| Turn text (4.2) | `turns/<sid>/<turn>.md` holds every main-thread assistant text block since the person's prompt, joined by a blank line, with `last_assistant_message` as its last part (`last_assistant.whole_turn`, read backward from the transcript's end at Stop part A); `last_assistant_message` alone when the transcript cannot be read. `turns/<sid>/<turn>.json` beside it keeps the final message (what the extractor and `--retry` read), the source and one `{uuid, message_id}` per part. The turn's `passage_hash` stays the final message's (`docs/build-notes/BUILD-NOTES-hooks.md`, "Whole-turn text") | On the tool path the final message is only the text after the `declare_asks` call (the pointer line), so the dialog showed no passage and a pin from the reply was verified from the screen; found in the 2026-11-10 preview retake |

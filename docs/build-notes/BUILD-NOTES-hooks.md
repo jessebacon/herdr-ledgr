@@ -39,7 +39,8 @@ bin/
     extract.sh              extractor CLI: --dry-run (fixtures), --retry <sid> <turn> (the panel's Retry button)
     claude_hook.py          Claude hook JSON -> lib/ledgr_map; subagent filter; local slash commands; session-name fallback
     claude_extract.py       Stop part B: uuid lookup -> stop event, extraction -> asks event
-    last_assistant.py       transcript uuid lookup (spec 4.2); also a CLI
+    last_assistant.py       transcript uuid lookup (spec 4.2); also a CLI. Since 2026-11-10 also the whole turn's
+                            text for the turn file (whole_turn, "Whole-turn text" below)
   tests/                    see "Tests"
 ../fixtures/extract/        spec 9.4 extraction fixtures (*.md) with expectations (*.json); long.md is generated
 ```
@@ -80,7 +81,7 @@ Providers: `anthropic` (key: Keychain service `ledgr`, account `anthropic`, or `
 cd ~/.config/herdr-app/mods/ledgr/bin
 bash tests/run-all.sh                                         # everything offline (no API call, no Keychain read)
 /opt/homebrew/bin/python3 -I -B tests/test_parse_block.py     # block parser, 22 checks
-/opt/homebrew/bin/python3 -I -B tests/test_last_assistant.py  # uuid lookup, 10 checks (one on a real transcript)
+/opt/homebrew/bin/python3 -I -B tests/test_last_assistant.py  # uuid lookup and the whole turn's text (one on a real transcript)
 /opt/homebrew/bin/python3 -I -B tests/run-extract-fixtures.py # spec 9.4 fixtures, offline expectations
 bash tests/test-hooks.sh                                      # spec 9.2 extended, 46 checks, hook timing
 /opt/homebrew/bin/python3 -I -B tests/run-extract-fixtures.py --live tasklist   # one real Haiku call
@@ -292,6 +293,8 @@ Offline runs point `LEDGR_KEYCHAIN_SERVICE` at a service that does not exist, so
   reinject, `replaces_turn: true`, `quotes: "verified"`. `tool_asks()` validates the declared asks
   again with the turn's text: `last_assistant.turn_text(transcript)` (every main-thread assistant text
   since the last real user prompt; a tool_result record is not a prompt) plus the last message.
+  Since 2026-11-10 the turn's text is the turn file Stop part A wrote ("Whole-turn text" below), and
+  the last message is added only when it is not in it already (`ledgr_extract.whole_text`).
   Options come from the declaration, else from the writer's item in `snapshot.json`; when neither has
   them the key is left out and the writer keeps the item's own (the state file keeps text, level,
   kind, hash, quote and repeat_of_handle only). `--retry` re-settles such a turn.
@@ -444,6 +447,74 @@ sentence.
   `test-store.sh`: each message `confluence.js` composes, with its blank line, parses as before.
 
 Pins (2026-11-07: the `ledgr pins <session> <item>` marker, `pins_asked`, `ledgr_map.prompt_refs`): `BUILD-NOTES-pins.md`.
+
+### Whole-turn text (2026-11-10)
+
+Found in the preview retake: on the tool path (text, the `declare_asks` call, then the pointer line)
+`turns/<sid>/<turn>.md` held only Stop's `last_assistant_message`, which is the text after the last
+tool call. The detail dialog's THE MESSAGE showed `ledgr: 3 items for you, 2 blocking` with no passage
+marked, and a pin of a sentence from the plan was verified from the screen, not the saved turn.
+
+- The turn file is the whole turn. Stop part A (`claude_hook.run`, a Stop that is not off) calls
+  `last_assistant.whole_turn(transcript_path, last_assistant_message)` and passes `turn_text`,
+  `turn_blocks` and `turn_source` to `ledgr_map.handle`, which writes them. Contents: every
+  main-thread assistant text block since the person's prompt, oldest first, each part stripped and
+  joined by one blank line (`\n\n`); thinking, tool_use and tool_result are left out, and so are
+  sidechain records. The last part is `last_assistant_message` verbatim: the transcript may not hold
+  the final message yet at Stop, so its own copy (the trailing text records of the last API message,
+  each found in the message) is dropped and Stop's written in its place, once. Plain text still, no
+  header and no separator, so no reader changed.
+- The turn starts after the last user record that is a prompt: a string, or text blocks with no
+  tool_result, and not `isMeta` (a hook's or the tool loader's note) or `isCompactSummary` (a
+  compaction inside the turn does not cut it).
+- Beside it, `turns/<sid>/<turn>.json`: `{v: 1, source, message, blocks, [lagged]}`. `source` is
+  `transcript` (read whole) or `last_message` (the fallback: the `.md` is `last_assistant_message`
+  alone, as before; `lagged: true` while part B may still catch it up). `message` is the final message, what the extractor
+  reads; `--retry` takes it from here (a turn saved before this has no `.json`, and its `.md` is that
+  message), so a retried model turn sees the same text as its Stop and nothing is counted twice.
+  `blocks` is one `{uuid, message_id}` per part of the `.md`, in order; the final message's uuid is
+  the last of its records (the message uuid the anchor uses) or null when the transcript did not hold
+  it yet (part B's lookup still resolves it for the `stop` event). `_prune_turns` deletes the `.json`
+  with its `.md` (the newest 50 per session are kept).
+- Over `MAX_TURN_TEXT` (500,000 characters) the `.md` is the final message alone, `source: last_message`.
+- The lag (seen live the same day, one run in four): Claude Code writes the turn's records after Stop
+  fires, so part A writes the whole turn only when the transcript is consistent
+  (`last_assistant.holds_final`: its last text record, or the last API message's trailing text records
+  joined, equals or ends with `last_assistant_message` after whitespace squash, and the turn's prompt
+  `promptId` is the hooks' `prompt_id` when both are known); otherwise it writes the fallback with
+  `lagged: true`, and part B (`claude_extract.follow`) re-reads on the uuid lookup's own schedule
+  (`UUID_OFFSETS`: 0, 1, 2, 4 s after it starts, about 4 s at most), rewrites both files atomically
+  once consistent (`ledgr_map.rewrite_turn`, under the session lock, only while still lagged for the
+  same message) before it emits `stop`, so the writer's `reanchor` (run on `stop`) reads the whole
+  turn; a declared lagged turn waits for that, and when the transcript never catches up its quotes are
+  checked against the fallback plus this turn's partial text (`quote_text`, never the partial turn
+  alone), and the uuid lookup skips a look whose last prompt is another turn's; `--retry` gives a
+  lagged turn one more look. Tests: `test_last_assistant.py` +9, `test-hooks.sh` +18 (221: caught up
+  after part B's second look, never caught up, another turn's prompt, `--retry`).
+- The turn's `passage_hash` (`pending`, `stop`, `asks`, the record's `last_passage_hash`) stays the
+  final message's, since part B's uuid match compares it.
+- Read backward: `turn_blocks` reads the transcript from its end in 256 KB chunks (at most the last
+  4 MB, `TAIL`) and parses only an assistant line that holds a text block or a user line that is not
+  a tool result, so a turn's large tool results cost one substring test each. In process: 0.03 ms
+  (`/dev/null`), 0.3 ms (a 44 MB real transcript), 1.3 ms (an 8 MB one), 1.7 ms (a 5 MB synthetic
+  turn of 40 tool calls with 40 KB results). Stop's wall time in `test-hooks.sh` (20 runs): 48.5 ms
+  median with `/dev/null`, 50.6 ms with the synthetic transcript (48.8 ms before the change).
+- Readers, unchanged: the dialog's message column (`reader.js` `loadPassage`, `detail.js`
+  `messageParts`: `detailing.js` `passageParts` finds the quote in the whole text), the capture box's
+  quote and pin checks (`capture.js` `find`, `occursIn` over the newest 50 turn files), the writer's
+  re-anchoring (`writer.js` `reanchor`), the extractor (`ledgr_extract` reads the final message;
+  only the tool path reads the whole turn). Go to anchor's search slice (`nav.js` `searchSlice`) is
+  cut from the item's quote and the landing and ref scans read the prompt, not the turn file. The
+  branch's Conclude prefill and its THE BRANCH'S LAST MESSAGE column (`detail.js` `branchText`,
+  `pumpBranch`) now read the branch's whole last turn: the ledgr-conclusion block is still the last
+  one (`extractConclusion`), and only the no-block fallback shows more than the final message.
+- Tests: `test_last_assistant.py` (+12: the tool path's two texts in order, the final message once
+  when the transcript holds it and when it does not, a final message over two records, a compaction
+  summary inside the turn, the read limit, a real transcript); `test-hooks.sh` (+11: the declared
+  turn's `.md` and `.json`, the passage hash, `--retry` from the `.json`'s message with the quote
+  before the tool call still verified, the lag, no transcript (fallback) and only-the-last-message
+  cases, a `+ transcript` timing row); `test_detail.mjs` (+1: a quote before the tool call is marked
+  in a whole-turn text).
 
 ## Confirmed live (2026-11-05)
 

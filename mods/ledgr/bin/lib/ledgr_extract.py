@@ -9,7 +9,8 @@ provider, usage, ms, error, block_error, extract_request_id, [error_detail], [tr
      and the reply has no valid non-empty block (a block is the newer statement and wins): source
      "tool", no model call, no re-injection. The declared asks are validated again with their quotes
      checked against the whole turn's text (`turn_text`: every assistant text of the turn, since the
-     agent may write the quoted sentence before the call; else `msg`), and go out with
+     agent may write the quoted sentence before the call: the adapter's turn file; msg is added only
+     when the turn text lacks it, whole_text), and go out with
      replaces_turn true, so the writer settles them with the turn's message uuid;
   1. under 40 characters: source "skip";
   2. parse_block: only a valid NON-EMPTY ledgr-asks block settles it (block-first mode, no model
@@ -128,6 +129,15 @@ def tool_asks(decl, sid, turn, text, snapshot_path=None):
     return out
 
 
+def whole_text(turn_text, msg):
+    """The text a declared quote is checked against: the turn's text (the turn file, which ends with
+    the final message since 2026-11-10), with msg added only when it is not in it already, so no
+    passage is there twice."""
+    if turn_text and (not (msg or "").strip() or C.squash(msg) in C.squash(turn_text)):
+        return turn_text
+    return "\n\n".join(x for x in (turn_text, msg) if x)
+
+
 def user_text(prose, rec, open_, dismissed, max_chars):
     lines = [f"SESSION: {rec.get('session_name') or 'unnamed'} ({rec.get('repo') or '?'}, {rec.get('cwd') or '?'})"]
     lines.append("OPEN ASKS (already recorded for this session):" if open_ else "OPEN ASKS: none")
@@ -190,7 +200,7 @@ def extract(msg, cfg, rec, sid, snapshot_path=None, turn=None, turn_text=None):
     pb = parse_block.parse(msg or "")
     if decl is not None and not (pb["found"] and pb["valid"] and pb["asks"]):
         res.update(source="tool", provider="mcp", replaces_turn=True, quotes="verified", tool_calls=decl.get("calls"))
-        res["asks"] = tool_asks(decl, sid, turn, "\n".join(x for x in (turn_text, msg) if x), snapshot_path)
+        res["asks"] = tool_asks(decl, sid, turn, whole_text(turn_text, msg), snapshot_path)
         if pb.get("pointer"):
             res["pointer"] = pb["pointer"]
         if pb["found"]:

@@ -9,6 +9,12 @@ path, else ~/.claude; profile "default" for ~/.claude, else the folder's name wi
 ~/.claude-work is "work"; recorded on every event, carried by session_start and prompt), the session-name
 fallback from <config>/sessions/<pid>.json, and the ledgr-asks instruction on stdout (Claude Code
 adds a SessionStart or UserPromptSubmit hook's stdout to the session's context).
+Turn text (2026-11-10): a Stop that is not off reads the transcript's last turn backward
+(last_assistant.whole_turn) and, when the transcript already holds the final message (consistent),
+hands handle() fields turn_text, turn_blocks and turn_source, so turns/<sid>/<turn>.md holds every
+assistant text block of the turn with last_assistant_message as its last part. Otherwise (Claude Code
+writes the turn's records after Stop fires; unreadable transcript) the file is last_assistant_message
+alone, always complete, and turn_lagged marks it for part B (claude_extract) to re-read and rewrite.
 Branch lineage (Phase 2) is agent-agnostic and lives in lib/ledgr_map: a SessionStart with source
 "fork" in a process carrying LEDGR_PARENT (the ledgr branch launcher's `env` prefix) records it and
 emits branch_started; source "compact" emits compacted.
@@ -56,6 +62,7 @@ import ledgr_config as K  # noqa: E402
 import ledgr_map as M  # noqa: E402
 import ledgr_landing as L  # noqa: E402
 import ledgr_spool as S  # noqa: E402
+import last_assistant  # noqa: E402
 
 AGENT = "claude-code"
 LOCAL_CMD = re.compile(r"^/(btw|clear|compact|resume|rewind|model|config|tui|focus|diff|help|status|cost|context"
@@ -225,6 +232,17 @@ def run(event, agent):
         cur = recorded(sid)
         off = M.space_off(cfg, cur.get("space")) or cur.get("ledgr_off") is True
     fields["quiet"] = off
+    if event == "Stop" and not off:                 # the turn file holds the whole turn's assistant text
+        msg = fields.get("last_assistant_message") if isinstance(fields.get("last_assistant_message"), str) else ""
+        w = None
+        try:
+            w = last_assistant.whole_turn(tp, msg, cur.get("prompt_id"))
+        except Exception as ex:                     # last_assistant_message alone, as before
+            C.log(f"{t} Stop {sid} whole-turn text failed: {ex!r}")
+        if w and w["consistent"]:
+            fields.update(turn_text=w["text"], turn_blocks=w["blocks"], turn_source="transcript")
+        else:                                       # the transcript lags (or is unreadable): part B re-reads
+            fields["turn_lagged"] = bool(msg.strip())
     rec = M.handle(event, sid, t, agent or AGENT, fields)
     if rec is None:
         return False

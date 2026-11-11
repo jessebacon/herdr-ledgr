@@ -692,8 +692,8 @@ orchestrator runs P1 before the builders start (7, question 1).
 - fixtures.js (B): 2.10.
 - Engine files: none of reader.js, listing.js, detailing.js, views.js, detail.js is one;
   `ENGINE_FILES` (writer.js:43) is unchanged and no engine file imports them.
-- Later, not built now (the orchestrator's, after integration): preview.png retaken (the list, then
-  the dialog on an ask; `herdr-app do ledgr.open:A2` in docs/preview-recipe.md); RECIPE.md parts 2,
+- preview.png retaken on 2026-11-10: the list, and the dialog on Ask 2 as docs/preview-dialog.png (docs/preview-recipe.md).
+- Later, not built now (the orchestrator's, after integration): RECIPE.md parts 2,
   3, 5 and 6 (one-line rows, Enter or click opens the dialog, Esc back, dialogs take the keyboard,
   staging closes the dialog); CLAUDE.md (architecture and vocabulary: "detail"); a
   `BUILD-NOTES-detail.md`; CHANGELOG.

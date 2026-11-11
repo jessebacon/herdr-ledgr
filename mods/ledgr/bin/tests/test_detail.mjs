@@ -357,6 +357,12 @@ try {
   A.equal(D.passageParts("short text", "absent", false).hit, null); A.equal(D.passageParts("short text", "absent", false).before, "short text");
   A.ok(D.passageParts("x".repeat(2000), "absent", false).before.endsWith("…"), "no match: a long text is cut");
   A.equal(D.passageParts("x".repeat(2000), "absent", true).before.length, 2000, "no match, whole: all of it");
+  // The turn file holds the whole turn since 2026-11-10 (Stop joins every text block, a blank line between):
+  // on the declare_asks path a quote written before the tool call is found, the pointer line after it.
+  const TURN = "Start by confirming the docs source. Add the custom domain once you supply it, since I cannot finish the CNAME without that name.\n\nledgr: 3 items for you, 2 blocking";
+  A.deepEqual(D.passageParts(TURN, "Add the custom domain once you supply it", false),
+    { before: "", hit: "Start by confirming the docs source. Add the custom domain once you supply it, since I cannot finish the CNAME without that name.", after: "ledgr: 3 items for you, 2 blocking" },
+    "whole turn: a quote from the text before the tool call is marked, the final message after it");
 
   // ── mdVerbatim, hardBreaks ─────────────────────────────────────────────
   const unescape = (s) => s.split("\\\n").map((l) => l.replace(/^ +/, (m) => " ".repeat(m.length)).replace(/\\([\\`*_{}[\]()#+\-.!|<>~=&$^:@])/g, "$1")).join("\n");

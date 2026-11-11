@@ -4,9 +4,15 @@ every anchor also carries turn + passage_hash.
 
   --input <file>          Stop part B, started detached by stop.sh (with LEDGR_INNER=1) after part
                           A accepted the event. <file> holds the Stop hook JSON; it is deleted after
-                          reading. A resolver thread looks up the uuid (retries at 0, 1, 2, 4 s) and
-                          emits `stop` carrying it; the extraction runs meanwhile; `asks` follows.
-  --retry <sid> <turn>    Re-run on turns/<sid>/<turn>.md, emit `asks`, print a JSON summary.
+                          reading. A resolver thread looks up the uuid (retries at 0, 1, 2, 4 s) and,
+                          for a turn part A saved lagged (the transcript did not hold the final message
+                          yet), re-reads the whole turn on the same looks; once the transcript holds it,
+                          the turn files are rewritten with it. Then it emits `stop` carrying the uuid;
+                          the extraction runs meanwhile (a declared turn of a lagged file waits for the
+                          resolver first, its quotes are checked against quote_text); `asks` follows.
+  --retry <sid> <turn>    Re-run on the turn's final message (turns/<sid>/<turn>.json "message", else
+                          the .md) with the .md as the whole turn (a lagged turn gets one more look at
+                          the transcript first), emit `asks`, print a JSON summary.
   --dry-run --text-file <f> [--snapshot <f>] [--session <sid>] [--session-name <n>]
             [--mode <m>] [--provider <p>]      Print the result; writes nothing.
 """
@@ -29,15 +35,65 @@ import last_assistant  # noqa: E402
 UUID_OFFSETS = (0, 1, 2, 4)        # seconds after start (spec 4.1 step 6)
 
 
-def resolve_uuid(transcript, msg, t0, offsets=UUID_OFFSETS):
+def follow(transcript, msg, t0, lagged, prompt_id=None, offsets=UUID_OFFSETS):
+    """Part B's one schedule (UUID_OFFSETS: looks at 0, 1, 2 and 4 s after part B started, so about
+    4 s at most): at each look, the final message's uuid until found and, for a lagged turn, the whole
+    turn until the transcript holds the final message. A look at a lagged turn whose transcript's
+    last prompt is another turn's (its promptId is not prompt_id) skips the uuid lookup, which would
+    match an earlier reply with the same text. Returns {"found": {uuid, api_id} or {}, "whole": the
+    first consistent whole_turn() or None, "partial": the last read that was not (a whole_turn()
+    dict) or None}."""
+    out = {"found": {}, "whole": None, "partial": None}
+    if not msg:
+        return out
     for off in offsets:
         wait = t0 + off - time.monotonic()
         if wait > 0:
             time.sleep(wait)
-        r = last_assistant.find(transcript, msg)
-        if r.get("uuid"):
-            return r
-    return {}
+        other = False
+        if lagged and out["whole"] is None:
+            w = last_assistant.whole_turn(transcript, msg, prompt_id)
+            if w["consistent"]:
+                out["whole"] = w
+            elif w["source"] == "transcript":
+                out["partial"] = w
+                other = bool(prompt_id and w["prompt_id"] and w["prompt_id"] != prompt_id)
+        if not out["found"].get("uuid") and not other:
+            out["found"] = last_assistant.find(transcript, msg)
+        if out["found"].get("uuid") and (out["whole"] is not None or not lagged):
+            break
+    return out
+
+
+def lagged_turn(sid, turn, msg):
+    """True when part A saved this turn's fallback for part B to re-read (its .json says lagged, for
+    this final message)."""
+    meta = C.read_json(C.path("turns", sid, f"{turn}.json"), {})
+    return bool((msg or "").strip()) and isinstance(meta, dict) and meta.get("lagged") is True \
+        and meta.get("message") == msg[:M.MAX_TURN_TEXT]
+
+
+def catch_up(sid, turn, msg, got):
+    """A lagged turn whose transcript caught up: both turn files rewritten with the whole turn
+    (ledgr_map.rewrite_turn: atomic, the same format, only while still lagged)."""
+    w = got.get("whole")
+    return bool(w) and M.rewrite_turn(sid, turn, msg, w["text"], w["blocks"])
+
+
+def quote_text(sid, turn, msg, lagged, got, prompt_id=None):
+    """The text a declared turn's quotes are checked against. Not lagged: the turn file part A wrote
+    (the whole turn). Lagged and caught up: the whole turn part B read. Lagged to the end of the
+    schedule: the union of the fallback (the turn file: the final message, always complete) and what
+    the transcript held of this turn (its starting prompt's promptId, when both are known, must be
+    the turn's), never that partial turn alone, so a quote in the final message is never dropped."""
+    md = C.read_text(C.path("turns", sid, f"{turn}.md"))
+    if not lagged:
+        return md or None
+    if got.get("whole"):
+        return got["whole"]["text"]
+    p = got.get("partial")
+    seen = p["text"] if p and (not prompt_id or not p.get("prompt_id") or p["prompt_id"] == prompt_id) else ""
+    return X.whole_text(seen, md or msg) or None
 
 
 def note_uuid(sid, t, turn, ph, found):
@@ -89,11 +145,14 @@ def hook_mode(input_file):
     msg = inp.get("last_assistant_message") if isinstance(inp.get("last_assistant_message"), str) else ""
     ph = C.passage_hash(msg)
     transcript = inp.get("transcript_path") or rec.get("transcript_path")
-    box = {"found": {}, "stopped": False, "stop_at": 0}
+    lagged = lagged_turn(sid, turn, msg)
+    box = {"found": {}, "whole": None, "partial": None, "stopped": False, "stop_at": 0}
 
     def resolver():
         try:
-            box["found"] = resolve_uuid(transcript, msg, t0) if msg else {}
+            box.update(follow(transcript, msg, t0, lagged, prompt_id))
+            if catch_up(sid, turn, msg, box):    # before `stop`: the writer's reanchor reads the whole turn
+                C.log(f"{t} turn text {sid} turn={turn} caught up with the transcript")
         except Exception as ex:
             C.log(f"{t} uuid lookup error {sid}: {ex!r}")
         finally:
@@ -106,10 +165,13 @@ def hook_mode(input_file):
     th = threading.Thread(target=resolver, daemon=True)
     th.start()
     try:
-        try:
-            whole = last_assistant.turn_text(transcript) if X.tool_declaration(sid, turn) else None
-        except Exception:
-            whole = None
+        # A declared turn's quotes are checked against the whole turn; a lagged one's wait for the
+        # resolver's re-reads (the schedule's end at most).
+        whole = None
+        if X.tool_declaration(sid, turn):
+            if lagged:
+                th.join(timeout=15)
+            whole = quote_text(sid, turn, msg, lagged, box, prompt_id)
         res = X.extract(msg, cfg, rec, sid, turn=turn, turn_text=whole)
     finally:
         th.join(timeout=15)
@@ -124,7 +186,8 @@ def hook_mode(input_file):
            at=max(C.now_ms(), box["stop_at"] + 1))
     note_uuid(sid, t, turn, ph, found)
     C.log(f"{t} extract {sid} turn={turn} source={res['source']} asks={len(res['asks'])} ms={res['ms']} "
-          f"uuid={'yes' if found.get('uuid') else 'no'} err={res.get('error')}")
+          f"uuid={'yes' if found.get('uuid') else 'no'} err={res.get('error')}"
+          + (f" lagged={'caught-up' if box['whole'] else 'kept'}" if lagged else ""))
     if reinject_due(cfg, res) and M.mark_reinject(sid, turn):
         C.log(f"{t} reinject_pending {sid} turn={turn}")
 
@@ -141,9 +204,17 @@ def retry_mode(sid, turn, t):
     cfg = K.load()
     rec = C.read_json(C.path("sessions", sid + ".json"), {}) or {}
     t = t or rec.get("terminal") or C.terminal_id() or "unknown"
-    msg = C.read_text(C.path("turns", sid, f"{turn}.md"))
-    res = X.extract(msg, cfg, rec, sid, turn=turn)          # a tool-declared turn is re-settled, not re-extracted
-    found = last_assistant.find(rec.get("transcript_path"), msg) if msg else {}
+    whole = C.read_text(C.path("turns", sid, f"{turn}.md"))
+    meta = C.read_json(C.path("turns", sid, f"{turn}.json"), {})
+    # The final message, as Stop extracted it; a turn saved before the .json (2026-11-10) is its .md.
+    msg = meta["message"] if isinstance(meta, dict) and isinstance(meta.get("message"), str) else whole
+    lagged = lagged_turn(sid, turn, msg)
+    pid = rec.get("prompt_id") if int(rec.get("turn") or 0) == turn else None
+    got = follow(rec.get("transcript_path"), msg, time.monotonic(), lagged, pid, offsets=(0,))   # one look
+    catch_up(sid, turn, msg, got)
+    whole = quote_text(sid, turn, msg, lagged, got, pid) if lagged else whole
+    res = X.extract(msg, cfg, rec, sid, turn=turn, turn_text=whole)   # a declared turn is re-settled, not re-extracted
+    found = got["found"]
     S.asks(t, sid, turn=turn, prompt_id=rec.get("prompt_id") if int(rec.get("turn") or 0) == turn else None,
            message_uuid=found.get("uuid"), api_message_id=found.get("api_id"),
            passage_hash=C.passage_hash(msg), result=res)

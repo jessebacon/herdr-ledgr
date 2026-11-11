@@ -4,7 +4,39 @@
 
 First public shape of the mod. Built on Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311.
 
-### List and detail dialog, settings, links (2026-11-10)
+### Preview retake and whole-turn text (2026-11-10)
+
+- Preview retaken for the list and the dialog: `preview.png` is the scan list (a pin, Ask 1 and Ask 2
+  as one-line rows, Ask 3 below the threshold) and `docs/preview-dialog.png` the same state with the
+  detail dialog open on Ask 2, linked from the README; both from a throwaway Claude Code session on
+  Haiku in a neutral folder, on the tool path (`docs/preview-recipe.md`, with the steps for the pin,
+  the picked option, the cursor row, the window size and the crop).
+- The saved turn text is the whole turn. Found in that retake: on the tool path (text, the
+  `declare_asks` call, the pointer line) `turns/<sid>/<turn>.md` held only Stop's
+  `last_assistant_message`, the text after the last tool call, so the dialog's THE MESSAGE showed only
+  `ledgr: 3 items for you, 2 blocking` with no passage marked, and a pin from the plan was verified
+  from the screen instead of the saved turn. Stop part A now writes every main-thread assistant text
+  block since the prompt, a blank line between them, with `last_assistant_message` as the last part
+  (`last_assistant.py` `whole_turn`, which reads the transcript backward from its end and parses only
+  text and prompt lines; about 2 ms on a 5 MB transcript whose last turn has 40 tool calls), and
+  `last_assistant_message` alone when the transcript cannot be read. `turns/<sid>/<turn>.json` beside
+  it keeps the final message (what `--retry` extracts from, so a retried turn sees what its Stop saw),
+  the source and one `{uuid, message_id}` per part; the turn's `passage_hash` stays the final
+  message's. A declared turn's quotes are checked against the turn file, the final message added only
+  when it is not in it (`ledgr_extract.whole_text`). No reader changed: the file is still plain text.
+  Takes effect from the next Stop in any session after `./install.sh`. Tests: last_assistant +12,
+  hooks +11 (203), detail +1 (610).
+- The race in that retake (one run in four saved only the pointer line and dropped all three quotes:
+  Claude Code writes the turn's records after Stop fires, and `whole_turn` read a transcript that held
+  the prompt but not the plan) is closed: part A writes the whole turn only when the transcript
+  already holds `last_assistant_message` (`last_assistant.holds_final`, and the turn's prompt is this
+  turn's), else the final message alone with `lagged: true`; part B re-reads on the uuid lookup's
+  schedule (0, 1, 2, 4 s), rewrites both turn files once the transcript catches up, before it emits
+  `stop`, and a declared turn that never catches up checks its quotes against the final message plus
+  this turn's partial text, so a quote in the final message is never dropped. Tests: last_assistant
+  +9, hooks +18 (221).
+
+### 21d4d1f: list and detail dialog, settings, links
 
 - Jesse: "when trying to view the side bar entries, I can't interact with the text. what if the
   sidebar was a bit more simplified list and clicking on an item opened a larger central modal".

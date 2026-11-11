@@ -12,6 +12,8 @@ A [Herdr](https://herdr.dev) mod for long conversations with coding agents.
 
 ![ledgr](preview.png)
 
+A click on a row opens it whole in the detail dialog, here on Ask 2: [docs/preview-dialog.png](docs/preview-dialog.png).
+
 ## Status
 
 0.1.0, not yet released. Built on Herdr 0.1.13, hc 0.1.18 and Claude Code 2.1.311, on macOS.

@@ -6,7 +6,23 @@ fields (all optional strings unless noted): cwd, transcript_path, session_title,
 prompt, prompt_id, last_assistant_message, reason; config_dir and profile (the agent's config
 folder and its short name, when the adapter knows them: Claude's CLAUDE_CONFIG_DIR, "default" or
 "work"; recorded on any event, carried by session_start and prompt); local (bool, prompt only);
-session_name_fallback (callable sid -> name|None, SessionStart only).
+session_name_fallback (callable sid -> name|None, SessionStart only); turn_text, turn_blocks (list)
+and turn_source (Stop only, when the adapter read the whole turn: Claude's transcript, once it holds
+the final message); turn_lagged (bool, Stop only: the adapter could not confirm the whole turn yet,
+so the fallback is written and its part B re-reads, rewrite_turn).
+
+Turn text (Stop): turns/<sid>/<turn>.md is plain text, read as it is by every reader (the detail
+dialog, the capture box's pin and quote checks, the writer's re-anchoring, the branch's Conclude
+prefill): fields turn_text when given (since 2026-11-10 the Claude adapter's whole turn: every
+assistant text block since the prompt, joined by a blank line, the final message last), else
+last_assistant_message (the fallback); over MAX_TURN_TEXT, the final message alone. Beside it,
+turns/<sid>/<turn>.json: {v: 1, source ("transcript" | "last_message": where the text came from),
+message (the final message, last_assistant_message, which the extractor reads; --retry takes it from
+here), blocks [{uuid, message_id}] (one per part of the text, in order; the final message's uuid null
+until the transcript holds it), lagged (true only on a fallback the adapter will re-read: part B's
+rewrite_turn replaces both files with the whole turn and drops it)}. write_turn writes both. The
+turn's passage_hash (pending, the record's last_passage_hash) stays the final message's. Both files
+are pruned together (the newest KEEP_TURNS per session).
 
 Writes are atomic (temp file + rename) and idempotent per event: a prompt whose prompt_id is
 already the record's does not count a second turn, and re-running any event rewrites the same
@@ -160,10 +176,44 @@ def _prune_turns(sid):
     if len(files) > KEEP_TURNS:
         files.sort(key=os.path.getmtime, reverse=True)
         for p in files[KEEP_TURNS:]:
-            try:
-                os.unlink(p)
-            except OSError:
-                pass
+            for q in (p, p[:-3] + ".json"):          # the turn's text and its .json beside it
+                try:
+                    os.unlink(q)
+                except OSError:
+                    pass
+
+
+def write_turn(sid, turn, msg, text=None, blocks=None, source=None, lagged=False):
+    """turns/<sid>/<turn>.md and its .json (the module docstring's Turn text), each written atomically:
+    text and blocks when given (the whole turn), else the fallback, msg alone."""
+    msg = msg if isinstance(msg, str) else ""
+    if not isinstance(text, str):
+        text, blocks, source = msg, None, "last_message"
+    if not isinstance(blocks, list):
+        blocks = [{"uuid": None, "message_id": None}] if msg.strip() else []
+    source = source or "last_message"
+    if len(text) > MAX_TURN_TEXT:                # too long to keep whole: the final message, as before
+        text, blocks, source = msg, blocks[-1:] if msg.strip() else [], "last_message"
+    C.atomic_write(C.path("turns", sid, f"{turn}.md"), text[:MAX_TURN_TEXT])
+    meta = {"v": 1, "source": source, "message": msg[:MAX_TURN_TEXT], "blocks": blocks}
+    if lagged:
+        meta["lagged"] = True
+    C.write_json(C.path("turns", sid, f"{turn}.json"), meta)
+    return meta
+
+
+def rewrite_turn(sid, turn, msg, text, blocks):
+    """The adapter's part B caught a lagged turn up (its transcript now holds the whole turn): both
+    files are rewritten with it, under the session lock and only while the .json is still that
+    lagged fallback of the same final message (a later Stop of the same turn wrote its own). Returns
+    True when rewritten."""
+    msg = msg if isinstance(msg, str) else ""
+    with C.Lock("session-" + sid):
+        cur = C.read_json(C.path("turns", sid, f"{turn}.json"))
+        if not (isinstance(cur, dict) and cur.get("lagged") is True and cur.get("message") == msg[:MAX_TURN_TEXT]):
+            return False
+        write_turn(sid, turn, msg, text, blocks, "transcript")
+    return True
 
 
 def _comm(pid):
@@ -380,8 +430,11 @@ def handle(event, sid, t, agent, fields):
         elif event == "Stop":
             msg = fields.get("last_assistant_message")
             msg = msg if isinstance(msg, str) else ""
-            C.atomic_write(C.path("turns", sid, f"{turn}.md"), msg[:MAX_TURN_TEXT])
-            ph = C.passage_hash(msg)
+            whole = isinstance(fields.get("turn_text"), str)
+            write_turn(sid, turn, msg, fields.get("turn_text") if whole else None,
+                       fields.get("turn_blocks") if whole else None, f("turn_source") if whole else None,
+                       lagged=not whole and fields.get("turn_lagged") is True)
+            ph = C.passage_hash(msg)                 # the final message's, as the uuid lookup matches it
             rec.update(state="idle", last_stop_at=now, last_passage_hash=ph)
             if rec.get("last_uuid_hash") != ph:     # the extractor resolves this turn's uuid;
                 rec["last_assistant_uuid"] = None   # keep it if the extractor got there first

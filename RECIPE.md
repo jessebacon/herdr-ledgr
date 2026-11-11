@@ -225,13 +225,14 @@ Tell the person all of this before copying anything (the manual's step 1).
   THE BRANCH'S LAST MESSAGE on the right. A dim foot line in words (`Ask 13 · found by the extractor
   · needed · turn 19 · #<hash>`, `Pin 4 · pinned by you · turn 12 · #<hash>`). Lines inside it (a
   question's pins, a branch's question) are one-line rows that open in place. Footer: the status line,
-  the buttons (primary, Done, Defer ▾, the kind's own, ⋯ for the rest; an archived pin's Restore and
-  Delete, which reads "Delete Pin 4? It cannot come back" in `blocked` for 4 s), and key hints `Esc
-  close · Tab next field · Enter paste the turn's answers`. Every text meant for reading is
+  the buttons (a primary where the item has one, such as Ask here or Paste confluence again, while an
+  open ask's Paste answer sits beside its field; Done, Defer ▾, the kind's own, ⋯ for the rest; an
+  archived pin's Restore and Delete, which reads "Delete Pin 4? It cannot come back" in `blocked` for
+  4 s), and key hints `Esc close · Tab next field · Enter paste the turn's answers`. Every text meant for reading is
   selectable, the person's and pinned text exactly as stored, with Copy beside the text, the quote,
   the passage and the message. While a paste is pending or a closing act is written, the body and the
   buttons dim. An item no longer in the ledger reads "This is no longer in the ledger…" with Close.
-  (Described from the code on 2026-11-10; the preview retake checks it against the live look.)
+  (Checked against the live look in the 2026-11-10 preview retake: `docs/preview-dialog.png`.)
 - **Settings dialog** (props `{view: "settings", opener, demo}`; the header's gear or `ledgr.settings`):
   centered, 0.5 × 0.7 of the window, `popover` fill. Header, 44 px: the gear in `accent`, "ledgr
   settings" (13 px semibold), a `demo` pill in the demo, `Esc`. One scrolling column of rows, each a

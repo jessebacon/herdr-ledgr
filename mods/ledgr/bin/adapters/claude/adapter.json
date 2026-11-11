@@ -4,7 +4,7 @@
   "identity": "hooks SessionStart + UserPromptSubmit (HC_TERMINAL_ID -> session_id, transcript_path, cwd, turn; config_dir and profile from CLAUDE_CONFIG_DIR; the Herdr space from hc get $HC_TERMINAL_ID --json, label herdr.space)",
   "turn_signal": "hook Stop",
   "instruction": "SessionStart hook stdout (startup, resume, clear, compact) plus one UserPromptSubmit reminder after a missed blocker",
-  "turn_text": "Stop hook last_assistant_message (uuid from the transcript JSONL)",
+  "turn_text": "Stop hook last_assistant_message; the whole turn and the uuid from the transcript JSONL",
   "fork": "claude --resume <sid> --fork-session",
   "resume": "claude --resume <sid>"
 }

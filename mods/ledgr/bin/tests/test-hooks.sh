@@ -590,6 +590,106 @@ t "...settled with the final message's uuid" jq -e '.[0].message_uuid=="a3"' <<<
 sleep 0.3; out=$(rprompt "$TD" t85 $K1 k2 "next")
 t "...no reinject after a tool-declared turn" test -z "$out" -a "$(jq -r '.reinject_pending // "none"' "$TD/sessions/$K1.json")" = none
 t "hook.log counts it: source=tool" grep -q "t85 extract $K1 turn=1 source=tool asks=2" "$TD/log/hook.log"
+KH=$(printf 'Everything else is ready.\n\nledgr: 2 items for you, 1 blocking' | sha12)
+t "whole turn: the turn file holds the text before the tool call, then the final message, a blank line between" test "$(cat "$TD/turns/$K1/1.md")" = "$(printf 'I stopped before the migration because the staging token is missing.\n\nEverything else is ready.\n\nledgr: 2 items for you, 1 blocking')"
+t "...its .json: source transcript, the final message, one uuid per part (a1, a3), not lagged" jq -e '.v==1 and .source=="transcript" and .message=="Everything else is ready.\n\nledgr: 2 items for you, 1 blocking" and .blocks==[{"uuid":"a1","message_id":"m1"},{"uuid":"a3","message_id":"m2"}] and (has("lagged")|not)' "$TD/turns/$K1/1.json"
+t "...the turn's passage_hash stays the final message's (pending, stop, the record)" jq -e -n --arg h "$KH" --argjson p "$(rev "$TD" $K1 pending)" --argjson s "$(rev "$TD" $K1 stop)" --slurpfile r "$TD/sessions/$K1.json" '$p[0].passage_hash==$h and $s[0].passage_hash==$h and $r[0].last_passage_hash==$h'
+out=$(LEDGR_DATA="$TD" bash "$AD/extract.sh" --retry $K1 1 --terminal t85 2>/dev/null)
+t "--retry of a declared turn: re-settled (source tool, 2 asks)" jq -e '.ok==true and .source=="tool" and .asks==2' <<<"$out"
+t "...from the .json's final message (passage_hash) with the whole .md: the quote before the tool call still verified" jq -e --arg h "$KH" 'length==2 and (.[1] | .source=="tool" and .passage_hash==$h and .message_uuid=="a3" and .asks[0].quote_verified==true and .asks[1].quote==null)' <<<"$(rev "$TD" $K1 asks)"
+
+echo "== turn text: the whole turn, and the fallbacks (2026-11-10)"
+WT="$ROOT/wholeturn"; mkdir -p "$WT"; printf '{"extract": {"mode": "block-only"}}\n' >"$WT/config.json"
+W1=99999999-0000-0000-0000-0000000007a1; W2=99999999-0000-0000-0000-0000000007a2; W3=99999999-0000-0000-0000-0000000007a3
+$PYQ -I - "$ROOT" <<'PY3'
+import json, os, sys
+def w(name, recs):
+    with open(os.path.join(sys.argv[1], name), "w") as f:
+        f.write("\n".join(json.dumps(r, separators=(",", ":")) for r in recs) + "\n")
+u = lambda i, c, **k: dict({"type": "user", "uuid": i, "isSidechain": False, "message": {"role": "user", "content": c}}, **k)
+a = lambda i, m, c: {"type": "assistant", "uuid": i, "isSidechain": False, "message": {"id": m, "role": "assistant", "content": c}}
+w("lag.jsonl", [u("u0", "an earlier prompt"), a("e0", "m0", [{"type": "text", "text": "Not this turn."}]), u("u1", "go"),
+                a("l1", "m1", [{"type": "text", "text": "Reading the config first."}]),
+                a("l2", "m1", [{"type": "tool_use", "id": "x", "name": "Read", "input": {}}]),
+                u("l3", [{"type": "tool_result", "tool_use_id": "x", "content": "ok"}])])
+w("only.jsonl", [u("u1", "go"), a("o1", "m9", [{"type": "text", "text": "Only the last message, already written."}])])
+PY3
+rstart "$WT" t86 $W1 >/dev/null; rprompt "$WT" t86 $W1 w1 "go" >/dev/null
+rj "$WT" t86 Stop "$(J $W1 "$ROOT/lag.jsonl" "The config is fine.")"
+t "final message not yet in the transcript: not consistent, so the fallback, Stop's message alone (always complete)" test "$(cat "$WT/turns/$W1/1.md")" = "The config is fine."
+t "...its .json: source last_message, lagged (part B re-reads), the final message's uuid null" jq -e '.source=="last_message" and .lagged==true and .message=="The config is fine." and .blocks==[{"uuid":null,"message_id":null}]' "$WT/turns/$W1/1.json"
+rstart "$WT" t87 $W2 >/dev/null; rprompt "$WT" t87 $W2 w2 "go" >/dev/null
+rj "$WT" t87 Stop "$(J $W2 "$ROOT/no-such-transcript.jsonl" "Fallback: only the message Stop gave.")"
+t "fallback: no transcript to read, the turn file is last_assistant_message alone" test "$(cat "$WT/turns/$W2/1.md")" = "Fallback: only the message Stop gave."
+t "...its .json says so: source last_message, lagged" jq -e '.source=="last_message" and .lagged==true and .message=="Fallback: only the message Stop gave." and .blocks==[{"uuid":null,"message_id":null}]' "$WT/turns/$W2/1.json"
+rstart "$WT" t88 $W3 >/dev/null; rprompt "$WT" t88 $W3 w3 "go" >/dev/null
+rj "$WT" t88 Stop "$(J $W3 "$ROOT/only.jsonl" "Only the last message, already written.")"
+t "a turn with only its last message: the file is that message, once" test "$(cat "$WT/turns/$W3/1.md")" = "Only the last message, already written."
+for s in $W1 $W2 $W3; do rwait "$WT" $s; done
+t "...after part B's schedule the never-completed transcript leaves the fallback, still lagged" test "$(cat "$WT/turns/$W1/1.md")" = "The config is fine." -a "$(jq -r '.lagged' "$WT/turns/$W1/1.json")" = true
+t "...hook.log: lagged=kept" grep -q "t86 extract $W1 turn=1 source=.* lagged=kept" "$WT/log/hook.log"
+printf '%s\n' '{"type":"assistant","uuid":"l4","isSidechain":false,"message":{"id":"m2","role":"assistant","content":[{"type":"text","text":"The config is fine."}]}}' >>"$ROOT/lag.jsonl"
+out=$(LEDGR_DATA="$WT" bash "$AD/extract.sh" --retry $W1 1 --terminal t86 2>/dev/null)
+t "...--retry once the transcript caught up: one more look rewrites the turn file whole, lagged gone" bash -c 'test "$(cat "$1")" = "$(printf "Reading the config first.\n\nThe config is fine.")" && jq -e ".source==\"transcript\" and (has(\"lagged\")|not) and .blocks[-1].uuid==\"l4\"" "$2"' _ "$WT/turns/$W1/1.md" "$WT/turns/$W1/1.json"
+t "...a consistent turn has no lagged flag and no lagged= note" bash -c '! jq -e "has(\"lagged\")" "$1" && ! grep -q "t88 extract $2 .*lagged=" "$3"' _ "$WT/turns/$W3/1.json" $W3 "$WT/log/hook.log"
+t "no hook errors in the whole-turn runs" test ! -s "$WT/log/hook.err"
+
+echo "== the transcript lags at Stop (the race seen live 2026-11-10): part B catches the turn up"
+LG="$ROOT/lagturn"; mkdir -p "$LG"; printf '{"extract": {"mode": "block-only"}}\n' >"$LG/config.json"
+L1=99999999-0000-0000-0000-0000000007b1; L2=99999999-0000-0000-0000-0000000007b2; L3=99999999-0000-0000-0000-0000000007b3
+LFIN=$(printf 'Pick the release name before Friday.\n\nledgr: 3 items for you, 2 blocking')
+LPLAN="Plan: I will migrate the users table first, then the orders table."
+LTOK="The staging token is missing, so I stopped before the migration."
+LOLD="An old sentence from the turn before."
+rstart "$LG" t89 $L1 >/dev/null; rprompt "$LG" t89 $L1 g1 "go" >/dev/null
+rstart "$LG" t90 $L2 >/dev/null; rprompt "$LG" t90 $L2 g2 "go" >/dev/null
+rstart "$LG" t91 $L3 >/dev/null; rprompt "$LG" t91 $L3 g3 "go" >/dev/null
+$PYQ -I - "$ROOT" "$LG" $L1 $L2 $L3 "$LFIN" "$LPLAN" "$LTOK" "$LOLD" <<'PY4'
+import json, os, sys
+root, lg, l1, l2, l3, fin, plan, tok, old = sys.argv[1:]
+def w(name, recs, mode="w"):
+    with open(os.path.join(root, name), mode) as f:
+        f.write("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in recs))
+u = lambda i, c, **k: dict({"type": "user", "uuid": i, "isSidechain": False, "message": {"role": "user", "content": c}}, **k)
+a = lambda i, m, c: {"type": "assistant", "uuid": i, "isSidechain": False, "message": {"id": m, "role": "assistant", "content": c}}
+txt = lambda s: [{"type": "text", "text": s}]
+before = [u("u0", "an earlier prompt", promptId="g0"), a("e0", "m0", txt(old)), a("e1", "m0", txt(fin))]
+rest = [a("p1", "m1", txt(plan)), a("p2", "m1", txt(tok)),
+        a("p3", "m1", [{"type": "tool_use", "id": "x", "name": "mcp__ledgr__declare_asks", "input": {}}]),
+        u("p4", [{"type": "tool_result", "tool_use_id": "x", "content": "ok"}], promptId="g1"), a("p5", "m2", txt(fin))]
+w("race.jsonl", [u("u1", "go", promptId="g1")])            # at Stop: the prompt only, no plan text yet
+w("race-rest.jsonl", rest)                                  # appended after part A, before part B's second look
+w("never.jsonl", before + [u("u2", "go", promptId="g2"), a("q1", "m1", txt(plan))])   # never gets the rest
+w("other.jsonl", before)                                    # this turn's prompt never written
+def decl(sid, t, quotes):
+    os.makedirs(os.path.join(lg, "mcp", sid), exist_ok=True)
+    asks = [{"text": f"Ask {i + 1}", "level": "blocking" if i == 0 else "needed", "kind": "decide", "hash": f"h{i}",
+             "quote": q, "repeat_of_handle": None} for i, q in enumerate(quotes)]
+    with open(os.path.join(lg, "mcp", sid, "1.json"), "w") as f:
+        json.dump({"v": 1, "session_id": sid, "terminal": t, "turn": 1, "calls": 1, "asks": asks}, f)
+decl(l1, "t89", [tok, plan, "Pick the release name before Friday."])
+decl(l2, "t90", [plan, "Pick the release name before Friday.", old])
+decl(l3, "t91", ["Pick the release name before Friday.", old])
+PY4
+rj "$LG" t89 Stop "$(J $L1 "$ROOT/race.jsonl" "$LFIN")"
+t "part A, transcript truncated before the plan text: the fallback, Stop's final message alone" test "$(cat "$LG/turns/$L1/1.md")" = "$LFIN"
+t "...its .json: source last_message, lagged" jq -e '.source=="last_message" and .lagged==true and .blocks==[{"uuid":null,"message_id":null}]' "$LG/turns/$L1/1.json"
+sleep 0.5; cat "$ROOT/race-rest.jsonl" >>"$ROOT/race.jsonl"
+rj "$LG" t90 Stop "$(J $L2 "$ROOT/never.jsonl" "$LFIN")"
+rj "$LG" t91 Stop "$(J $L3 "$ROOT/other.jsonl" "$LFIN")"
+t "part A, the earlier reply has the same text but this turn's prompt is not written: not read as this turn (fallback, lagged)" test "$(cat "$LG/turns/$L3/1.md")" = "$LFIN" -a "$(jq -r '.lagged' "$LG/turns/$L3/1.json")" = true
+for s in $L1 $L2 $L3; do rwait "$LG" $s; done
+t "caught up: part B rewrote the turn file with the whole turn" test "$(cat "$LG/turns/$L1/1.md")" = "$(printf '%s\n\n%s\n\n%s' "$LPLAN" "$LTOK" "$LFIN")"
+t "...its .json: source transcript, lagged gone, one uuid per part, the final message's p5" jq -e '.source=="transcript" and (has("lagged")|not) and .message=="Pick the release name before Friday.\n\nledgr: 3 items for you, 2 blocking" and .blocks==[{"uuid":"p1","message_id":"m1"},{"uuid":"p2","message_id":"m1"},{"uuid":"p5","message_id":"m2"}]' "$LG/turns/$L1/1.json"
+t "...all three quotes kept (two from the plan text before the tool call, one from the final message)" jq -e '.[0] | .source=="tool" and (.asks|length)==3 and all(.asks[]; .quote_verified==true and (.quote|type)=="string")' <<<"$(rev "$LG" $L1 asks)"
+t "...stop and asks carry the final message's uuid (p5)" jq -e -n --argjson s "$(rev "$LG" $L1 stop)" --argjson a "$(rev "$LG" $L1 asks)" '$s[0].message_uuid=="p5" and $a[0].message_uuid=="p5"'
+t "...hook.log: caught up, lagged=caught-up" bash -c 'grep -q "turn text $1 turn=1 caught up" "$2" && grep -q "t89 extract $1 turn=1 source=tool asks=3 .* lagged=caught-up" "$2"' _ $L1 "$LG/log/hook.log"
+t "never completes: the fallback kept, still lagged" test "$(cat "$LG/turns/$L2/1.md")" = "$LFIN" -a "$(jq -r '.source + " " + (.lagged|tostring)' "$LG/turns/$L2/1.json")" = "last_message true"
+t "...quotes checked against the union of the fallback and this turn's partial text: the plan's and the final message's kept, the earlier turn's dropped" jq -e '.[0].asks | (.[0].quote_verified==true) and (.[1].quote_verified==true) and (.[2].quote==null)' <<<"$(rev "$LG" $L2 asks)"
+t "...hook.log: lagged=kept" grep -q "t90 extract $L2 turn=1 source=tool asks=3 .* lagged=kept" "$LG/log/hook.log"
+t "this turn's prompt never written: the final message's quote kept, the earlier turn's dropped" jq -e '.[0].asks | (.[0].quote_verified==true) and (.[1].quote==null)' <<<"$(rev "$LG" $L3 asks)"
+t "...no uuid from the earlier reply with the same text (stop and asks: null)" jq -e -n --argjson s "$(rev "$LG" $L3 stop)" --argjson a "$(rev "$LG" $L3 asks)" '$s[0].message_uuid==null and $a[0].message_uuid==null'
+t "no hook or extractor errors in the lag runs" test ! -s "$LG/log/hook.err" -a ! -s "$LG/log/extract.err"
 
 echo "== disabled spaces (config spaces.disabled; the terminal's herdr.space label)"
 SPD="$ROOT/spaces"; mkdir -p "$SPD"
@@ -684,9 +784,28 @@ scripts = {"SessionStart": "session-start.sh", "UserPromptSubmit": "user-prompt-
 conf = "ledgr confluence br_00000000-0000-4000-8000-000000000001 rq_00000000-0000-4000-8000-000000000002\nParked question Q1, from turn 1: why?\nConclusion:\nanswer: because\nThis is the result of branch br-q1-0001."
 pins = ("ledgr pins " + sid + " rq_00000000-0000-4000-8000-000000000003\nQuestion Q1: why?\nIt is about 1 passage I pinned.\n\n"
         "Pin 1 \u00b7 this conversation, your reply at turn 1\n" + "> a pinned line naming [A1]\n" * 40 + "\nI am asking Q1 about these pinned passages.")
+# Stop with a transcript: about 5 MB, its last turn 40 tool calls with 40 KB results each, a text block
+# before each call (the whole turn is read backward from the end at Stop, 2026-11-10).
+syn = os.path.join(data, "timing.jsonl")
+os.makedirs(data, exist_ok=True)
+with open(syn, "w") as f:
+    rec = lambda r: f.write(json.dumps(r, separators=(",", ":")) + "\n")
+    n = 0
+    while f.tell() < 3_000_000:
+        n += 1
+        rec({"type": "user", "uuid": f"u{n}", "message": {"role": "user", "content": f"prompt {n}"}})
+        rec({"type": "assistant", "uuid": f"a{n}", "message": {"id": f"m{n}", "content": [{"type": "text", "text": "old " * 2000}]}})
+    rec({"type": "user", "uuid": "p", "message": {"role": "user", "content": "the last prompt"}})
+    for i in range(40):
+        rec({"type": "assistant", "uuid": f"t{i}", "message": {"id": f"n{i}", "content": [{"type": "thinking", "thinking": "", "signature": "s" * 3000}]}})
+        rec({"type": "assistant", "uuid": f"x{i}", "message": {"id": f"n{i}", "content": [{"type": "text", "text": f"Step {i}: reading the next file."}]}})
+        rec({"type": "assistant", "uuid": f"y{i}", "message": {"id": f"n{i}", "content": [{"type": "tool_use", "id": f"k{i}", "name": "Read", "input": {}}]}})
+        rec({"type": "user", "uuid": f"r{i}", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"k{i}", "content": "line\n" * 8000}]}})
+    rec({"type": "assistant", "uuid": "fin", "message": {"id": "nf", "content": [{"type": "text", "text": "All done. " * 400}]}})
 ins = [("SessionStart", "SessionStart", {"source": "startup"}), ("UserPromptSubmit", "UserPromptSubmit", {"prompt": "hello [A1]"}),
        ("  + confluence", "UserPromptSubmit", {"prompt": conf}), ("  + pins", "UserPromptSubmit", {"prompt": pins}),
-       ("Stop", "Stop", {"last_assistant_message": "x" * 4000})]
+       ("Stop", "Stop", {"last_assistant_message": "x" * 4000}),
+       ("  + transcript", "Stop", {"last_assistant_message": "All done. " * 400, "transcript_path": syn})]
 worst = 0
 for label, ev, extra in ins:
     ts = []
