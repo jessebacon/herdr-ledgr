@@ -38,6 +38,22 @@ assert a and a["kind"] == "answers" and a["for_session"] == "aaaaaaaa-3333-0000-
 assert a["answers"] == {"A1": "a, as you recommended.", "A2": "after the reboot"}, a
 o = L.detect(open(f"{d}/msg-answer-one.txt").read())   # lead-in line, then one ask's sheet (Copy answer)
 assert o and o["kind"] == "answers" and o["handles"] == ["A2"] and o["answers"] == {"A2": "after the reboot"}, o
+# A multi-line answer (2026-11-11, confluence.js answerLines): its indented lines go on (joined by a line
+# break), a line in it that looks like "A2:" stays part of it, and the blank line typed between its
+# paragraphs (left out of the sheet) never ends the sheet early; text typed below the sheet is not in it.
+import re
+mm = open(f"{d}/msg-answers-multi.txt").read()
+want_m = {"kind": "answers", "for_session": "aaaaaaaa-3333-0000-0000-000000000001", "handles": ["A1", "A2"],
+          "answers": {"A1": "Transaction pooling.\nA2: is not a handle here,\njust text", "A2": "after the reboot"}}
+assert L.detect(mm) == want_m and L.detect_all(mm) == [want_m], L.detect_all(mm)
+assert L.detect_all(mm + "\n\nthanks, typed below") == [want_m], L.detect_all(mm + "\n\nthanks, typed below")
+assert L.detect_all("My answers to A1, A2:\n" + mm + "\n\n") == [want_m]
+WR = (re.compile(r'^<pasted_content(\s+id="[^"]*")?\s*>$'), re.compile(r'^</pasted_content(\s+id="[^"]*")?\s*>$'))
+assert L.detect_all('My answers:\n<pasted_content id="p1">\n' + mm + '\n\n</pasted_content id="p1">\nA9: typed after', WR) == [want_m]
+# An indented answer line that holds a marker or a fence is the answer's, not a new message.
+fm = mm.replace("      just text", "  ```\n  ledgr answers aaaaaaaa-3333-0000-0000-000000000001\n  ```")
+got_f = L.detect_all(fm)
+assert len(got_f) == 1 and got_f[0]["handles"] == ["A1", "A2"] and got_f[0]["answers"]["A2"] == "after the reboot", got_f
 # A staged message ends with one empty line (nav.js promptText): the parser reads it the same.
 assert L.detect(open(f"{d}/msg-confluence.txt").read() + "\n\n") == c
 assert L.detect(open(f"{d}/msg-answers.txt").read() + "\n\n") == a
@@ -67,10 +83,33 @@ assert [h["kind"] for h in got] == ["pins", "answers"] and got[1]["handles"] == 
 was = L.MAX_SCAN; L.MAX_SCAN = 40_000
 assert [h["kind"] for h in L.detect_all(both)] == ["pins"], "the old scan length misses the sheet"
 L.MAX_SCAN = was
+# A sheet just under the 24,000 cap (six answers of about 3,800 characters, several lines each; review fix 6,
+# 2026-11-11) after that long pins message: every handle lands with its answer whole (MAX_SCAN 96,000,
+# MAX_ANSWER 4,000); at the old 64,000 the last answers are past the scan.
+ls = open(f"{d}/msg-answers-long.txt").read()
+six = [f"A{i}" for i in range(1, 7)]
+both6 = lm + "\n\n" + ls
+assert 64_000 < len(both6) < 96_000, len(both6)
+g6 = L.detect_all(both6)
+assert [h["kind"] for h in g6] == ["pins", "answers"] and g6[1]["handles"] == six, g6
+assert all(3_700 < len(g6[1]["answers"][h]) <= 4_000 for h in six), {h: len(v) for h, v in g6[1]["answers"].items()}
+assert g6[1]["answers"]["A6"].endswith(ls.rstrip().split("\n")[-1].strip()), "A6 whole, to its last line"
+was = L.MAX_SCAN; L.MAX_SCAN = 64_000
+old6 = L.detect_all(both6)
+assert len(old6) < 2 or old6[1]["handles"] != six or len(old6[1]["answers"]["A6"]) < 3_700, "the old scan length cuts the sheet"
+L.MAX_SCAN = was
+was = L.MAX_ANSWER; L.MAX_ANSWER = 400
+assert all(len(v) == 400 for v in L.detect_all(both6)[1]["answers"].values()), "the old answer cap cut every one at 400"
+L.MAX_ANSWER = was
 # The hooks' ref scan reads no [A3]/[Q3] in it: the composer writes none outside the quoted lines,
 # and quoted lines are left out of the scan when the pins marker is there (lib/ledgr_map.prompt_refs).
 import ledgr_map as M
 assert M.prompt_refs(pm) == [] and M.prompt_refs(pl) == [], (M.prompt_refs(pm), M.prompt_refs(pl))
+# Nor in an answer sheet's lines (review fix 5): an [A7] inside an answer is not a ref; one typed outside is.
+rs = "ledgr answers aaaaaaaa-3333-0000-0000-000000000001\nAnswers to your asks from turn 2:\nA1: as in [A7],\n  then [Q2]\nA2: yes"
+assert sorted(L.sheet_lines(rs)) == [0, 1, 2, 3, 4], L.sheet_lines(rs)
+assert M.prompt_refs(rs) == [] and M.prompt_refs("see [A9]\n" + rs + "\n\nand [Q3]") == ["A9", "Q3"], M.prompt_refs("see [A9]\n" + rs + "\n\nand [Q3]")
+assert L.sheet_lines("no sheet [A1]") == set() and M.prompt_refs("no sheet [A1]") == ["A1"]
 # The hooks' config defaults agree with config.js on the panel's paste switch (ui.pasteIntoPrompt)
 # and on the spaces where ledgr is off (spaces.disabled, none by default).
 import ledgr_config as K
@@ -81,6 +120,6 @@ assert merged["spaces"]["disabled"] == ["spA"], merged["spaces"]
 PY
 fi
 # The store's summary line last (run-all.sh shows the last line), with the parser check on it.
-if [ "$rc" = 0 ]; then echo "${OUT%, 0 failure(s)}; landing parser reads the confluence, the answer sheets and the pins message (and with their blank line; a sheet after a 45,000-character pins message), 0 failure(s)"; else echo "$OUT"; echo "FAIL: store or landing parser"; fi
+if [ "$rc" = 0 ]; then echo "${OUT%, 0 failure(s)}; landing parser reads the confluence, the answer sheets (a multi-line answer too) and the pins message (and with their blank line; a sheet after a 45,000-character pins message, a 24,000-character one whole), the ref scan skipping a sheet's lines, 0 failure(s)"; else echo "$OUT"; echo "FAIL: store or landing parser"; fi
 rm -rf "$TMP"
 exit $rc

@@ -28,12 +28,17 @@ Where the marker may stand:
 Anything else is not a landing: a marker after text on the same line, after two or more lines of text,
 inside a code fence, with a different case, a double space or a trailing word.
 Where a message ends: at a pasted block's closing line, at the next marker line, or, for an answer
-sheet (its answers are one line each, confluence.js answersSheet), at the first empty line after its
-A<n>: lines that is not followed by another A<n>: line, so text typed below a sheet is not part of it.
+sheet, at the first empty line after its A<n>: lines that is not followed by another A<n>: line, so
+text typed below a sheet is not part of it. An answer of several lines (2026-11-11, the dialog's
+multi-line answer box; confluence.js answerLines) goes on in lines indented by two spaces, with no
+blank line inside it: an indented line after an A<n>: line belongs to that answer (joined by a line
+break) and is never read as another A<n>:, a marker or a fence. An unindented line that is not an
+A<n>: line still joins the answer before it with a space (a wrapped answer, as before).
 A pins message holds blank lines between its pins, so like a confluence it runs to the block's
 closing line, the next marker line or the prompt's end (text typed below it is ignored: its body is
 never read). A pins message and an answer sheet in one prompt, in either order, are two messages.
-detect_all() returns every message in prompt order; detect() the first, or None.
+detect_all() returns every message in prompt order; detect() the first, or None; sheet_lines() the
+lines an answer sheet holds (the hook's ref scan skips them).
 The prompt is never changed. Agent-agnostic and pure (no files, no imports beyond re): the adapter
 supplies the wrapper syntax.
 """
@@ -46,8 +51,9 @@ PINS = re.compile(r"^ledgr pins ([A-Za-z0-9][A-Za-z0-9._:-]{0,127}) (rq_[A-Za-z0
 HANDLE = re.compile(r"^(A\d{1,6})[ \t]*:[ \t]*(.*)$")
 CONCLUSION = re.compile(r"^conclusion\s*:\s*(.*)$", re.I)
 FENCE = re.compile(r"^(```|~~~)")
-MAX_SCAN = 64_000   # a pins message (Ask here) can run past 40,000 before an answer sheet pasted after it
-MAX_ANSWER = 400
+MAX_SCAN = 96_000   # a pins message (Ask here) can run past 40,000 before an answer sheet pasted after it, and a
+                    # sheet runs to 24,000 (confluence.js sheetOverCap; 2026-11-11, answers of several lines)
+MAX_ANSWER = 4_000  # an answer as the store records it (config.js LIMITS.answer, a draft's cap)
 MAX_HANDLES = 60
 MAX_LEAD_IN = 200
 MAX_MESSAGES = 20
@@ -83,6 +89,9 @@ def _parse(first, rest):
     if m:
         handles, answers, cur = [], {}, None
         for line in rest:
+            if cur and _indented(line):
+                answers[cur] = (answers[cur] + "\n" + line.strip()).strip()   # the answer's next line
+                continue
             h = HANDLE.match(line.strip())
             if h:
                 cur = h.group(1)
@@ -109,6 +118,11 @@ def _is_marker(s):
     return bool(CONFLUENCE.match(s) or ANSWERS.match(s) or PINS.match(s))
 
 
+def _indented(line):
+    """An answer's next line in a sheet: not empty, and starting with a space or a tab."""
+    return bool(line.strip()) and line[:1] in (" ", "\t")
+
+
 def _end(lines, bound, k):
     """The index just past the message whose marker is lines[k] (see the module doc)."""
     sheet = bool(ANSWERS.match(lines[k].strip()))
@@ -117,6 +131,8 @@ def _end(lines, bound, k):
         if bound[j]:
             return j
         s = lines[j].strip()
+        if sheet and seen and not fence and _indented(lines[j]):
+            continue                                          # an answer going on: never a marker or a fence
         if FENCE.match(s):
             fence = not fence
         elif fence:
@@ -180,16 +196,14 @@ def _unwrapped(lines, bound):
     return idx
 
 
-def detect_all(prompt, wrapper=None):
-    """Every ledgr message in the prompt, in order: {"kind": "confluence", "branch_id", "item_id",
-    "conclusion_head"}, {"kind": "answers", "for_session", "handles": [...], "answers": {handle:
-    text}} or {"kind": "pins", "for_session", "item_id"}. [] when there is none. wrapper:
-    (opening-line regex, closing-line regex) of the agent's pasted blocks, or None."""
+def _scan(prompt, wrapper):
+    """{marker line index: (index just past the message, its landing)} for every ledgr message in the
+    prompt (line indexes of _lines(prompt)); {} when there is none."""
     if not isinstance(prompt, str):
-        return []
+        return {}
     head = prompt[:MAX_SCAN]
     if not has_marker_text(head):
-        return []                                             # fast path: most prompts end here
+        return {}                                             # fast path: most prompts end here
     lines = _lines(prompt)
     opener, closer = wrapper if wrapper else (None, None)
     bound = [bool(wrapper) and bool(opener.match(x.strip()) or closer.match(x.strip())) for x in lines]
@@ -203,7 +217,7 @@ def detect_all(prompt, wrapper=None):
             hit = _parse(lines[k].strip(), lines[k + 1:e])
             if not hit:
                 return False
-            found[k] = hit
+            found[k] = (e, hit)
             k = _next(lines, bound, e)
         return True
 
@@ -212,7 +226,28 @@ def detect_all(prompt, wrapper=None):
             break
     for k in (_block_starts(lines, opener, closer) if wrapper else []):
         take(k)
-    return [found[k] for k in sorted(found)]
+    return found
+
+
+def detect_all(prompt, wrapper=None):
+    """Every ledgr message in the prompt, in order: {"kind": "confluence", "branch_id", "item_id",
+    "conclusion_head"}, {"kind": "answers", "for_session", "handles": [...], "answers": {handle:
+    text}} or {"kind": "pins", "for_session", "item_id"}. [] when there is none. wrapper:
+    (opening-line regex, closing-line regex) of the agent's pasted blocks, or None."""
+    found = _scan(prompt, wrapper)
+    return [found[k][1] for k in sorted(found)]
+
+
+def sheet_lines(prompt, wrapper=None):
+    """The indexes of the prompt's lines (split at line breaks, CRLF read as LF) that belong to an
+    answer sheet detect_all() finds, its marker line through its last answer: the person's answers,
+    not refs (lib/ledgr_map.prompt_refs leaves them out, so an [A7] written inside an answer does not
+    mark A7 answered). An empty set when there is none."""
+    out = set()
+    for k, (e, hit) in _scan(prompt, wrapper).items():
+        if hit["kind"] == "answers":
+            out.update(range(k, e))
+    return out
 
 
 def detect(prompt, wrapper=None):

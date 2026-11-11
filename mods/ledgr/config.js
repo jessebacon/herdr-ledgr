@@ -55,6 +55,7 @@ export const DEFAULTS = {
 
 export const LIMITS = {
   text: 400,          // Request.text
+  answer: 4000,       // an ask's draft (the answer typed or picked; several lines since 2026-11-11)
   quote: 600,         // Anchor.quote
   ingested: 1000,     // store.ingested ids kept
   parseRetries: 5,    // spool parse retries, 300 ms apart

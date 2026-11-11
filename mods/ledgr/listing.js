@@ -22,6 +22,21 @@ export const ROW = { stateMaxW: 104, textMinW: 48, stateChars: 20 };
 
 const squash = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
 const cut = (s, n) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
+const DAY = 86400e3, HOUR = 3600e3;
+
+// An agent ask with an answer typed or picked that has not reached the agent (2026-11-11, "answered but
+// not sent to prompt"): open (a suggestion below the threshold too) or deferred, with a draft that is not
+// the answer a landed sheet recorded. The store keeps the draft after the sheet lands, so the mark keys
+// on the status (answered, resolved: gone) and, for an ask reopened after its sheet landed, on the
+// recorded answer (store.js on_answers_landed keeps it squashed, whole up to LIMITS.answer, the draft's
+// own cap): equal once both are squashed (the sheet drops blank lines and indents), so an answer edited
+// after it landed ("No" landed, "No, use the replica" typed) is drafted again.
+export function draftPending(it) {
+  if (!isAgentAsk(it) || (it.status !== "open" && it.status !== "deferred")) return false;
+  const d = squash(it.draft);
+  if (!d) return false;
+  return d !== squash(it.answer);
+}
 
 // The first non-empty line of a text, whitespace collapsed, cut at n characters (the last one "…").
 export function firstLine(text, n = 160) {
@@ -84,11 +99,14 @@ export function stateOf(kind, x, ctx = {}) {
     return w("done", "done");
   }
   if (it.status === "dismissed") return it.dismissedBy === "clear" ? w("cleared", "dim") : w("not needed", "dim");
-  if (it.status === "deferred") return w("deferred", "muted");
+  // An answer typed or picked and not sent (draftPending): "drafted", dim, where no Paste button stands
+  // for it (a deferred ask, a suggestion: Promote is their quick action); the glyph and the pill still say
+  // deferred or below the threshold.
+  if (it.status === "deferred") return k === "ask" && draftPending(it) ? w("drafted", "dim") : w("deferred", "muted");
   if (k === "ask") {
     if (it.status === "answered") return w("answered", "accent");
     if (it.status === "open") {
-      if (isSuggestion(it, ctx.threshold)) return w("below threshold", "dim");
+      if (isSuggestion(it, ctx.threshold)) return draftPending(it) ? w("drafted", "dim") : w("below threshold", "dim");
       if (squash(it.draft)) return w("answer ready", "accent");
       if (it.repeatOf) return w("raised again", "accent");
       return w("open", isBlocking(it) ? "blocked" : "accent");
@@ -117,11 +135,13 @@ function tipOf(text, quote, note) {
 // One list row (1.2). kind: "ask", "question", "pin", "branch" ("item": an ask or a question by its
 // direction). ctx: {threshold, now, here, store, branchLive: (br) => live word}. Returns {key, kind, id,
 // sessionId, handle, pill: {text, tone} | null, text, state: {word, tone}, glyph: [char, tone, icon],
-// quick: {done, paste, promote}, tip}. glyph[2] names an icon the drawer may use instead of the char
-// ("pin", "git-branch", "spinner"; null for items). quick.done: an ask or question not closed (shown on
-// hover and on the cursor row); quick.paste: an open ask (not answered, deferred or closed: an answer
+// quick: {done, paste, promote}, drafted, tip}. glyph[2] names an icon the drawer may use instead of the
+// char ("pin", "git-branch", "spinner"; null for items). quick.done: an ask or question not closed (shown
+// on hover and on the cursor row); quick.paste: an open ask (not answered, deferred or closed: an answer
 // that landed is not pasted twice), not below the threshold, with an answer typed or picked;
-// quick.promote: an ask below the threshold, not closed (it stands in for Paste).
+// quick.promote: an ask below the threshold, not closed (it stands in for Paste). drafted: an answer
+// typed or picked and not sent (draftPending): Paste (an open row) or the word "drafted" (a suggestion, a
+// deferred ask) shows it, and the tooltip ends with the answer.
 export function rowModel(kind, x, ctx = {}) {
   const k = rowKind(x, kind);
   const none = { done: false, paste: false, promote: false };
@@ -129,14 +149,14 @@ export function rowModel(kind, x, ctx = {}) {
     const p = x ?? {};
     return { key: entryKey("pin", p.id), kind: "pin", id: p.id, sessionId: p.sessionId ?? null, handle: handleWords(p.handle), pill: null,
       text: firstLine(p.text), state: stateOf("pin", p, ctx), glyph: ["•", p.status === "archived" ? "dim" : "accent", "pin"],
-      quick: { ...none }, tip: tipOf(p.text, null, p.note) };
+      quick: { ...none }, drafted: false, tip: tipOf(p.text, null, p.note) };
   }
   if (k === "branch") {
     const br = x ?? {}, it = typeof ctx.store?.item === "function" ? ctx.store.item(br.requestId) : null;
     const st = stateOf("branch", br, ctx), live = liveOf(br, ctx);
     return { key: entryKey("branch", br.id), kind: "branch", id: br.id, sessionId: br.parentSessionId ?? null, handle: branchWords(it),
       pill: br.name ? { text: br.name, tone: "dim" } : null, text: it ? itemText(it) : "", state: st,
-      glyph: ["↳", st.tone, BR_SPIN.has(live) ? "spinner" : "git-branch"], quick: { ...none },
+      glyph: ["↳", st.tone, BR_SPIN.has(live) ? "spinner" : "git-branch"], quick: { ...none }, drafted: false,
       tip: tipOf(it?.text || it?.anchor?.quote || "", null, null) };
   }
   const it = x ?? {}, ask = k === "ask", closed = isClosed(it);
@@ -151,10 +171,59 @@ export function rowModel(kind, x, ctx = {}) {
     else if (it.kind === "bookmark") pill = { text: "bookmark", tone: "dim" };
     else if (it.origin === "btw" || it.btwStagedAt) pill = { text: "/btw", tone: "muted" };
   }
+  const drafted = ask && draftPending(it);
+  const tip = tipOf(it.text, it.anchor?.quote, null);
   return { key: entryKey(k, it.id), kind: k, id: it.id, sessionId: it.anchor?.sessionId ?? null, handle: handleWords(it.handle), pill,
     text: itemText(it), state: stateOf(k, it, ctx), glyph: [...glyphOf(it, sug), null],
     quick: { done: !closed, paste: ask && it.status === "open" && !sug && Boolean(squash(it.draft)), promote: ask && !closed && sug },
-    tip: tipOf(it.text, it.anchor?.quote, null) };
+    drafted, tip: drafted ? [tip, `Your answer, not sent yet: ${cut(squash(it.draft), 120)}`].filter(Boolean).join("\n") : tip };
+}
+
+// ── the panel's lanes as sequences (the dialog's previous and next, 2026-11-11) ──
+// The record ids of the lane x is drawn in, in the order panel.js draws them (body, pinsLane,
+// suggestions), whatever is folded there: the asks lane by turn, newest first, each turn's asks blocking
+// first then in the message's order, then its asks below the threshold; YOUR QUESTIONS newest first; the
+// session's branches newest first (a refused or failed one an hour old is not drawn); a session's pins
+// newest first, the archived ones apart; the OLDER THAN A DAY, DEFERRED and CLOSED folds, asks and
+// questions together, the most recently changed first. Child questions are in YOUR QUESTIONS only.
+// {lane, ids}: lane "asks", "mine", "branches", "pins", "archived", "older", "deferred", "closed", or
+// null (nothing to step through). opts: {threshold, now}.
+export function laneOf(store, kind, x, { threshold, now = Date.now() } = {}) {
+  if (!store || !x) return { lane: null, ids: [] };
+  const k = rowKind(x, kind);
+  const ids = (list) => list.map((r) => r.id);
+  if (k === "pin") {
+    const archived = x.status === "archived";
+    return { lane: archived ? "archived" : "pins", ids: ids(store.pinsIn(x.sessionId, { archived })) };
+  }
+  if (k === "branch") {
+    const shown = (b) => b.id === x.id || !((b.status === "refused" || b.status === "failed") && now - (b.updatedAt ?? b.createdAt ?? 0) > HOUR);
+    return { lane: "branches", ids: ids(store.branchesOf(x.parentSessionId).filter(shown)) };
+  }
+  const items = store.itemsOf(x.anchor?.sessionId);
+  const stale = (it) => it.status === "open" && now - (it.updatedAt ?? 0) > DAY;
+  const active = (it) => (it.status === "open" || it.status === "answered" || it.status === "rejoin_pending") && !stale(it);
+  const changed = (a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0);
+  if (stale(x)) return { lane: "older", ids: ids(items.filter(stale).sort(changed)) };
+  if (x.status === "deferred") return { lane: "deferred", ids: ids(items.filter((it) => it.status === "deferred").sort(changed)) };
+  if (isClosed(x)) return { lane: "closed", ids: ids(items.filter(isClosed).sort(changed)) };
+  if (k === "question") return { lane: "mine", ids: ids(items.filter((it) => isHuman(it) && active(it)).sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))) };
+  const asks = items.filter((it) => isAgentAsk(it) && active(it));
+  const out = [];
+  for (const turn of [...new Set(asks.map((it) => it.anchor?.turn))].sort((a, b) => b - a)) {
+    const all = asks.filter((it) => it.anchor?.turn === turn);
+    out.push(...all.filter((it) => !isSuggestion(it, threshold)).sort((a, b) => (isBlocking(b) ? 1 : 0) - (isBlocking(a) ? 1 : 0) || (a.seq ?? 0) - (b.seq ?? 0)),
+      ...all.filter((it) => isSuggestion(it, threshold)).sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0)));
+  }
+  return { lane: "asks", ids: ids(out) };
+}
+
+// Where id stands in a lane's ids: {at, of, prev, next} (at counts from 1; prev and next null at the
+// ends: no wrap). An id not in the list: at 0, no neighbours.
+export function neighbors(ids, id) {
+  const list = Array.isArray(ids) ? ids : [], i = list.indexOf(id);
+  if (i < 0) return { at: 0, of: list.length, prev: null, next: null };
+  return { at: i + 1, of: list.length, prev: i > 0 ? list[i - 1] : null, next: i < list.length - 1 ? list[i + 1] : null };
 }
 
 // An item's one line: its text's first line; a bookmark (no text), the first line of its quote in quotes.

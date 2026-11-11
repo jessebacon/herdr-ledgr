@@ -92,10 +92,22 @@ export function wrapperWords(message, text) {
   return body.split(/\s+/).filter(Boolean).length;
 }
 
+// One answer as sheet lines (2026-11-11, multi-line answers): "A5: <its first line>", then each further
+// line indented two spaces, its own indentation kept. Blank lines are left out (paragraphs joined by one
+// line break): the landing parser ends a sheet at a blank line that no A<n>: line follows, and reads an
+// indented line as the answer going on, never as another A<n>:, a marker or a fence
+// (bin/lib/ledgr_landing.py). Trailing spaces go. No text: [].
+export function answerLines(handle, text) {
+  const lines = String(text ?? "").replace(/\r\n?/g, "\n").split("\n").map((l) => l.replace(/\s+$/, "")).filter((l) => l.trim());
+  if (!lines.length) return [];
+  return [`${handle}: ${lines[0].trim()}`, ...lines.slice(1).map((l) => `  ${l}`)];
+}
+
 // The answer sheet (spec 6.4), keyed by handle in ask order: marker, one line for the model, then
-// "A5: <answer>" lines. Asks without a typed answer are left out.
+// "A5: <answer>" (an answer of several lines goes on indented: answerLines). Asks without a typed answer
+// are left out.
 export function answersSheet(sessionId, turn, items) {
-  const lines = (items ?? []).filter((it) => squash(it.draft)).map((it) => `${it.handle}: ${squash(it.draft)}`);
+  const lines = (items ?? []).filter((it) => squash(it.draft)).flatMap((it) => answerLines(it.handle, it.draft));
   if (!lines.length) return "";
   return [`${ANSWERS_MARK} ${sessionId}`, `Answers to your asks from turn ${turn}:`, ...lines].join("\n");
 }
@@ -237,7 +249,8 @@ export function pinsConcludeSkeleton(pins, { sessionId = null } = {}) {
 }
 
 // The most pinned characters one message carries (config.js LIMITS.pinsPreamble; 24,000 when unset): the
-// branch preamble (branch.js manifest) and the trunk's pins message (Ask here, Copy for prompt) alike.
+// branch preamble (branch.js manifest) and the trunk's pins message (Ask here, Copy for prompt) alike, and
+// the length of an answer sheet (sheetOverCap).
 export const pinsCap = () => {
   const n = Number(LIMITS?.pinsPreamble);
   return Number.isFinite(n) && n > 0 ? n : 24000;
@@ -251,4 +264,13 @@ export function pinsOverCap(chars, { branch = false } = {}) {
   const max = pinsCap();
   if (!(num(chars, 0) > max)) return null;
   return `the pinned passages are ${thousands(chars)} characters, over the ${thousands(max)} a ${branch ? "branch preamble" : "pins message"} carries: ${branch ? "ask here instead, or attach fewer pins" : "attach fewer pins"}`;
+}
+
+// An answer sheet over the same cap (2026-11-11: answers of up to LIMITS.answer each could make a sheet
+// the hook's parser, which reads a prompt's first ledgr_landing.MAX_SCAN characters, never finishes), in
+// the pins' wording; null when it fits. chars: the sheet's length (answersSheet).
+export function sheetOverCap(chars) {
+  const max = pinsCap();
+  if (!(num(chars, 0) > max)) return null;
+  return `the turn's answers are ${thousands(chars)} characters, over the ${thousands(max)} one message carries: paste fewer at once`;
 }

@@ -379,6 +379,28 @@ const one = CF.answersSheet(TR, 2, [a2]);
 A.equal(one, `ledgr answers ${TR}\nAnswers to your asks from turn 2:\nA2: after the reboot`);
 A.equal(CF.answersLeadIn(["A2"]), "My answer to A2:"); A.equal(CF.answersLeadIn(["A1", "A2"]), "My answers to A1, A2:");
 fsm.writeFileSync(`${dir}/msg-answer-one.txt`, `${CF.answersLeadIn(["A2"])}\n${one}`);
+// A multi-line answer (2026-11-11, the dialog's Textarea): its paragraphs joined by one line break, each line
+// after the first indented two spaces (its own indentation kept), so the blank line between paragraphs never
+// ends the sheet and a line that looks like "A2: ..." stays part of the answer (tests/test-store.sh parses it).
+const multi = CF.answersSheet(TR, 2, [{ ...a1, draft: "Transaction pooling.\n\nA2: is not a handle here,\n    just text\n\n" }, a2]);
+A.equal(multi, `ledgr answers ${TR}\nAnswers to your asks from turn 2:\nA1: Transaction pooling.\n  A2: is not a handle here,\n      just text\nA2: after the reboot`);
+A.deepEqual(CF.answerLines("A3", "  one\r\n\r\n two  \n"), ["A3: one", "   two"], "CRLF, a blank line, trailing spaces");
+A.deepEqual(CF.answerLines("A3", " \n "), [], "blank: no lines");
+fsm.writeFileSync(`${dir}/msg-answers-multi.txt`, multi);
+// A draft keeps its line breaks and is cut at LIMITS.answer (4,000), not at the 400 of an ask's text.
+const keepDraft = a2.draft;
+st.act(a2.id, "draft", "line\n".repeat(1000)); A.equal(a2.draft.length, 4000, "a draft is cut at LIMITS.answer"); A.ok(a2.draft.startsWith("line\nline\n"), "with its line breaks");
+st.act(a2.id, "draft", keepDraft);
+// A sheet near the cap (review fix 6, 2026-11-11): six answers of about 3,800 characters, several lines each,
+// under the 24,000 one message carries (sheetOverCap null); tests/test-store.sh lands it after the long pins
+// message with every answer whole (ledgr_landing.py MAX_SCAN 96,000, MAX_ANSWER 4,000). Over: refused.
+const para = (i) => Array.from({ length: 70 }, (_, k) => `Answer ${i}, line ${k}: the pool goes to forty after the cutover.`).join("\n").slice(0, 3800);
+const longSheet = CF.answersSheet(TR, 2, Array.from({ length: 6 }, (_, i) => ({ handle: `A${i + 1}`, draft: para(i + 1) })));
+A.ok(longSheet.length > 23000 && longSheet.length <= 24000, `the long sheet is just under the cap (${longSheet.length})`);
+A.equal(CF.sheetOverCap(longSheet.length), null, "under the cap: staged");
+A.equal(CF.sheetOverCap(24000), null, "at the cap: staged");
+A.equal(CF.sheetOverCap(25310), "the turn's answers are 25,310 characters, over the 24,000 one message carries: paste fewer at once", "over: the pins' wording");
+fsm.writeFileSync(`${dir}/msg-answers-long.txt`, longSheet);
 st.apply(tev("prompt", { turn: 5, prompt_id: "tp5", local: false, prompt_head: sheet, refs: [] }));
 A.equal(a1.status, "open", "the sheet has no [A1] refs: the prompt alone does not answer");
 st.apply(tev("answers_landed", { turn: 5, for_session: OTHER, handles: ["A1"], answers: { A1: "x" } }));
@@ -386,6 +408,15 @@ A.equal(a1.status, "open", "a sheet for another session is ignored");
 st.apply(tev("answers_landed", { turn: 5, for_session: TR, handles: ["A1", "A2", "A3", "A9"], answers: { A1: "a, as you recommended.", A2: "after the reboot", A3: "late" } }));
 A.equal(a1.status, "answered"); A.equal(a1.answer, "a, as you recommended."); A.equal(a1.answeredTurn, 5); A.equal(a1.answeredBy, "sheet");
 A.equal(a2.status, "answered"); A.equal(a2.answer, "after the reboot");
+// The recorded answer is whole up to LIMITS.answer (4,000; was LIMITS.text, 400), squashed, so a reopened ask's
+// draft is compared whole (listing.js draftPending, review fix 4).
+const longAns = `${"word ".repeat(700)}\n  and the end`;
+st.apply(tev("answers_landed", { turn: 5, for_session: TR, handles: ["A2"], answers: { A2: longAns } }));
+A.equal(a2.answer, longAns.replace(/\s+/g, " ").trim(), "a 3,500-character answer recorded whole, squashed"); A.ok(a2.answer.length > 3000);
+st.apply(tev("answers_landed", { turn: 5, for_session: TR, handles: ["A2"], answers: { A2: "z".repeat(5000) } }));
+A.equal(a2.answer.length, 4000, "cut at LIMITS.answer");
+st.apply(tev("answers_landed", { turn: 5, for_session: TR, handles: ["A2"], answers: { A2: "after the reboot" } }));
+A.equal(a2.answer, "after the reboot");
 A.equal(a3.status, "dismissed", "a dismissed ask stays dismissed");
 A.equal(st.byHandle(TR, "Q1").status, "resolved", "answers do not touch questions");
 st.apply(tev("asks", { turn: 6, source: "model", asks: [ask("Pick the pool mode", "decide", { options: ["a", "b"] })] }));

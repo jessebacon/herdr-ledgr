@@ -205,11 +205,12 @@ export const LINK_WORDS = {
 export const BRANCH_NO_TURN = "The branch has not finished a turn yet: its last message shows here once a turn ends.";
 
 // The dialog's key hints, at the right of its footer: [key, what] pairs. Esc always; Tab when the dialog
-// has a field; Enter for the field that has one.
+// has a field; the answer box (a Textarea since 2026-11-11): ⌘Enter for the turn's answers, Enter a new
+// line; the note: Enter saves it.
 export function detailHints({ answer = false, note = false, conclude = false, paste = true } = {}) {
   const out = [["Esc", "close"]];
   if (answer || note || conclude) out.push(["Tab", "next field"]);
-  if (answer) out.push(["Enter", paste ? "paste the turn's answers" : "copy the turn's answers"]);
+  if (answer) out.push(["⌘Enter", paste ? "paste the turn's answers" : "copy the turn's answers"], ["Enter", "newline"]);
   if (note) out.push(["Enter", "save the note"]);
   return out;
 }

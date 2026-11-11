@@ -6,6 +6,8 @@ fields (all optional strings unless noted): cwd, transcript_path, session_title,
 prompt, prompt_id, last_assistant_message, reason; config_dir and profile (the agent's config
 folder and its short name, when the adapter knows them: Claude's CLAUDE_CONFIG_DIR, "default" or
 "work"; recorded on any event, carried by session_start and prompt); local (bool, prompt only);
+paste_wrapper (prompt only: the adapter's (opening-line regex, closing-line regex) of a pasted block,
+so the ref scan finds an answer sheet as the landing does; none: unwrapped sheets only);
 session_name_fallback (callable sid -> name|None, SessionStart only); turn_text, turn_blocks (list)
 and turn_source (Stop only, when the adapter read the whole turn: Claude's transcript, once it holds
 the final message); turn_lagged (bool, Stop only: the adapter could not confirm the whole turn yet,
@@ -314,12 +316,19 @@ def write_map(t, rec, event, now):
     C.write_json(C.path("terminals", C.tfile(t) + ".json"), map_record(t, rec, event, now))
 
 
-def prompt_refs(p):
+def prompt_refs(p, wrapper=None):
     """The [A3] and [Q3] handles a prompt names, in order, each once. A prompt that carries a pins
     message (a line matching lib/ledgr_landing.PINS: `ledgr pins <session id> <item id>`) quotes its
     pinned passages line by line with "> ": history from earlier turns or other sessions, not the
     person's refs, so lines starting with ">" are left out of the scan (a passage naming [A3] would
-    otherwise mark A3 answered). Every other prompt is scanned whole."""
+    otherwise mark A3 answered). The lines of an answer sheet (lib/ledgr_landing.sheet_lines; wrapper:
+    the adapter's paste wrapper, as for the landing) are left out too: an [A7] written inside an answer
+    is the person's text, not a ref, and the sheet itself answers the asks it lists. Every other prompt
+    is scanned whole."""
+    if "ledgr answers " in p:
+        skip = L.sheet_lines(p, wrapper)
+        if skip:
+            p = "\n".join(x for i, x in enumerate(p.replace("\r\n", "\n").split("\n")) if i not in skip)
     if "ledgr pins " in p and any(L.PINS.match(x.strip()) for x in p.splitlines()):
         p = "\n".join(x for x in p.splitlines() if not x.lstrip().startswith(">"))
     refs = []
@@ -415,7 +424,7 @@ def handle(event, sid, t, agent, fields):
                 rec.update(turn=turn, prompt_id=pid_)
             if not local:
                 rec["state"] = "working"
-            refs = prompt_refs(p)
+            refs = prompt_refs(p, fields.get("paste_wrapper"))
             if not quiet:
                 S.prompt(t, sid, turn=turn, prompt_id=pid_, local=local, prompt_head=p, refs=refs,
                          config_dir=rec.get("config_dir"), profile=rec.get("profile"), at=now)

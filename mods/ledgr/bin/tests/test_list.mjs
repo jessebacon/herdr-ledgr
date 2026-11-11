@@ -1,6 +1,8 @@
 // ledgr list unit test (docs/design/Detail.md 6.1): listing.js, the panel's one-line rows and its keyboard
 // cursor. firstLine; glyphOf for every status; stateOf for every row of 1.3, each kind, the first match
-// winning; rowModel's handle, pill, text, quick actions and tooltip; entryKey; moveCursor and keepPlace.
+// winning; rowModel's handle, pill, text, quick actions and tooltip; the drafted mark (draftPending, an
+// answer not sent: 2026-11-11); entryKey; moveCursor and keepPlace; laneOf and neighbors (the dialog's
+// previous and next, in the panel's order).
 // Then, as text: listing.js is pure (no herdr, no gpui), reader.js holds every Reader member of 5.2, and
 // panel.js extends Reader, defines no `stage` of its own and opens the dialog with detailSpec.
 // Pure: no Herdr window, no files outside a temp folder.
@@ -93,9 +95,12 @@ try {
   A.equal(W("ask", ask("A1", { status: "resolved" })), "done|done");
   A.equal(W("ask", ask("A1", { status: "dismissed", dismissedBy: "clear" })), "cleared|dim");
   A.equal(W("ask", ask("A1", { status: "dismissed" })), "not needed|dim");
-  A.equal(W("ask", ask("A1", { status: "deferred", draft: "yes" })), "deferred|muted", "deferred wins over a draft");
+  A.equal(W("ask", ask("A1", { status: "deferred", draft: "yes" })), "drafted|dim", "deferred with an answer not sent: drafted (2026-11-11; the glyph says deferred)");
+  A.equal(W("ask", ask("A1", { status: "deferred" })), "deferred|muted", "deferred, no answer");
+  A.equal(W("question", q("Q1", { status: "deferred", draft: "yes" })), "deferred|muted", "a question never shows drafted");
   A.equal(W("ask", ask("A1", { status: "answered", draft: "yes" })), "answered|accent", "the sheet landed");
-  A.equal(W("ask", ask("A1", { level: "optional", draft: "yes", repeatOf: "rq_x" })), "below threshold|dim", "below the threshold wins over a draft");
+  A.equal(W("ask", ask("A1", { level: "optional", draft: "yes", repeatOf: "rq_x" })), "drafted|dim", "below the threshold with an answer not sent: drafted (the pill and the hollow glyph say below)");
+  A.equal(W("ask", ask("A1", { level: "optional", repeatOf: "rq_x" })), "below threshold|dim", "below the threshold, no answer");
   A.equal(W("ask", ask("A1", { level: "optional" }), { ...ctx, threshold: "optional" }), "open|accent", "the same ask at threshold optional is an open row");
   A.equal(W("ask", ask("A1", { draft: "  fast  ", repeatOf: "rq_x" })), "answer ready|accent", "a draft wins over raised again");
   A.equal(W("ask", ask("A1", { draft: "   " })), "open|accent", "a blank draft is no answer");
@@ -152,7 +157,7 @@ try {
   // ── rowModel ─────────────────────────────────────────────────────────────
   const M = (kind, x, c = ctx) => LS.rowModel(kind, x, c);
   let m = M("ask", ask("A5", { level: "blocking", kind: "decide" }));
-  A.deepEqual(Object.keys(m).sort(), ["glyph", "handle", "id", "key", "kind", "pill", "quick", "sessionId", "state", "text", "tip"].sort(), "the model's fields");
+  A.deepEqual(Object.keys(m).sort(), ["drafted", "glyph", "handle", "id", "key", "kind", "pill", "quick", "sessionId", "state", "text", "tip"].sort(), "the model's fields");
   A.equal(m.key, "item:rq_a5"); A.equal(m.kind, "ask"); A.equal(m.id, "rq_a5"); A.equal(m.sessionId, SID); A.equal(m.handle, "Ask 5");
   A.deepEqual(m.pill, { text: "blocking", tone: "blocked" }, "blocking pill");
   A.deepEqual(m.glyph, ["◆", "blocked", null]);
@@ -178,7 +183,7 @@ try {
   A.deepEqual(M("ask", ask("A5", { draft: "fast" })).quick, { done: true, paste: true, promote: false }, "an answer ready: Paste");
   // Answered (the sheet landed, the draft stays) or deferred: no Paste (a second paste would repeat an answer
   // already sent), and the row keeps its state word, which the panel draws whenever Paste is not shown.
-  for (const [status, word] of [["answered", "answered|accent"], ["deferred", "deferred|muted"]]) {
+  for (const [status, word] of [["answered", "answered|accent"], ["deferred", "drafted|dim"]]) {
     const am = M("ask", ask("A5", { draft: "fast", status }));
     A.deepEqual(am.quick, { done: true, paste: false, promote: false }, `${status} with a draft: Done, no Paste`);
     A.equal(`${am.state.word}|${am.state.tone}`, word, `${status} with a draft: its state word`);
@@ -196,6 +201,35 @@ try {
   const tl = M("ask", ask("A5", { text: "t".repeat(400), anchor: { sessionId: SID, turn: 7, quote: "q".repeat(200) } })).tip.split("\n");
   A.equal(tl[0].length, 300); A.ok(tl[0].endsWith("…")); A.equal(tl[1].length, 122, "the quote's first 120 in quotes"); A.ok(tl[1].startsWith("“") && tl[1].endsWith("”"));
   A.equal(M("question", q("Q2", { text: "Why?", anchor: { sessionId: SID, turn: 7 } })).tip, "Why?", "no quote");
+  // drafted (2026-11-11): an answer typed or picked that has not reached the agent, on an open row (Paste
+  // shows it), a suggestion and a deferred ask (the word "drafted", dim); gone once the sheet lands.
+  const DR = (o, c = ctx) => M("ask", ask("A5", { draft: "Two lines\nof answer", ...o }), c);
+  A.equal(DR({}).drafted, true, "open with a draft: drafted"); A.equal(DR({}).quick.paste, true, "...shown as Paste"); A.equal(DR({}).state.word, "answer ready", "...the word Paste stands for");
+  A.equal(DR({ level: "optional" }).drafted, true, "a suggestion with a draft: drafted");
+  A.deepEqual(DR({ level: "optional" }).state, { word: "drafted", tone: "dim" }, "...the dim word, not accent");
+  A.equal(DR({ level: "optional" }).quick.paste, false, "...still no Paste on a suggestion (Promote)");
+  A.equal(DR({ level: "needed" }, { ...ctx, threshold: "blocking" }).state.word, "drafted", "a needed ask below a blocking threshold (the maintainer's): drafted");
+  A.equal(DR({ status: "deferred" }).drafted, true, "deferred with a draft: drafted"); A.deepEqual(DR({ status: "deferred" }).state, { word: "drafted", tone: "dim" });
+  for (const status of ["answered", "resolved", "dismissed"]) {
+    A.equal(DR({ status }).drafted, false, `${status}: the mark clears (the draft is kept by the store)`);
+    A.notEqual(DR({ status, level: "optional" }).state.word, "drafted", `${status} suggestion: no drafted word`);
+  }
+  A.equal(DR({ status: "resolved", resolvedBy: "answer" }).state.word, "answered by you", "the sheet landed and took: its own word");
+  A.equal(DR({ draft: "   " }).drafted, false, "a blank draft is no answer");
+  A.equal(M("ask", ask("A5")).drafted, false, "no draft");
+  A.equal(M("question", q("Q2", { draft: "x" })).drafted, false, "a question is never drafted");
+  // Reopened after its sheet landed: the draft is what landed (the store's answer, squashed, whole up to
+  // LIMITS.answer), so not drafted; a new draft typed after it is, an edit that keeps the old start too
+  // (review fix 4, 2026-11-11: compared whole, no longer by prefix).
+  A.equal(DR({ level: "optional", answer: "Two lines of answer" }).drafted, false, "reopened, the draft is the answer that landed: not drafted");
+  A.equal(DR({ level: "optional", draft: "Two lines\n\n  of answer\n", answer: "Two lines\nof answer" }).drafted, false, "...compared squashed (the sheet drops blank lines and indents)");
+  A.equal(DR({ level: "optional", draft: "x".repeat(3000), answer: "x".repeat(3000) }).drafted, false, "...a long one recorded whole");
+  A.equal(DR({ level: "optional", answer: "something else" }).drafted, true, "...a new answer typed since: drafted");
+  A.equal(DR({ draft: "No, use the replica", answer: "No" }).drafted, true, "4: reopened, an answer edited after it landed (\"No\" landed, \"No, use the replica\" typed): drafted");
+  A.equal(DR({ level: "optional", draft: "x".repeat(500), answer: "x".repeat(400) }).drafted, true, "4: ...an answer longer than the one recorded too");
+  A.equal(LS.draftPending(ask("A5", { draft: "a" })), true); A.equal(LS.draftPending(null), false); A.equal(LS.draftPending(q("Q5", { draft: "a" })), false);
+  A.equal(DR({ level: "optional" }).tip.split("\n").at(-1), "Your answer, not sent yet: Two lines of answer", "the tooltip ends with the answer, on one line");
+  A.ok(!M("ask", ask("A5")).tip.includes("not sent"), "no draft: the tooltip as before");
   // pins
   m = M("pin", pins["pn_test-pin-0001"]);
   A.equal(m.key, "pin:pn_test-pin-0001"); A.equal(m.kind, "pin"); A.equal(m.handle, "Pin 1"); A.equal(m.pill, null); A.equal(m.text, "Pinned passage P1");
@@ -263,15 +297,56 @@ try {
   A.equal(LS.keepPlace(["a"], ["b"], "zzz"), null, "a cursor never listed");
   A.equal(LS.keepPlace(["a", "zzz"], ["zzz", "b"], "zzz"), "zzz");
 
+  // ── laneOf, neighbors (the dialog's previous and next, 2026-11-11) ────────
+  {
+    const L2 = "bbbbbbbb-1111-4222-8333-000000000002", T0 = NOW - 3600e3;
+    const mk = (h, o) => ({ id: `rq_l${h.toLowerCase()}`, handle: h, direction: "agent_to_human", kind: "decide", status: "open", level: "needed", text: h,
+      anchor: { sessionId: L2, turn: 9, settled: true }, createdAt: T0, updatedAt: T0, ...o });
+    const mq = (h, o) => ({ ...mk(h, o), direction: "human_to_agent", kind: "question", level: undefined, ...o });
+    const its = [
+      mk("A1", { seq: 2 }), mk("A2", { seq: 0, level: "blocking" }), mk("A3", { seq: 1 }), mk("A4", { seq: 3, level: "optional" }), mk("A5", { seq: 4, level: "optional", promoted: true }),
+      mk("A6", { seq: 0, anchor: { sessionId: L2, turn: 8, settled: true } }), mk("A7", { seq: 1, level: "optional", anchor: { sessionId: L2, turn: 8, settled: true } }),
+      mk("A8", { seq: 9, status: "answered" }), mk("A9", { seq: 5, updatedAt: NOW - 2 * DAY }), mk("A10", { status: "deferred", updatedAt: T0 + 5 }),
+      mk("A11", { status: "resolved", updatedAt: T0 + 9 }), mq("Q1", { createdAt: T0 + 1 }), mq("Q2", { createdAt: T0 + 3, parentId: "rq_la1" }), mq("Q3", { createdAt: T0 + 2, status: "rejoin_pending" }),
+      mq("Q4", { status: "deferred", updatedAt: T0 + 7 }), mq("Q5", { status: "dismissed", updatedAt: T0 + 20 }),
+    ];
+    const ls = new Store({ v: 1, items: Object.fromEntries(its.map((it) => [it.id, it])), sessions: { [L2]: { sessionId: L2, turn: 9 } },
+      branches: { br_a: { id: "br_a", parentSessionId: L2, requestId: "rq_lq1", status: "running", createdAt: T0 + 2 }, br_b: { id: "br_b", parentSessionId: L2, requestId: "rq_lq1", status: "refused", createdAt: T0 - DAY, updatedAt: T0 - DAY },
+        br_c: { id: "br_c", parentSessionId: L2, requestId: "rq_lq1", status: "rejoined", createdAt: T0 + 1 } },
+      pins: Object.fromEntries([["P1", 1], ["P2", 3], ["P3", 2]].map(([h, k]) => [`pn_lane-pin-000${h.slice(1)}`, { id: `pn_lane-pin-000${h.slice(1)}`, handle: h, sessionId: L2, status: h === "P3" ? "archived" : "open", text: h, anchor: { sessionId: L2, turn: 2 }, createdAt: T0 + k }])) });
+    const H_ = (r) => r.ids.map((id) => ls.item(id)?.handle ?? ls.pin(id)?.handle ?? id);
+    const lane = (h, c = { threshold: "needed", now: NOW }) => LS.laneOf(ls, "item", ls.byHandle(L2, h), c);
+    A.equal(lane("A1").lane, "asks");
+    A.deepEqual(H_(lane("A1")), ["A2", "A3", "A1", "A5", "A8", "A4", "A6", "A7"], "asks: newest turn first; blocking first, then the message's order; a promoted ask counts; answered stays; below the threshold last in its turn; the stale A9 is not here");
+    A.deepEqual(H_(lane("A4")), H_(lane("A1")), "a suggestion steps through the same lane");
+    A.deepEqual(H_(lane("A1", { threshold: "optional", now: NOW })), ["A2", "A3", "A1", "A4", "A5", "A8", "A6", "A7"], "threshold optional: no suggestions, the message's order");
+    A.deepEqual(H_(lane("A1", { threshold: "blocking", now: NOW })), ["A2", "A5", "A3", "A1", "A4", "A8", "A6", "A7"], "threshold blocking: the needed ones are suggestions, after the open rows (A5 promoted stays one)");
+    A.deepEqual(H_(lane("Q1")), ["Q2", "Q3", "Q1"], "YOUR QUESTIONS: newest first, rejoin_pending and a child question too");
+    A.equal(lane("Q1").lane, "mine");
+    A.deepEqual([lane("A9").lane, H_(lane("A9"))], ["older", ["A9"]], "a stale ask: the OLDER THAN A DAY fold");
+    A.deepEqual([lane("A10").lane, H_(lane("A10"))], ["deferred", ["Q4", "A10"]], "DEFERRED: asks and questions, most recently changed first");
+    A.deepEqual([lane("Q5").lane, H_(lane("Q5"))], ["closed", ["Q5", "A11"]], "CLOSED");
+    A.deepEqual(H_(LS.laneOf(ls, "pin", ls.pin("pn_lane-pin-0001"), {})), ["P2", "P1"], "pins: newest first, the archived one apart");
+    A.deepEqual(H_(LS.laneOf(ls, "pin", ls.pin("pn_lane-pin-0003"), {})), ["P3"], "an archived pin: the archived ones");
+    A.deepEqual(LS.laneOf(ls, "branch", ls.d.branches.br_a, { now: NOW }).ids, ["br_a", "br_c"], "branches newest first, a refused one a day old left out");
+    A.deepEqual(LS.laneOf(ls, "branch", ls.d.branches.br_b, { now: NOW }).ids, ["br_a", "br_c", "br_b"], "...unless it is the one shown");
+    A.deepEqual(LS.laneOf(null, "item", its[0]), { lane: null, ids: [] }); A.deepEqual(LS.laneOf(ls, "item", null), { lane: null, ids: [] });
+    const ids = lane("A1").ids;
+    A.deepEqual(LS.neighbors(ids, ids[2]), { at: 3, of: 8, prev: ids[1], next: ids[3] }, "the third of eight");
+    A.deepEqual(LS.neighbors(ids, ids[0]), { at: 1, of: 8, prev: null, next: ids[1] }, "the first: no previous (no wrap)");
+    A.deepEqual(LS.neighbors(ids, ids[7]), { at: 8, of: 8, prev: ids[6], next: null }, "the last: no next (no wrap)");
+    A.deepEqual(LS.neighbors(ids, "rq_none"), { at: 0, of: 8, prev: null, next: null }, "not in the lane"); A.deepEqual(LS.neighbors(null, "x"), { at: 0, of: 0, prev: null, next: null });
+  }
+
   // ── the contract, as text (5.2) ──────────────────────────────────────────
   const lsrc = src("listing.js");
   A.ok(!/from "herdr"|from "gpui-|from "\.\/(nav|reader|panel|detail|views|fixtures|writer|spool)\.js"/.test(lsrc), "listing.js is pure: store.js and words.js only");
-  for (const e of ["BR_WORD", "firstLine", "glyphOf", "stateOf", "rowModel", "entryKey", "moveCursor", "keepPlace"]) A.ok(new RegExp(`^export (const|function) ${e}\\b`, "m").test(lsrc), `listing.js exports ${e}`);
+  for (const e of ["BR_WORD", "firstLine", "glyphOf", "stateOf", "rowModel", "entryKey", "moveCursor", "keepPlace", "draftPending", "laneOf", "neighbors"]) A.ok(new RegExp(`^export (const|function) ${e}\\b`, "m").test(lsrc), `listing.js exports ${e}`);
   const rsrc = src("reader.js");
   A.ok(/^export class Reader \{/m.test(rsrc), "reader.js exports class Reader");
   for (const name of ["constructor", "startReading", "fallback", "viewStore", "reload", "bump", "overlayLocal", "watchStore", "tickRead", "post", "act", "typeDraft",
     "flushPending", "answerOf", "pasteOn", "demoHow", "stage", "stageAnswers", "copyAnswers", "copyAnswer", "trunkWord", "parentLive", "branchable", "branchLive",
-    "terminalGone", "transcriptOk", "loadPassage", "pinAct", "resume", "pastePending"]) {
+    "terminalGone", "transcriptOk", "loadPassage", "pinAct", "resume", "pastePending", "sendDraft"]) {
     A.ok(new RegExp(`^  (async )?${name}\\(`, "m").test(rsrc), `Reader.${name}`);
   }
   A.ok(/^  constructor\(_?cx, \{ demo/m.test(rsrc), "constructor(cx, {demo})");
@@ -288,8 +363,12 @@ try {
   }
   A.ok(/openOverlay\(detailSpec\(\{ session: sid, kind, id, open: o\.open \?\? null, sel, opener: this\.panelId, demo: this\.demo \}\)\)/.test(psrc), "openDetail opens detailSpec with the props of 5.2");
   A.ok(/track_focus\(this\.keys\)\.on_key_down\(/.test(psrc) && /track_scroll\(this\.listScroll\)/.test(psrc), "the root tracks the list's focus, the list its scroll");
+  const nd = (psrc.match(/^  noteDetail\(cx\) \{[\s\S]*?^  \}$/m) ?? [""])[0];
+  A.ok(/if \(key && key !== this\.openKey && this\.detailId && open\.overlay === this\.detailId\) this\.pendingCursor = key;/.test(nd),
+    "noteDetail: its dialog moving in place (⌘↓ / ⌘↑) moves the cursor (settleCursor applies it when the row is listed)");
+  A.ok(/PANEL_IGNORES = new Set\(\[[^\]]*"detail-next", "detail-prev"\]\)/.test(psrc), "the panel ignores detail-next and detail-prev (the dialog's)");
 
-  console.log(`OK: list, ${checks} checks (firstLine, glyphOf, every state word, rowModel pills, text, quick actions and tooltips, the row's widths at 280 px, entryKey, moveCursor, keepPlace; Reader and panel contract as text), 0 failure(s)`);
+  console.log(`OK: list, ${checks} checks (firstLine, glyphOf, every state word, rowModel pills, text, quick actions and tooltips, the drafted mark, the row's widths at 280 px, entryKey, moveCursor, keepPlace, laneOf and neighbors; Reader and panel contract as text), 0 failure(s)`);
 } finally {
   if (own) fs.rmSync(dir, { recursive: true, force: true });
 }

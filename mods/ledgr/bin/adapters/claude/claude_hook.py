@@ -222,6 +222,7 @@ def run(event, agent):
     if event == "UserPromptSubmit":
         p = inp.get("prompt") if isinstance(inp.get("prompt"), str) else ""
         fields["local"] = bool(LOCAL_CMD.match(p))
+        fields["paste_wrapper"] = (PASTE_OPEN, PASTE_CLOSE)   # the ref scan skips a sheet's lines (M.prompt_refs)
     if event == "SessionStart":
         fields["session_name_fallback"] = lambda s: session_name_fallback(s, cdir)
     if event in ("SessionStart", "UserPromptSubmit"):

@@ -20,7 +20,7 @@ import { writeEvent } from "./spool.js";
 import { stageMessage, promptText, PASTE } from "./nav.js";
 import { FIXTURE_TURNS } from "./fixtures.js";
 import { liveStatus, transcriptPathOf } from "./branch.js";
-import { answersSheet, answersLeadIn } from "./confluence.js";
+import { answersSheet, answersLeadIn, sheetOverCap } from "./confluence.js";
 import { itemWords as H, paneWords as P, sessionWords } from "./words.js";
 
 const squash = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
@@ -241,6 +241,19 @@ export class Reader {
     });
   }
 
+  // One ask's draft posted now, when it still waits for its 800 ms (the dialog moving to another item,
+  // 2026-11-11): typeDraft's timer then sees another seq and posts nothing. true when one was posted.
+  sendDraft(id, cx) {
+    const d = this.drafts.get(id);
+    if (this.demo || !d || d.sent) return false;
+    const it = this.viewStore().item(id);
+    if (!it) return false;
+    d.sent = true;
+    d.seq = (d.seq ?? 0) + 1;
+    this.post("act", { session_id: it.anchor?.sessionId, item: id, action: "draft", arg: d.text }, null, cx);
+    return true;
+  }
+
   // Everything this copy posted that is not written yet, written now and awaited: the drafts still
   // inside their 800 ms, then every event in `unwritten` (again with its own id). For a closing copy
   // (its tasks are cancelled 250 ms after close), so nothing typed or clicked is lost.
@@ -330,9 +343,13 @@ export class Reader {
   // A paste into a prompt is still waiting for the focus (stageMessage's gate, at most PASTE.waitMs + 400).
   pastePending() { return Boolean(this.pasting) && Date.now() - this.pasting < PASTE.waitMs + 400; }
 
-  copyAnswers(s, turn, cx) {
+  // The answer sheet of a turn: every open ask of it (those below the threshold too) with an answer. own:
+  // the id of one more ask of that turn to carry whatever its status (deferred, answered; never closed),
+  // the one whose answer box ⌘Enter was pressed in (Detail pasteSheet).
+  copyAnswers(s, turn, cx, own = null) {
     const st = this.viewStore();
-    const group = st.itemsOf(s.sessionId).filter((it) => isAgentAsk(it) && it.anchor?.turn === turn && it.status === "open").sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+    const group = st.itemsOf(s.sessionId).filter((it) => isAgentAsk(it) && it.anchor?.turn === turn && (it.status === "open" || (it.id === own && !isClosed(it))))
+      .sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
     this.stageAnswers(s, turn, group, cx);
   }
 
@@ -346,6 +363,10 @@ export class Reader {
     if (!msg) { this.flash = group.length === 1 ? `${H(group[0])} has no answer yet: type one or pick an option.` : `No answers typed or picked for turn ${turn}.`; cx.notify(); return; }
     const hs = items.map((it) => it.handle), ws = items.map(H);   // hs: the lead-in's short forms
     const what = ws.length === 1 ? `Answer for ${ws[0]}` : `${ws.length} answers (${ws.join(", ")})`;
+    // Over the most one message carries (confluence.js sheetOverCap, the pins message's cap): the hook
+    // reads a prompt's first MAX_SCAN characters only, and handles past it would never land.
+    const over = sheetOverCap(msg.length);
+    if (over) { this.flash = `${what} not staged: ${over}.`; cx.notify(); return; }
     const lead = answersLeadIn(hs);
     if (this.demo) { cx.write_to_clipboard(promptText(msg)); this.flash = `(demo) ${what} copied to the clipboard; ${this.demoHow(lead)}.`; cx.notify(); return; }
     this.stage(msg, s.terminal, cx, { what, where: P(s.terminal, "the pane"), lead, word: this.trunkWord(s),

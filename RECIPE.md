@@ -193,7 +193,8 @@ Tell the person all of this before copying anything (the manual's step 1).
     line: glyph, `Ask 5`, one pill (its kind; `blocking` in `blocked` for a blocking ask), the text's
     first line, and a state word (`open`, `answer ready`, `raised again` in `accent` for an ask you
     dismissed that the agent raised again, `answered`, `answered by you`, `closed by agent`, `done`,
-    `not needed`, `deferred`). Blocking asks sort first in their group with a `◆` glyph (`blocked`).
+    `not needed`, `deferred`; `drafted` in `dim` on an ask below the threshold or deferred whose answer
+    is typed or picked and not sent, until the sheet lands). Blocking asks sort first in their group with a `◆` glyph (`blocked`).
     Asks below the threshold sit in one folded line at the bottom of their group, `below threshold
     (N)`: open, each row is dim with a hollow glyph, its level as the pill, the state `below
     threshold` and a Promote button; they never count. A spinner and "extracting turn N" sit in the
@@ -211,12 +212,14 @@ Tell the person all of this before copying anything (the manual's step 1).
 - **Detail dialog** (props `{view: "detail", …}`; a click or Enter on a row): centered, 0.6 × 0.75 of
   the window, which dims; `popover` fill inside Herdr's dialog frame. Header, 44 px: glyph, `Ask 15`
   (13 px semibold), its pill, the facts (`decide · turn 17 · declared by the agent`), the state word,
-  the session (agent pill, name, `pane t21`) and `Esc`. From 760 px wide two columns, each scrolling
+  the session (agent pill, name, `pane t21`), `← prev  3 of 19  next →` (the item's place in its lane,
+  in the panel's order; at an end its control is dimmed; none for a lane of one) and `Esc`. From 760 px wide two columns, each scrolling
   on its own: the item on the left (46 %), THE MESSAGE on the right (its turn as markdown, the passage
   marked with a 2 px `accent` bar on an `accent` tint and scrolled into view, `around` / `whole`,
   Copy); narrower, one column with the message last. Left sections: an ask's TEXT, QUOTE, OPTIONS
-  (chips, the recommended one "(rec.)"), ANSWER (the Answer… field with Paste answer, and "Enter
-  pastes the answers for turn N"), RESULT, QUESTIONS ABOUT IT; a question's TEXT, QUOTE (BOOKMARKED
+  (chips, the recommended one "(rec.)"), ANSWER (the Answer… box, two lines growing to ten then
+  scrolling, with Paste answer beside it, and "⌘Enter pastes the answers for turn N (Enter starts a new
+  line)"), RESULT, QUESTIONS ABOUT IT; a question's TEXT, QUOTE (BOOKMARKED
   PASSAGE for a bookmark), ABOUT, PINS (N), BRANCHES, the Branch confirmation, RESULT; a pin's PASSAGE
   (badges `unverified`, `clipped`, `archived`), NOTE, ANCHOR, USED IN ("used in Question 3", "sent in
   Question 3 at turn 14", "answered in Question 5 (branch br-q5-1a2b, turn 16)") and ITS MESSAGE (or
@@ -228,7 +231,7 @@ Tell the person all of this before copying anything (the manual's step 1).
   the buttons (a primary where the item has one, such as Ask here or Paste confluence again, while an
   open ask's Paste answer sits beside its field; Done, Defer ▾, the kind's own, ⋯ for the rest; an
   archived pin's Restore and Delete, which reads "Delete Pin 4? It cannot come back" in `blocked` for
-  4 s), and key hints `Esc close · Tab next field · Enter paste the turn's answers`. Every text meant for reading is
+  4 s), and key hints `Esc close · Tab next field · ⌘Enter paste the turn's answers · Enter newline`. Every text meant for reading is
   selectable, the person's and pinned text exactly as stored, with Copy beside the text, the quote,
   the passage and the message. While a paste is pending or a closing act is written, the body and the
   buttons dim. An item no longer in the ledger reads "This is no longer in the ledger…" with Close.
@@ -322,8 +325,19 @@ Tell the person all of this before copying anything (the manual's step 1).
   does; Space checks a pin; Esc clears the cursor. ↑ ↓ also work from the pins search box, where Enter
   opens the cursor's pin, else the first result. `ledgr.focus-list` (no key bound) gives the list the
   keyboard without the pointer. The dialog takes the keyboard: Esc or a click outside closes it; Tab
-  and Shift-Tab move between its fields; Enter in the answer pastes the turn's answers, in a note
-  saves it. Its text is selected with the pointer and copied with ⌘C, or with its Copy buttons. When
+  and Shift-Tab move between its fields; Enter in the answer starts a new line and ⌘Enter pastes the
+  turn's answers, this ask's own too when it is deferred or answered (an answer of several lines goes
+  into the sheet with its paragraphs joined by one line break and its next lines indented two spaces,
+  which the hook reads as the same answer and whose `[A7]`-style handles it does not count as refs;
+  the box holds 4,000 characters, the status line saying so when it cuts; a sheet over 24,000 is
+  refused: "…the turn's answers are N characters, over the 24,000 one message carries: paste fewer at
+  once"), in a note Enter saves it. ⌘↓ and ⌘↑ (or the header's next → and ← prev) show the next or previous item of
+  its lane in place, in the order the panel lists it: the asks of the session by turn, newest first,
+  each turn's blocking asks first, then its others, then those below the threshold; YOUR QUESTIONS,
+  the PINS, a fold's items within their own lane. The answer typed (or a pin's note typed and not
+  saved) is posted first, the keyboard stays on the dialog so the next ⌘↓ steps again (Tab enters the
+  new ask's answer box; ⌘↓ / ⌘↑ are the dialog's only while it holds the keyboard, never a capture box's
+  on top of it), the panel's cursor follows, and at either end nothing moves. Its text is selected with the pointer and copied with ⌘C, or with its Copy buttons. When
   it closes, the list keeps its place: the cursor returns to that row, the dialog's last words show
   in the status line, an answer typed there shows on the row (Paste), and the keyboard returns to the
   list after Esc or a closing act (Done, Not needed, Defer, Archive, Delete, each written to the spool
@@ -512,7 +526,9 @@ Tell the person all of this before copying anything (the manual's step 1).
   reads `shared("ledgr.chips")` and `shared("ledgr.ui")`, and runs no writer.
 - **`keys.json`**: `"cmd-j": "mod.open:ledgr"`, `"cmd-shift-j": "ledgr.toggle"`, and
   `"mod:ledgr": { "cmd-enter": "ledgr.btw", "tab": "ledgr.tab", "shift-tab": "ledgr.backtab",
-  "cmd-s": "ledgr.pin" }` (the installer writes the `mod:ledgr` section from its `MOD_KEYS`).
+  "cmd-s": "ledgr.pin", "cmd-down": "ledgr.detail-next", "cmd-up": "ledgr.detail-prev" }` (the
+  installer writes the `mod:ledgr` section from its `MOD_KEYS`; `btw` is the box's /btw and, in the
+  detail dialog, the turn's answers).
 - **Pins**: the store's own `pins` map in `store.json` (beside `items`; `pn_<uuid>` ids, handles `P1`,
   `P2`… per session), applied by the writer from the box's `pin` event and the panel's `pin_note`,
   `pin_archive`, `pin_restore` and `pin_delete` (by pin id, whatever became of the session); a
@@ -594,6 +610,7 @@ Tell the person all of this before copying anything (the manual's step 1).
   `ledgr.list-key:<up|down|pageup|pagedown|home|end|enter|space|escape>`, `ledgr.focus-list`,
   `ledgr.demo-detail[:<handle>]` (the demo, then the dialog on that item, A15 by default), the dialog's
   `ledgr.detail:close`, `detail:done`, `detail:whole`, `detail:pick:<n>`, `detail:answer:<text>`,
+  `detail-next` and `detail-prev` (also `detail:next`, `detail:prev`),
   `ledgr.settings` and `ledgr.demo-settings` (the settings dialog; the demo saves nothing), its
   `ledgr.settings:close` and `ledgr.settings:scale:<up|down|reset|0.8…1.6>`,
   `ledgr.hide-branch:<hc name>` (demo only),

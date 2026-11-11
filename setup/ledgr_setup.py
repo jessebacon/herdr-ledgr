@@ -58,7 +58,8 @@ HANDOFFS = [("ledgr", "ledgr (default): the agent keeps blocking and needed item
                       "\"ledgr: N items for you, M blocking\"; the list lives in the panel, the terminal's last screen stays the work's"),
             ("both", "both: the reply lists them as usual and the agent declares them to ledgr as well; more lines in the terminal"),
             ("prose", "prose: no instruction in the agent's context; ledgr's extractor reads each reply (one model call per turn)")]
-MOD_KEYS = {"cmd-enter": "ledgr.btw", "tab": "ledgr.tab", "shift-tab": "ledgr.backtab", "cmd-s": "ledgr.pin"}
+# The detail dialog's next / previous record (2026-11-11) are cmd-down / cmd-up: cmd-[ and cmd-] are Herdr's agent.prev / agent.next.
+MOD_KEYS = {"cmd-enter": "ledgr.btw", "tab": "ledgr.tab", "shift-tab": "ledgr.backtab", "cmd-s": "ledgr.pin", "cmd-down": "ledgr.detail-next", "cmd-up": "ledgr.detail-prev"}
 CAPTURE_ALTS = ["cmd-j", "cmd-alt-j", "cmd-ctrl-j", "cmd-shift-k"]
 TOGGLE_ALTS = ["cmd-shift-j", "cmd-alt-shift-j", "cmd-ctrl-shift-j", "cmd-alt-l"]
 EXCLUDE = {"gpui-kit.d.ts", "jsconfig.json", "__pycache__", ".DS_Store"}

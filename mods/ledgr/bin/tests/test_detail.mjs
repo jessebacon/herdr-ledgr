@@ -11,6 +11,11 @@
 //     the close), Esc, a staging closing it, retargeting, the Conclude editor, the closed record; Esc while
 //     a paste or a closing act's write is pending, Paste into trunk closing at once, a record that reaches
 //     the store after the dialog opened, a branch in its first turn, commands naming a branch by hc name;
+//   the answer box (2026-11-11): a Textarea (2 to 10 lines), its line breaks kept in the draft and in the
+//     sheet, Enter a new line, ⌘Enter (the btw command or the box's own submit, one paste for both) the
+//     turn's sheet with a suggestion's answer, only while the dialog holds the keyboard; next and previous:
+//     "2 of 11", the lane in the panel's order, no wrap, the draft posted before a move, the open record
+//     following;
 //   links (2026-11-10): the message's paths linked and every markdown TextView taking the click, a question's
 //     verbatim text taking none; a web link to cx.open_url; a path found in the session's folder, then the
 //     repository's top (git's answer), opened with links.editor (open, zed) through a recording exec; a
@@ -132,9 +137,9 @@ export const v_flex = () => el("v_flex");
 export const h_flex = () => el("h_flex");
 const state = (o = {}) => { const s = { _value: String(o.value ?? ""), _on: {}, _focused: 0 };
   return Object.assign(s, { value: () => s._value, set_value: (v) => { s._value = String(v); }, on: (e, f) => { s._on[e] = f; return true; },
-    focus: () => { s._focused++; }, release: () => true, set_auto_grow() {}, set_rows() {}, set_soft_wrap() {}, set_selected_range() {}, replace(v) { s._value = String(v); } }); };
+    focus: () => { s._focused++; }, release: () => true, set_auto_grow: (a, b) => { s._grow = [a, b]; }, set_rows() {}, set_soft_wrap() {}, set_selected_range() {}, replace(v) { s._value = String(v); } }); };
 export const InputState = { new: (o) => state(o) };
-export const TextareaState = { new: (o) => state(o) };
+export const TextareaState = { new: (o) => Object.assign(state(o), { _textarea: true, _opts: o ?? {} }) };
 export const EditorState = { new: (o) => state(o) };
 export const Input = { new: (st) => el("input", { _state: st }) };
 export const Textarea = { new: (st) => el("textarea", { _state: st }) };
@@ -413,7 +418,8 @@ try {
   A.equal(W.PIN_MESSAGE_GONE, "That message is no longer saved; the pin keeps the passage.");
   A.ok(W.DETAIL_GONE.length > 10);
   A.deepEqual(W.detailHints({}), [["Esc", "close"]]);
-  A.deepEqual(W.detailHints({ answer: true }), [["Esc", "close"], ["Tab", "next field"], ["Enter", "paste the turn's answers"]]);
+  A.deepEqual(W.detailHints({ answer: true }), [["Esc", "close"], ["Tab", "next field"], ["⌘Enter", "paste the turn's answers"], ["Enter", "newline"]], "the answer box: ⌘Enter pastes, Enter is a new line (2026-11-11)");
+  A.deepEqual(W.detailHints({ answer: true, paste: false })[2], ["⌘Enter", "copy the turn's answers"]);
   A.deepEqual(W.detailHints({ note: true, paste: false }).map((h) => h[0]), ["Esc", "Tab", "Enter"]);
   const PS = "aaaa", OS = "bbbb";
   const ustore = { d: { sessions: { [OS]: { sessionId: OS, sessionName: "billing-api" } } },
@@ -613,8 +619,196 @@ try {
     const before = d.answer._focused; d.fieldOn = null; d.command("tab", cx); await drain(cx);
     A.equal(d.answer._focused, before, "Tab: ignored while the dialog does not hold the keyboard");
     d.fieldOn = d.answer; d.command("tab", cx); await drain(cx); A.equal(d.keys._f > 0, true, "Tab from the answer: the dialog itself");
-    d.command("btw", cx); d.command("pin", cx); A.deepEqual(H().closed, [], "⌘Enter and ⌘S do nothing here");
+    d.command("pin", cx); A.deepEqual(H().closed, [], "⌘S does nothing here");
     d.command("detail:close", cx); A.deepEqual(H().closed, ["ov-1"], "detail:close"); }
+
+  // ── the answer box: several lines; ⌘Enter pastes the turn's answers (2026-11-11) ──
+  const kinds = (n, out = []) => { if (n && typeof n === "object") { out.push(n._kind); for (const k of n._kids ?? []) kinds(k, out); } return out; };
+  const pos = () => texts(UI().ids.get("dt-pos")).join("");
+  reset({ files: { [`${APP}/AGENTS.md`]: "x" } });
+  { const { d, cx } = await open(ids.A15);
+    A.equal(d.answer?._textarea, true, "the answer box is a TextareaState");
+    A.deepEqual(d.answer._grow, [2, 10], "two lines, growing to ten, then it scrolls"); A.equal(d.answer._opts.rows, 2);
+    draw(d, cx);
+    const box = UI().ids.get(`dt-answer-${ids.A15}`);
+    A.ok(kinds(box).includes("textarea") && !kinds(box).includes("input"), "drawn as a Textarea, not an Input");
+    A.ok(texts(box).join(" ").includes("⌘Enter pastes the answers for turn 17 (Enter starts a new line)"), "its hint names ⌘Enter and Enter");
+    A.ok(kinds(UI().ids.get("dt-foot")).length > 0 && texts(UI().ids.get("dt-foot")).join("|").includes("⌘Enter|paste the turn's answers|Enter|newline"), "the footer's key hints: ⌘Enter, Enter newline");
+    d.answer.set_value("Thursday night.\n\nAfter the backup finishes."); d.answer._on.change({}, cx);
+    A.equal(d.viewStore().item(ids.A15).draft, "Thursday night.\n\nAfter the backup finishes.", "the draft keeps its line breaks");
+    d.typeDraft(ids.A13, "Fine, add it\nafter the cutover", cx);
+    cx.clip = null; d.answer._on.submit({}, cx); A.equal(cx.clip, null, "Enter in the box (a submit without ⌘): a new line, nothing pasted");
+    d.fieldOn = null; d.command("btw", cx); A.equal(cx.clip, null, "⌘Enter while the dialog does not hold the keyboard (a capture box on top): not the dialog's");
+    d.fieldOn = d.answer;
+    let n = 0; const orig = d.copyAnswers.bind(d); d.copyAnswers = (...a) => { n++; return orig(...a); };
+    d.command("btw", cx); d.answer._on.submit({ secondary: true }, cx);
+    A.equal(n, 1, "⌘Enter: one paste for its two signals (the mod:ledgr command and the box's own submit)");
+    const sheet = String(cx.clip);
+    A.ok(sheet.startsWith("ledgr answers"), "the turn's sheet (demo: on the clipboard)");
+    A.ok(sheet.includes("\nA15: Thursday night.\n  After the backup finishes.\n"), "the second paragraph goes on indented, the blank line left out");
+    A.ok(sheet.includes("\nA5: Transaction pooling"), "with the turn's other answers");
+    A.ok(sheet.includes("\nA13: Fine, add it\n  after the cutover"), "a suggestion's answer too (below the threshold, still open)");
+    d.sheetAt = 0; d.answer._on.submit({ secondary: true }, cx); A.equal(n, 2, "the box's own ⌘Enter alone pastes too");
+    A.deepEqual(H().closed, [], "the demo stays open"); }
+  { const { d, cx } = await open(ids.Q8);
+    d.keys.is_focused = () => true; cx.clip = null; d.command("btw", cx);
+    A.equal(cx.clip, null, "⌘Enter on a question: nothing pasted"); A.match(d.flash, /not an ask/); }
+  // Live: ⌘Enter stages the sheet with both lines, the dialog closes once the paste is decided, and the
+  // draft goes to the panel with its line break.
+  fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText);
+  reset({ files: { [`${APP}/AGENTS.md`]: "x" }, agents: agentsLive, terminals: [{ address: "t21", state: "live" }], panes: [{ terminal: "t21" }], focus: { terminal: "t21", shown: null } });
+  { const { d, cx } = await open(ids.A15, { demo: false });
+    d.answer.set_value("line one\nline two"); d.answer._on.change({}, cx);
+    d.fieldOn = d.answer; d.command("btw", cx); await drain(cx);
+    A.ok(String(cx.clip ?? "").includes("A15: line one\n  line two"), "live: the sheet staged, both lines");
+    A.deepEqual(H().closed, ["ov-1"], "the paste decided: the dialog closed");
+    await d.release(); A.equal(H().shared["ledgr.detail"].closed.drafts[ids.A15], "line one\nline two", "the draft reaches the panel with its line break"); }
+
+  // ── next and previous (2026-11-11): the lane in the panel's order, in place, no wrap ──
+  reset({ files: { [`${APP}/AGENTS.md`]: "x" } });
+  { const { d, cx } = await open(ids.A15);
+    const order = ["A6", "A15", "A5", "A7", "A8", "A9", "A10", "A11", "A12", "A13", "A14"].map((h) => by(h).id);
+    draw(d, cx);
+    A.equal(pos(), "2 of 11", "the counter: A15 is the second of turn 17's 11 asks (blocking first, the suggestions included)");
+    A.ok(UI().ids.get("dt-prev")._h.on_click && UI().ids.get("dt-next")._h.on_click, "← prev and next → both live in the middle");
+    click("dt-prev", cx); A.equal(d.target.id, order[0], "← prev: Ask 6");
+    draw(d, cx); A.equal(pos(), "1 of 11"); A.equal(UI().ids.get("dt-prev")._h.on_click, undefined, "the first: ← prev dimmed, no click");
+    A.equal(d.step(-1, cx), false, "the first: it stops (no wrap)"); A.equal(d.target.id, order[0]);
+    const seen = [d.target.id];
+    while (d.step(1, cx)) seen.push(d.target.id);
+    A.deepEqual(seen, order, "⌘↓ walks the asks lane as the panel lists it, the suggestions A13 and A14 last");
+    draw(d, cx); A.equal(pos(), "11 of 11"); A.equal(UI().ids.get("dt-next")._h.on_click, undefined, "the last: next → dimmed, no click");
+    A.equal(d.step(1, cx), false, "the last: it stops");
+    d.keys.is_focused = () => true;   // the dialog holds the keyboard (a step puts it there)
+    d.command("detail-prev", cx); A.equal(d.target.id, order[9], "detail-prev (⌘↑)");
+    d.command("detail:next", cx); A.equal(d.target.id, order[10], "detail:next (a script)");
+    A.equal(H().shared["ledgr.detail"].open.id, order[10], "the open record follows (the panel's cursor with it)");
+    A.equal(d.answerFor, order[10], "the new ask's answer box made"); await drain(cx); A.equal(d.answer._focused, 0, "...but the keyboard stays on the dialog (Tab enters the box)");
+    d.setDraft(d.viewStore().item(order[10]), "maybe later", cx);
+    draw(d, cx); A.ok(texts(UI().ids.get("dt-head")).includes("drafted"), "a suggestion with an answer not sent: the header says drafted");
+    d.step(-8, cx); A.equal(d.target.id, order[9], "a step is one record whatever the sign's size");
+    A.deepEqual(H().closed, [], "in place: the overlay stays"); }
+  { const { d, cx } = await open(by("A5").id); draw(d, cx);
+    A.ok(texts(UI().ids.get("dt-head")).includes("answer ready"), "an open ask with an answer: the header keeps answer ready"); }
+  { const { d, cx } = await open(ids.Q3); draw(d, cx);
+    A.equal(pos(), "7 of 7", "a question: YOUR QUESTIONS, newest first"); d.step(-1, cx); A.equal(d.target.id, ids.Q5); A.equal(d.target.kind, "question"); }
+  { const { d, cx } = await open(ids.P1); draw(d, cx);
+    A.equal(pos(), "2 of 2", "a pin: its session's pins"); d.step(-1, cx); A.equal(d.target.id, ids.P2); A.equal(d.target.kind, "pin"); }
+  { const { d, cx } = await open(ids.P3); draw(d, cx); A.equal(UI().ids.has("dt-pos"), false, "a lane of one (the archived pin): no controls"); }
+  // Review fixes (2026-11-11). 1: a step leaves the keyboard on the dialog's own handle, not in the next ask's
+  // answer box (whose own ⌘↓ / ⌘↑ move its caret and run before the dialog's), so a second ⌘↓ steps again;
+  // Tab enters the box. 3: ⌘↓ / ⌘↑ are the dialog's only while it holds the keyboard (a capture box on top
+  // has it then); detail:next / detail:prev and the header's controls always.
+  reset({ files: { [`${APP}/AGENTS.md`]: "x" } });
+  { const { d, cx } = await open(ids.A15);
+    d.keys.is_focused = () => true; d.fieldOn = null;
+    const f0 = d.keys._f;
+    A.equal(d.step(1, cx), true); A.equal(d.target.id, by("A5").id);
+    const box = d.answer; await drain(cx);
+    A.ok(d.keys._f > f0, "1: after a step the dialog's own handle is focused");
+    A.equal(box._focused, 0, "1: ...not the next ask's answer box");
+    d.command("detail-next", cx); A.equal(d.target.id, by("A7").id, "1: ...so a second ⌘↓ steps again");
+    d.command("tab", cx); await drain(cx); A.ok(d.answer._focused > 0, "1: Tab enters the answer box");
+    d.keys.is_focused = () => false; d.fieldOn = null;
+    const at = d.target.id;
+    d.command("detail-next", cx); d.command("detail-prev", cx);
+    A.equal(d.target.id, at, "3: detail-next / detail-prev ignored while the dialog does not hold the keyboard (a capture box on top)");
+    d.command("detail:next", cx); A.equal(d.target.id, by("A8").id, "3: ...detail:next (a script) still steps");
+    draw(d, cx); click("dt-prev", cx); A.equal(d.target.id, at, "3: ...and the header's ← prev");
+    d.fieldOn = d.answer; d.command("detail-next", cx); A.equal(d.target.id, by("A8").id, "3: a field of the dialog holding the keyboard: ⌘↓ steps"); }
+  // 8: a pin note typed and not saved is saved by the move (as an ask's draft is); one left as it was posts nothing.
+  { const { d, cx } = await open(ids.P1);
+    d.editPinNote(d.viewStore().pin(ids.P1), cx); d.note.input.set_value("the claim to check first");
+    A.equal(d.step(-1, cx), true); A.equal(d.target.id, ids.P2);
+    A.equal(d.viewStore().pin(ids.P1).note, "the claim to check first", "8: the note typed for Pin 1 saved by the step");
+    A.equal(d.note, null, "8: the editor closed with it"); }
+  fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText);
+  reset({ files: { [`${APP}/AGENTS.md`]: "x" }, agents: agentsLive, terminals: [{ address: "t21", state: "live" }], panes: [{ terminal: "t21" }] });
+  { const { d, cx } = await open(ids.P1, { demo: false });
+    d.editPinNote(d.viewStore().pin(ids.P1), cx); d.note.input.set_value("first, live");
+    d.step(-1, cx);
+    const ev = [...d.unwritten.values()].find((e) => e.type === "pin_note");
+    A.ok(ev && ev.payload.pin === ids.P1 && ev.payload.note === "first, live", "8: live, a pin_note event for Pin 1 before the move");
+    const n0 = [...d.unwritten.values()].filter((e) => e.type === "pin_note").length;
+    d.editPinNote(d.viewStore().pin(ids.P2), cx); d.step(1, cx);
+    A.equal([...d.unwritten.values()].filter((e) => e.type === "pin_note").length, n0, "8: a note left as it was: nothing posted"); }
+
+  // 2: ⌘Enter in a deferred or answered ask's box carries that ask's own answer (copyAnswers keeps only the
+  // open asks of the turn otherwise); its Paste answer stages it alone, whatever its status.
+  reset({ files: { [`${APP}/AGENTS.md`]: "x" } });
+  { const { d, cx } = await open(by("A4").id);
+    A.equal(d.viewStore().item(by("A4").id).status, "deferred"); A.ok(d.answer, "a deferred ask shows its answer box");
+    d.answer.set_value("INC-2019-0412"); d.answer._on.change({}, cx);
+    d.fieldOn = d.answer; cx.clip = null; d.command("btw", cx);
+    A.ok(String(cx.clip ?? "").includes("\nA4: INC-2019-0412\n"), "2: ⌘Enter on a deferred ask: its own answer in the sheet");
+    d.sheetAt = 0; cx.clip = null; draw(d, cx); click(`dt-copy1-${by("A4").id}`, cx);
+    A.ok(String(cx.clip ?? "").includes("\nA4: INC-2019-0412\n"), "2: ...and its Paste answer stages it alone"); }
+  { const { d, cx } = await open(ids.A7);
+    d.answer.set_value("Yes, drop it, and its index."); d.answer._on.change({}, cx);
+    d.fieldOn = d.answer; cx.clip = null; d.command("btw", cx);
+    const sh = String(cx.clip ?? "");
+    A.ok(sh.includes("\nA7: Yes, drop it, and its index.\n"), "2: an answered ask's new answer is in its turn's sheet");
+    A.ok(sh.includes("\nA5: Transaction pooling"), "2: ...with the turn's open answers"); }
+
+  // 6: a sheet over the pins message's cap (24,000) is not staged (the hook reads 96,000 characters of a
+  // prompt); 7: the answer box is cut at LIMITS.answer, with a word on the status line.
+  { const { d, cx } = await open(ids.A15);
+    d.answer.set_value("y".repeat(4100)); d.answer._on.change({}, cx);
+    A.equal(d.answer.value().length, 4000, "7: the box cut at 4,000 characters"); A.equal(d.viewStore().item(ids.A15).draft.length, 4000, "7: ...the draft too");
+    A.equal(d.flash, "Answer cut at 4,000 characters.", "7: ...and the status line says so");
+    for (const h of ["A6", "A5", "A8", "A9", "A10", "A11"]) d.typeDraft(by(h).id, `${h} ${"x".repeat(3990)}`, cx);
+    d.fieldOn = d.answer; cx.clip = null; d.command("btw", cx);
+    A.equal(cx.clip, null, "6: a sheet over 24,000 characters: nothing staged");
+    A.match(d.flash, /not staged: the turn's answers are 2\d,\d{3} characters, over the 24,000 one message carries: paste fewer at once\.$/, "6: ...in the pins' wording"); }
+
+  // 9: ⌘Enter's own line break (gpui's multi-line Enter may put one at the caret before the paste fires): when
+  // the box's latest change, a moment ago, only inserted one "\n", the text before it goes back (box and
+  // draft) before the sheet is made; one arriving just after the paste is put back too; an Enter typed on
+  // purpose earlier is kept.
+  A.equal(D.strayBreak("ab", "a\nb"), true); A.equal(D.strayBreak("ab", "ab\n"), true); A.equal(D.strayBreak("ab", "\nab"), true);
+  A.equal(D.strayBreak("", "\n"), true); A.equal(D.strayBreak("ab", "a\n\nb"), false); A.equal(D.strayBreak("ab", "axb"), false);
+  A.equal(D.strayBreak("ab", "ab"), false); A.equal(D.strayBreak("a b", "a\nb"), false, "a space replaced is not an insert");
+  { const { d, cx } = await open(ids.A15);
+    const type = (v) => { d.answer.set_value(v); d.answer._on.change({}, cx); };
+    const draft = () => d.viewStore().item(ids.A15).draft;
+    d.fieldOn = d.answer;
+    for (const [where, broken, via] of [["mid-text", "Thursday\n night", "btw"], ["end-of-text", "Thursday night\n", "submit"], ["start", "\nThursday night", "btw"]]) {
+      type("Thursday night"); d.sheetAt = 0; cx.clip = null;
+      type(broken); A.equal(draft(), broken, `9 (${where}): the keypress's line break reached the draft`);
+      if (via === "btw") d.command("btw", cx); else d.answer._on.submit({ secondary: true }, cx);
+      const sh = String(cx.clip ?? "");
+      A.ok(sh.includes("\nA15: Thursday night\n") && !sh.includes("A15: Thursday\n"), `9 (${where}, ${via}): the sheet carries the answer whole`);
+      A.equal(d.answer.value(), "Thursday night", `9 (${where}): the box set back`); A.equal(draft(), "Thursday night", `9 (${where}): the draft too`);
+    }
+    // The command first, the line break after it: put back as it arrives.
+    type("Thursday night"); d.sheetAt = 0; cx.clip = null; d.command("btw", cx);
+    A.ok(String(cx.clip ?? "").includes("\nA15: Thursday night\n")); type("Thursday\n night");
+    A.equal(d.answer.value(), "Thursday night", "9: a line break just after the paste: the box set back"); A.equal(draft(), "Thursday night", "9: ...the draft unchanged");
+    // An Enter typed on purpose, then ⌘Enter a while later: kept.
+    d.sheetAt = 0; type("Thursday\n night"); d.typed.at -= 1000; cx.clip = null; d.command("btw", cx);
+    A.ok(String(cx.clip ?? "").includes("\nA15: Thursday\n   night\n"), "9: an Enter typed earlier is the answer's own line");
+    A.equal(d.answer.value(), "Thursday\n night", "9: ...and stays in the box"); }
+
+  // Live: the draft typed here is posted before the move, once; every draft typed in the dialog reaches the
+  // panel; the closed record names the last record shown.
+  fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText);
+  reset({ files: { [`${APP}/AGENTS.md`]: "x" }, agents: agentsLive, terminals: [{ address: "t21", state: "live" }], panes: [{ terminal: "t21" }] });
+  { const { d, cx } = await open(ids.A15, { demo: false });
+    d.answer.set_value("Thursday,\nafter the backup"); d.answer._on.change({}, cx);
+    A.equal(d.unwritten.size, 0, "typed: the draft waits for its 800 ms");
+    A.equal(d.step(1, cx), true, "⌘↓");
+    const ev = [...d.unwritten.values()].find((e) => e.payload.action === "draft");
+    A.ok(ev && ev.payload.item === ids.A15 && ev.payload.arg === "Thursday,\nafter the backup", "the draft posted before the move, its line break kept");
+    A.equal(d.target.id, by("A5").id, "then the next ask shown");
+    await drain(cx, 2000);
+    const drafts = () => H().writes.map(([p, t]) => (p.includes("-act-") ? JSON.parse(t) : null)).filter((e) => e?.action === "draft" && e.item === ids.A15);
+    A.equal(drafts().length, 1, "written once: its 800 ms timer posts nothing more");
+    d.answer.set_value("pooling"); d.answer._on.change({}, cx);
+    d.close(); await d.release();
+    const rec = H().shared["ledgr.detail"].closed;
+    A.equal(rec.drafts[ids.A15], "Thursday,\nafter the backup"); A.equal(rec.drafts[by("A5").id], "pooling", "every draft typed in the dialog goes to the panel");
+    A.equal(rec.id, by("A5").id, "the closed record names the last record shown (the panel's cursor goes there)");
+    A.equal(drafts().length, 1, "release did not write the moved draft again"); }
 
   // The Conclude editor (demo): prefilled from the block, edited, staged; its text kept meanwhile (live).
   reset({ files: { [`${APP}/AGENTS.md`]: "x" } });
@@ -844,7 +1038,7 @@ try {
   A.ok(!src.includes("stageIntoPrompt(") && !src.includes("stageMessage("), "detail.js never calls nav.js's paste itself");
   A.ok(!fs.readFileSync(path.join(MOD, "views.js"), "utf8").includes("terminal.paste"), "views.js runs nothing");
 
-  console.log(`OK: detail, ${checks} checks (props, spec, passage, verbatim, close rules, kept Conclude, words, fixtures, main.js, views, the dialog in every demo case and its flows, its links${DTS ? "; element methods checked against gpui-kit.d.ts" : "; gpui-kit.d.ts not found: element methods unchecked"}${stubs.length ? `; stub ${stubs.join(" and ")} (Builder A's, not in the mod yet)` : ""}), 0 failure(s)`);
+  console.log(`OK: detail, ${checks} checks (props, spec, passage, verbatim, close rules, kept Conclude, words, fixtures, main.js, views, the dialog in every demo case and its flows, the multi-line answer box and ⌘Enter, next and previous, its links${DTS ? "; element methods checked against gpui-kit.d.ts" : "; gpui-kit.d.ts not found: element methods unchecked"}${stubs.length ? `; stub ${stubs.join(" and ")} (Builder A's, not in the mod yet)` : ""}), 0 failure(s)`);
 } catch (e) {
   console.log(String(e?.stack ?? e).split("\n").slice(0, 8).join("\n"));
   console.log(`FAIL: detail, after ${checks} checks${stubs.length ? ` (stub ${stubs.join(" and ")})` : ""}`);

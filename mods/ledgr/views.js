@@ -1,7 +1,7 @@
 // ledgr detail dialog, its renderers (docs/design/Detail.md 2.9): what an expanded panel row drew before
 // the list and detail change, moved out of panel.js and drawn by the dialog (detail.js). Each takes the
 // dialog instance as `host` for its state and actions:
-//   state:   demo, cfg, flash, answer (the answer InputState), note ({pinId, input}), confirm, conclude,
+//   state:   demo, cfg, flash, answer (the answer TextareaState), note ({pinId, input}), confirm, conclude,
 //            closeAsk, gitOk, brMsg, preOpen, pinDel, dd, ddShut, ddFocus
 //   actions: act, setDraft, copyAnswer, copyAnswers, launch, openConclude, sendToTrunk, copyConfluence,
 //            askForConclusion, closeBranch, focusBranch, trunkWord, trunkLine, branchLive, pasteOn,
@@ -194,18 +194,19 @@ export function optionChips(host, t, it) {
   }));
 }
 
-// The answer: the Answer… input (host.answer, an InputState: Enter stages the turn's answer sheet),
-// Paste answer (this ask's answer alone) and how it reaches the agent.
+// The answer: the Answer… box (host.answer, a TextareaState since 2026-11-11: two lines growing to ten,
+// then it scrolls; Enter is a new line, ⌘Enter stages the turn's answer sheet), Paste answer (this ask's
+// answer alone) and how it reaches the agent.
 export function answerBox(host, t, st, s, it) {
   const paste = host.pasteOn(), L = stageLabels(paste), ans = host.answerOf(it);
   return v_flex().id(`dt-answer-${it.id}`).gap(4)
-    .child(h_flex().gap(6).items_center()
-      .child(h_flex().flex_1().min_w(0).h(t.ts(30)).px(8).items_center().rounded(7).border_1().border_color(t.input).bg(t.background)
-        .when(Boolean(host.answer), (el) => el.child(Input.new(host.answer).flex_1().h_full().text_size(t.ts(12.5)).text_color(t.foreground))))
+    .child(h_flex().gap(6).items_start()
+      .child(v_flex().flex_1().min_w(0).px(8).py(5).rounded(7).border_1().border_color(t.input).bg(t.background)
+        .when(Boolean(host.answer), (el) => el.child(Textarea.new(host.answer).w_full().text_size(t.ts(12.5)).text_color(t.foreground))))
       .child(btn(t, `dt-copy1-${it.id}`, L.one, (_e, cx) => host.copyAnswer(it, s, cx),
         { primary: Boolean(ans), disabled: !ans, tip: ans ? `${H(it)}'s answer alone: ${paste ? `pasted into the prompt in ${P(s?.terminal, "the pane")}, never sent` : `clipboard + focus ${P(s?.terminal, "the pane")}`}` : "Type an answer or pick an option first" })))
     .child(div().text_size(t.ts(10.5)).text_color(t.dim)
-      .child(`Enter ${paste ? "pastes" : "copies"} the answers for turn ${it.anchor?.turn ?? "?"}; drafts reach the agent only that way, and Done only records it here.`));
+      .child(`⌘Enter ${paste ? "pastes" : "copies"} the answers for turn ${it.anchor?.turn ?? "?"} (Enter starts a new line); drafts reach the agent only that way, and Done only records it here.`));
 }
 
 // The Branch confirmation: the manifest BEFORE launch, the placement, the worktree toggle.

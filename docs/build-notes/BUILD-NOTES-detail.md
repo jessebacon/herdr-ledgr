@@ -754,3 +754,99 @@ home (an "unsure" path is still opened, and `open` then says if it is missing).
 - `linkify`: trailing `_` and `-` dropped with as many leading `_` (`_src/it.js_`, `src/a.js->src/b.js`); an absolute path with no extension needs a Mac root (`ROOTS`: `/api/v1/users` stays prose); `protectedSpans` pairs backticks and brackets in one pass (20 k unbalanced `[` in about 2 ms); the last 32 results are cached by text.
 - "Open files with": `links.js` `splitCommand` splits like a shell (quotes, backslashes, joined pieces) with no shell, `joinCommand` shows an argv array quoted so it saves back the same, and the field follows `links.editor` (`Settings.onConfig`, only when it changed, so typing survives other clicks).
 - `ledgr.settings` with the panel hidden: the host block opens the dialog as before; an overlay host opens it on its own command (`my-tabs.ledgr-settings`), both through `config.js` `settingsOpening` (the gear's spec, an open detail dialog closed first), since no ledgr copy is shown to take a ledgr command there.
+
+## 16. Multiline answers, drafted mark, next question (2026-11-11, uncommitted)
+
+Jesse, after a turn of 19 asks answered in the dialog: "usage is going well. I like this solution", then
+three requests. Line numbers as of this build.
+
+**The answer box takes several lines.**
+
+| What | Where |
+|---|---|
+| The answer is a `TextareaState` (2 rows, `set_auto_grow(2, 10)`, then it scrolls); `change` is the draft (`typeDraft`), `submit` pastes only when it carries ⌘ (`e.secondary`) | `mods/ledgr/detail.js:171` `makeAnswer` |
+| ⌘Enter: the turn's sheet through `copyAnswers`; the command and the box's own submit of one keypress make one paste (500 ms); an ask that is not open says so | `detail.js:186` `pasteSheet` |
+| The `btw` command (keys.json `mod:ledgr` `cmd-enter`, the capture box's /btw) is the dialog's only while it holds the keyboard (`holdsKeys`: a field reported focus, or the dialog's own handle); a question or pin says ⌘Enter is for an ask | `detail.js:324`, `:417` `fieldsOf`, `:422` `holdsKeys` (`tabField` uses `fieldsOf` too) |
+| Drawn as `Textarea.new(host.answer)` in a bordered `v_flex`, Paste answer beside it at the top; the hint "⌘Enter pastes the answers for turn N (Enter starts a new line)" | `mods/ledgr/views.js:200-210` `answerBox` |
+| Footer hints `⌘Enter paste the turn's answers`, `Enter newline` | `mods/ledgr/words.js:210` `detailHints` |
+| The sheet: an answer's blank lines left out, its next lines indented two spaces (own indentation kept, trailing spaces trimmed) | `mods/ledgr/confluence.js:100` `answerLines`, `:109` `answersSheet` |
+| The landing parser: an indented line after an `A<n>:` line is that answer going on (joined with `\n`), never another `A<n>:`, a marker or a fence; an unindented one still joins with a space | `mods/ledgr/bin/lib/ledgr_landing.py:90` (`_parse`), `:119` `_indented`, `:132` (`_end`) |
+| A draft is cut at `LIMITS.answer` (4,000), not `LIMITS.text` (400): a long answer kept in `store.json` survives a restart | `mods/ledgr/config.js:58`, `mods/ledgr/store.js:1118` |
+
+Why indent rather than keep blank lines: `_end` closes a sheet at a blank line no `A<n>:` line
+follows (Jesse's prompt of 2026-11-07, where typed text ran into an answer), and that rule stays. The
+recorded `answer` is squashed by the store (`on_answers_landed`), so line breaks live in the pasted
+message, which is what the agent reads.
+
+**The drafted mark.**
+
+| What | Where |
+|---|---|
+| `draftPending(it)`: an agent ask, open (a suggestion too) or deferred, with a draft that is not the answer a landed sheet recorded (a reopened ask; compared whole once squashed: review fix 4) | `mods/ledgr/listing.js:34` |
+| The state word "drafted" (`dim`) for a suggestion and a deferred ask, in place of "below threshold" / "deferred"; an open ask at the threshold keeps "answer ready", drawn as its Paste button | `listing.js:104`, `:108` |
+| `rowModel().drafted`, and the tooltip's last line "Your answer, not sent yet: …" | `listing.js:173` |
+
+The store keeps a draft after its sheet lands (`answers_landed` sets `answered`, then `resolved` with
+`resolvedBy: "answer"`), so the mark keys on the status, as the brief asked. Suggestions were already
+open: `copyAnswers` (`reader.js`) and the sheet line's count (`panel.js` `body`) take them; a deferred
+ask is in neither (deferred means later), so its "drafted" is a reminder only. The panel needed no
+change for the mark: `listRow` draws `m.state.word` wherever Paste is not shown.
+
+**Next and previous.**
+
+| What | Where |
+|---|---|
+| `laneOf(store, kind, x, {threshold, now})`: the ids of x's lane in the panel's drawing order (asks by turn newest first, blocking first then `seq`, suggestions last in their turn; YOUR QUESTIONS by `createdAt` newest first, child questions included; branches newest first, a refused or failed one over an hour old left out unless shown; open pins newest first, archived apart; the OLDER, DEFERRED and CLOSED folds by `updatedAt`). It mirrors `panel.js` `body`, `pinsLane`, `suggestions`, `branchVisible`; a change of order there must follow here | `listing.js:190` |
+| `neighbors(ids, id)`: `{at, of, prev, next}`, no wrap | `listing.js:222` |
+| `step(d, cx)`: nothing while a paste or a closing act is pending; posts the waiting draft (`sendDraft`), clears the status line, `retarget` (review fix 1: the keyboard on the dialog, below) | `detail.js:493`, `:483` `laneSpot` |
+| `retarget(kind, id, session, cx)`: the keyboard on the dialog's own handle, never a field (review fix 1; the build's `o.field`, which put it in the answer box, is gone) | `detail.js:469` |
+| Commands `detail-next`, `detail-prev` (keys, only while the dialog holds the keyboard: review fix 3), `detail:next`, `detail:prev` (scripts) | `detail.js:356` |
+| Header controls `← prev` (`dt-prev`), `N of M` (`dt-pos`), `next →` (`dt-next`); at an end dimmed (`opacity 0.45`) with no click; none for a lane of one; the session name narrows to 120 px below 760 px | `detail.js:1043` `navBits`, `:1090`, `:1033` |
+| `Reader.sendDraft(id, cx)`: one draft posted now (its 800 ms timer then posts nothing) | `mods/ledgr/reader.js:246` |
+| The panel ignores `detail-next` / `detail-prev`; its cursor follows the dialog's open record when the overlay is its own (`pendingCursor`, applied by `settleCursor` when the row is listed, so a folded suggestion keeps the cursor where it was) | `mods/ledgr/panel.js:95-96`, `:803` |
+| Keys `cmd-down` / `cmd-up` | `keys.json:11-12`, `setup/ledgr_setup.py:61-62` (`MOD_KEYS`, one line: `test_compose.mjs` reads it with a one-line pattern) |
+
+Key choice: ⌘] and ⌘[ are Herdr's global `agent.next` / `agent.prev` (`~/.config/herdr-app/keys.json`);
+a `mod:ledgr` binding is more specific than `global`, so it would take them whenever any ledgr copy
+has the keyboard, the panel's list included. ⌘↓ / ⌘↑ are bound in no Herdr section (⌘⌥↑ / ⌘⌥↓
+are `pane.go`).
+
+**Tests.** `test_detail.mjs` (670, was 610): the TextareaState and its rows, drawn as a Textarea; line
+breaks kept in the draft and the sheet; Enter pastes nothing; ⌘Enter not the dialog's without the
+keyboard, one paste for its two signals, a suggestion's answer in the sheet, a question refused;
+live, the sheet staged with both lines and the dialog closed; "2 of 11", the walk through turn 17's
+asks with A13 and A14 last, the ends, `detail-prev` and `detail:next`, the open record, the new
+answer box focused, "drafted" and "answer ready" in the header, a question's and a pin's lane, none
+for a lane of one; live, the draft posted once before the move and every draft in the closed record.
+`test_list.mjs` (299, was 242): "drafted" on suggestion and deferred rows, `drafted` on open ones,
+cleared when answered, resolved or dismissed, a reopened ask, the tooltip; `laneOf` on every lane and
+threshold; `neighbors`; the panel's `noteDetail` and ignore list as text. `test_store.mjs` and
+`test-store.sh` (886): `answerLines`, the 4,000 cap, and the parser on a composed multi-line sheet
+(a line reading "A2:" inside an answer, text typed below, a lead-in, a paste wrapper, a fence and a
+marker inside an answer). `test-hooks.sh` (224, was 221): the multi-line sheet through the real hook,
+unwrapped, wrapped under a lead-in, and before a second sheet. `test_no_keystrokes.py` (558, was 541):
+`pasteSheet` and `step` run nothing; `pasteSheet` stages only through `copyAnswers`; `makeAnswer`'s
+submit pastes only with ⌘.
+
+**Not tried live.** Which of the textarea and the `mod:ledgr` section takes ⌘Enter and ⌘↓ / ⌘↑
+first. gpui's multi-line input binds ⌘↓ / ⌘↑ to its caret (start and end of the text) and may insert
+a line on ⌘Enter before reporting it: both paths are handled (the command and the box's submit), a
+stray trailing line is dropped from the sheet, and should the box keep ⌘↓ / ⌘↑, they work from the
+dialog's body and the header's controls always do. Also to see: that Enter in the box is a new line
+(Herdr's typings say nothing about Enter in a `TextareaState`; gpui's multi-line input inserts one).
+
+### 16.1 Review fixes (2026-11-11, uncommitted)
+
+One line per behaviour change; each has its test.
+
+1. A step (⌘↓ / ⌘↑, the header's controls) leaves the keyboard on the dialog's own handle, not the next ask's answer box, whose own ⌘↓ / ⌘↑ (caret moves) run before the dialog's and would swallow the next step; Tab enters the box (`detail.js:469` `retarget`, `:493` `step`). Test: `test_detail.mjs` (the dialog's handle focused, the box not, a second `detail-next` steps, Tab enters the box); `test_no_keystrokes.py` (`retarget` focuses `this.keys`, no `focusFirst`).
+2. ⌘Enter in a deferred or answered ask's box carries that ask's own answer: `pasteSheet` passes its id to `copyAnswers(s, turn, cx, own)`, which adds it to the turn's open asks unless it is closed (`detail.js:219`, `reader.js:349`). The dialog's Paste answer already staged the ask alone whatever its status (`copyAnswer`); the panel row of a deferred ask has no Paste by design ("drafted" stands there). Test: `test_detail.mjs` (A4 deferred, A7 answered, A4's Paste answer).
+3. `detail-next` / `detail-prev` (⌘↓ / ⌘↑) act only while the dialog holds the keyboard (`holdsKeys`), so a ⌘↓ in a capture box on top no longer steps the dialog behind it and posts its draft; `detail:next` / `detail:prev` and the header's controls are not guarded (`detail.js:356`). Test: `test_detail.mjs`.
+4. The landed answer is recorded whole, up to `LIMITS.answer` (store `on_answers_landed`, `store.js:891`; parser `MAX_ANSWER` 4,000, `ledgr_landing.py:56`), and `draftPending` compares the squashed draft and answer for equality (`listing.js:34`), so "No" landed then "No, use the replica" typed after a reopen shows drafted. Answers recorded at 400 before this change read as drafted when their draft is longer. Tests: `test_list.mjs`, `test_store.mjs` (a 3,500-character answer whole, the 4,000 cut), `test-store.sh` (the old 400 cap cut every answer).
+5. The hook's ref scan leaves out an answer sheet's lines (`ledgr_landing.py:241` `sheet_lines`, found by the landing's own scan, `_scan`; `ledgr_map.py:319` `prompt_refs(p, wrapper)`; the Claude adapter passes its paste wrapper as `fields["paste_wrapper"]`, `claude_hook.py:225`), so an `[A7]` written inside an answer no longer marks A7 answered. Tests: `test-hooks.sh` (wrapped under a lead-in and unwrapped), `test-store.sh`.
+6. A sheet over 24,000 characters (`pinsCap`, the pins message's cap) is not staged: "N answers (…) not staged: the turn's answers are 25,310 characters, over the 24,000 one message carries: paste fewer at once." (`confluence.js:272` `sheetOverCap`, `reader.js:368` in `stageAnswers`, so the panel's Paste N answers too); the parser's `MAX_SCAN` is 96,000 (`ledgr_landing.py:54`), room for a 45,000-character pins message and a full sheet after it. Tests: `test_detail.mjs`, `test_store.mjs`, `test-store.sh` (six answers of about 3,800 after the long pins message land whole; at 64,000 they did not), `test_no_keystrokes.py` (the cap before the one door).
+7. The answer box is cut at `LIMITS.answer` in its change handler, the status line saying "Answer cut at 4,000 characters." (`detail.js:179` `makeAnswer`, `:67`). Test: `test_detail.mjs`.
+8. A pin note typed and not saved is saved when the dialog moves to another record (`retarget` calls `saveNote`, `detail.js:865`; a note left as it was posts nothing), as an ask's draft is; sub-row moves get it too. Esc still discards it. Test: `test_detail.mjs` (demo and live).
+9. Defensive, unverified live: when the answer box's latest change, under 300 ms ago (`STRAY_MS`), only inserted one line break (`detailing.js:218` `strayBreak`), ⌘Enter puts the text before it back into the box and the draft before the sheet is made (`detail.js:204` `unbreak`, from `pasteSheet` on both the command and the box's submit); a one-line-break change arriving under 300 ms after the paste is put back as it arrives (the order of the two signals is not known); an Enter typed on purpose earlier stays. Tests: `test_detail.mjs` (`strayBreak`; mid-text, end and start of text, the command and the submit, the break after the paste, an Enter typed a second before).
+
+Still to see live: whether ⌘↓ from the dialog's handle reaches `detail-next` after a step (and on open, where the keyboard still goes to the answer box first: if the box keeps ⌘↓ / ⌘↑, the first one there moves its caret, and Tab to the dialog or the header's next → steps), and whether ⌘Enter inserts a line break in the box at all, and before or after the command.

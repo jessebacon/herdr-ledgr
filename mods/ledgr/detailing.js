@@ -211,3 +211,14 @@ export function keepConclude(kept, branchId, text, now = Date.now()) {
   if (typeof text === "string" && text.trim()) out[branchId] = { text, at: now };
   return out;
 }
+
+// ⌘Enter's own line break (2026-11-11, defensive: gpui's multi-line Enter handler may insert one at the
+// caret before the paste fires): true when `now` is `before` with exactly one "\n" inserted anywhere
+// (the start, the middle, the end). The dialog then puts `before` back before the sheet is made.
+export function strayBreak(before, now) {
+  const a = String(before ?? ""), b = String(now ?? "");
+  if (b.length !== a.length + 1) return false;
+  let i = 0;
+  while (i < a.length && a[i] === b[i]) i++;
+  return b[i] === "\n" && b.slice(i + 1) === a.slice(i);
+}

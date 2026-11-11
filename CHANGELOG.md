@@ -4,7 +4,43 @@
 
 First public shape of the mod. Built on Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311.
 
-### Preview retake and whole-turn text (2026-11-10)
+### Multiline answers, drafted mark, next question (2026-11-11)
+
+- The detail dialog's answer box takes several lines: a `Textarea`, two lines growing to ten, then it
+  scrolls (`detail.js` `makeAnswer`, `views.js` `answerBox`). Enter is a new line; the paste of the
+  turn's answers moved to ⌘Enter, the `mod:ledgr` `btw` command, which in the dialog (while it holds
+  the keyboard on an ask) means the turn's answers; the box's own ⌘ submit does the same, one paste
+  per keypress (`pasteSheet`). Footer hints "⌘Enter paste the turn's answers", "Enter newline". In the
+  sheet an answer's blank lines are left out and its next lines indented two spaces (`confluence.js`
+  `answerLines`); the landing parser reads an indented line as the same answer, joined by a line
+  break, never as another `A<n>:`, a marker or a fence (`ledgr_landing.py`). A draft is cut at
+  `LIMITS.answer` (4,000) instead of 400. Tests: detail +60 (670), store +5 with the parser on a
+  multi-line sheet (886), hooks +3 (224), no keystrokes +17 (558: `pasteSheet` and `step` run
+  nothing; `makeAnswer` pastes only with ⌘).
+- An answer typed or picked and not sent shows on its row (`listing.js` `draftPending`): an open ask
+  keeps its Paste button; an ask below the threshold or deferred says "drafted" in `dim` in place of
+  its state word, and the row's tooltip ends with the answer. It follows the status (answered or
+  resolved: gone), since the store keeps the draft after the sheet lands; an ask reopened after its
+  sheet landed is drafted again only for a new answer. Suggestions with answers already count in
+  Paste N answers and go into the sheet (`copyAnswers` takes every open ask of the turn). Tests: list
+  +57 (299, with `laneOf` below).
+- Next and previous in the dialog: ⌘↓ / ⌘↑ (`ledgr.detail-next`, `ledgr.detail-prev`, added to
+  `keys.json` `mod:ledgr` and the installer's `MOD_KEYS`; ⌘] and ⌘[ stay Herdr's `agent.next` /
+  `agent.prev`) and the header's `← prev`, `3 of 19`, `next →`, dimmed at either end (no wrap). The
+  order is the panel's (`listing.js` `laneOf`: the session's asks by turn, newest first, blocking first,
+  those below the threshold last; YOUR QUESTIONS; the pins; a fold's items). A move posts the waiting
+  draft (`Reader.sendDraft`), shows the record in place (`retarget`), leaves the keyboard on the dialog
+  (Tab enters the answer box) and rewrites `ledgr.detail`'s open record, so the panel's cursor follows (`noteDetail`). Tests:
+  detail (the order with suggestions, the ends, the draft posted once before a move), list (`laneOf`
+  on every lane, `neighbors`). Not tried live yet: which of the textarea and the `mod:ledgr` section
+  takes ⌘Enter and ⌘↓ / ⌘↑ first.
+- Review fixes (`docs/build-notes/BUILD-NOTES-detail.md` 16.1): a step leaves the keyboard on the dialog;
+  ⌘Enter carries a deferred or answered ask's own answer; ⌘↓ / ⌘↑ only while the dialog holds the
+  keyboard; the landed answer recorded whole (4,000) and compared whole for "drafted"; an `[A7]` inside a
+  sheet is no ref (`ledgr_landing.sheet_lines`); a sheet over 24,000 refused, `MAX_SCAN` 96,000; the box
+  cut at 4,000 with a word; a pin note saved on a move; ⌘Enter's own line break put back (defensive).
+
+### c049075: preview retake and whole-turn text
 
 - Preview retaken for the list and the dialog: `preview.png` is the scan list (a pin, Ask 1 and Ask 2
   as one-line rows, Ask 3 below the threshold) and `docs/preview-dialog.png` the same state with the

@@ -33,7 +33,7 @@ confluence_landed  UserPromptSubmit whose prompt starts  turn (the trunk's new t
                 with "ledgr confluence <branch id>    the envelope's session_id is the session the
                 <item id>" (lib/ledgr_landing.py)     prompt was submitted in. Emitted after prompt
 answers_landed  UserPromptSubmit whose prompt starts  turn, for_session (the marker's session id),
-                (Phase 3)                             handles ["A3"], answers {"A3": text (400)},
+                (Phase 3)                             handles ["A3"], answers {"A3": text (4000)},
                 with "ledgr answers <session id>"     prompt_id. Emitted after prompt
 pins_asked      UserPromptSubmit whose prompt carries turn (the session's new turn), for_session (the
                 (pins)                                marker's session id), item_id (the parked

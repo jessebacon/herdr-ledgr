@@ -92,7 +92,8 @@ const LIST_KEYS = new Set(["up", "down", "pageup", "pagedown", "home", "end", "e
 const NAV_KEYS = new Set(["up", "down", "pageup", "pagedown"]);
 // Commands every shown copy gets that are not the panel's: the capture box's keys (keys.json mod:ledgr)
 // and the detail dialog's own (they need its state). detail:* and conclude-edit:* too (command()).
-const PANEL_IGNORES = new Set(["tab", "backtab", "btw", "pin", "submit", "escape", "launch-branch", "branch-split", "branch-agent", "send-to-trunk"]);
+const PANEL_IGNORES = new Set(["tab", "backtab", "btw", "pin", "submit", "escape", "launch-branch", "branch-split", "branch-agent", "send-to-trunk",
+  "detail-next", "detail-prev"]);
 // ledgr.demo-detail without a handle opens the dialog on this demo ask (fixtures.js DEMO_DETAIL).
 const DEMO_DETAIL_HANDLE = "A15";
 
@@ -796,7 +797,11 @@ export class Panel extends Reader {
   noteDetail(cx) {
     const d = shared("ledgr.detail");
     const open = d?.open && typeof d.open === "object" ? d.open : null;
-    this.openKey = open?.id ? entryKey(open.kind, open.id) : null;
+    const key = open?.id ? entryKey(open.kind, open.id) : null;
+    // This copy's dialog moved to another record in place (⌘↓ / ⌘↑, a sub-row, 2026-11-11): the cursor
+    // follows it when its row is listed (settleCursor), and the list scrolls to it.
+    if (key && key !== this.openKey && this.detailId && open.overlay === this.detailId) this.pendingCursor = key;
+    this.openKey = key;
     const c = d?.closed && typeof d.closed === "object" ? d.closed : null;
     const at = Number(c?.at) || 0;
     if (!c || at <= this.closedAt) return;

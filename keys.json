@@ -7,6 +7,8 @@
     "cmd-enter": "ledgr.btw",
     "tab": "ledgr.tab",
     "shift-tab": "ledgr.backtab",
-    "cmd-s": "ledgr.pin"
+    "cmd-s": "ledgr.pin",
+    "cmd-down": "ledgr.detail-next",
+    "cmd-up": "ledgr.detail-prev"
   }
 }

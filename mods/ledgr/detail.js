@@ -15,10 +15,16 @@
 // or a click outside: release() posts waiting drafts (Reader flushPending) and the Conclude text is kept
 // in this copy's localStorage (detail.conclude) on every change.
 // Keys: Esc closes (Herdr's, and the root's on_key_down); Tab and Shift-Tab (mod:ledgr ledgr.tab /
-// ledgr.backtab) move between the dialog's own fields only while it holds the keyboard; ⌘Enter and ⌘S
-// (ledgr.btw, ledgr.pin) are the capture box's and are ignored here.
+// ledgr.backtab) move between the dialog's own fields only while it holds the keyboard. ⌘Enter
+// (ledgr.btw, the capture box's /btw) means here, while the dialog holds the keyboard on an ask: paste
+// the answers of its turn (pasteSheet; 2026-11-11, since the answer box is a Textarea whose Enter is a new
+// line). ⌘↓ / ⌘↑ (ledgr.detail-next, ledgr.detail-prev, also only while it holds the keyboard) and the
+// header's next → / ← prev show the next or previous record of its lane in the panel's order, in place
+// (step; "3 of 19" beside them), the keyboard left on the dialog itself. ⌘S
+// (ledgr.pin) is the capture box's and is ignored here.
 // Commands (every shown copy gets them; this copy takes only these): detail:close, detail:done,
-// detail:whole, detail:pick:<n>, detail:answer:<text>; launch-branch, branch-split, branch-agent,
+// detail:whole, detail:pick:<n>, detail:answer:<text>, detail-next and detail-prev (detail:next,
+// detail:prev for scripts), btw; launch-branch, branch-split, branch-agent,
 // send-to-trunk, conclude-edit:<text>; and, when this dialog is open on that item, pick:<h>:<n>,
 // copy-answer:<h>, go:<h>, whole:<h>, menu:<h>:<defer|more>, ask-here:<Q>, and conclude, ask-conclusion,
 // copy-confluence, close-branch (twice: arm, then end) on the branch the panel would pick.
@@ -43,9 +49,9 @@ import { confluenceMessage, conclusionRequest, extractConclusion, leadIn, pinsMe
 import { itemWords as H, paneWords as P, trunkWords, originWords, branchWords, sessionWords, resolvedByWords, dismissedByWords, stageLabels,
   handleWords, pinsWords, pinSourceWords, pinAnchorWords, pinNameWords, pinLabel, pinUseLines, DETAIL_GONE, messageGone, PIN_MESSAGE_GONE,
   copiedWords, detailHints, pasteCutWords, BRANCH_NO_TURN, LINK_WORDS } from "./words.js";
-import { rowModel, stateOf } from "./listing.js";
+import { rowModel, stateOf, laneOf, neighbors } from "./listing.js";
 import { detailProps, kindOf, closesAfterStage, focusAfter, mergeClosed, keptConclude, keepConclude, KEEP_KEY, twoColumns, leftWidth,
-  ACTION_STATES } from "./detailing.js";
+  ACTION_STATES, strayBreak } from "./detailing.js";
 import { ICON, btn, pill, badge, glyph, tone, chip, menuButton, readable, section, messageBlocks, optionChips, answerBox, confirmBox,
   branchBody, branchActions, pinNoteBox, subRow, keyHints, rowCtx } from "./views.js";
 import { parseLink, resolvePath, isRelative, shownPath, editorOf, openerArgv } from "./links.js";
@@ -57,6 +63,10 @@ const DONE_TIP = "Done: you did or decided it";
 const NOT_NEEDED_TIP = "Not needed: close it; the agent may raise it again";
 // How long a pin's Delete waits for its second click (the panel's CLEAR_ARM_MS).
 const ARM_MS = 4000;
+// The answer box's cap (LIMITS.answer, the store's cut of a draft) on the status line.
+const ANSWER_CUT = `Answer cut at ${String(LIMITS.answer).replace(/\B(?=(\d{3})+(?!\d))/g, ",")} characters.`;
+// How close to a ⌘Enter a one-line-break change counts as that keypress's own (unbreak).
+const STRAY_MS = 300;
 
 export class Detail extends Reader {
   constructor(view, cx) {
@@ -76,8 +86,10 @@ export class Detail extends Reader {
     this.leftScroll = ScrollHandle.new();
     this.msgScroll = ScrollHandle.new();
     this.width = 900;              // from on_size_change; two columns from 760 px
-    this.answer = null;            // the ask's answer InputState (made in start or retarget, never in render)
+    this.answer = null;            // the ask's answer TextareaState (made in start or retarget, never in render)
     this.answerFor = null;
+    this.sheetAt = 0;              // the last ⌘Enter paste of a turn's answers (one per keypress: pasteSheet)
+    this.typed = null;             // the answer box's latest change: {id, before, at} (unbreak)
     this.note = null;              // the pin note editor: {pinId, input}
     this.confirm = null;           // the Branch confirmation: {itemId, placement, isolate}
     this.conclude = null;          // the Conclude editor: {branchId, input, text, source, turn, prefill, edited}
@@ -91,7 +103,7 @@ export class Detail extends Reader {
     this.brMsg = new Map();        // branch id -> {k, turn, text}: its newest finished turn
     this.preOpen = new Set();      // branches showing their preamble
     this.whole = false;            // the message whole, else around the passage
-    this.fieldOn = null;           // the InputState that reported focus last (Tab moves from it)
+    this.fieldOn = null;           // the field (InputState, TextareaState) that reported focus last (Tab moves from it)
     this.closedBy = null;          // "esc" | "act" | "stage" | "pane" | "box": what the closed record says (focusAfter)
     this.closedTerminal = null;
     this.closing = false;          // a closing act is being written
@@ -157,17 +169,62 @@ export class Detail extends Reader {
     return true;
   }
 
+  // The ask's answer box (2026-11-11: several lines): a TextareaState, 2 rows growing to 10, then it
+  // scrolls. Each change is the draft (Reader typeDraft: posted 800 ms after the last one; flushPending on
+  // close, sendDraft on a move), cut at LIMITS.answer with a word on the status line (the store keeps no
+  // more). Enter is a new line; ⌘Enter pastes the turn's answers: the mod:ledgr `btw` command (command),
+  // or the textarea's own submit when it carries ⌘ (secondary). pasteSheet takes the first of the two, so
+  // one keypress is one paste. `typed` keeps the draft before the latest change and when it came, for
+  // unbreak (a line break ⌘Enter itself may have put in).
   makeAnswer(it) {
     const id = it.id;
-    const inp = InputState.new({ placeholder: "Answer…", value: it.draft ?? "" });
-    inp.on("change", (_e, cx) => this.typeDraft(id, inp.value(), cx));
-    inp.on("submit", (_e, cx) => {
-      const st = this.viewStore(), cur = st.item(id), s = cur ? st.d.sessions[cur.anchor?.sessionId] : null;
-      if (cur && s) this.copyAnswers(s, cur.anchor.turn, cx);
+    const inp = TextareaState.new({ placeholder: "Answer… (Enter: new line · ⌘Enter: paste the turn's answers)", value: it.draft ?? "", rows: 2 });
+    try { inp.set_auto_grow(2, 10); } catch { /* fixed rows */ }
+    inp.on("change", (_e, cx) => {
+      let v = inp.value();
+      if (v.length > LIMITS.answer) { v = v.slice(0, LIMITS.answer); inp.set_value(v); this.flash = ANSWER_CUT; cx.notify(); }
+      const before = String(this.viewStore().item(id)?.draft ?? "");
+      if (v === before) return;                       // nothing new (a set_value of ours echoing back)
+      // ⌘Enter's line break arriving after its paste (the command came first): the text goes back.
+      if (Date.now() - this.sheetAt < STRAY_MS && strayBreak(before, v)) { inp.set_value(before); return; }
+      this.typed = { id, before, at: Date.now() };
+      this.typeDraft(id, v, cx);
     });
+    inp.on("submit", (e, cx) => { if (e?.secondary) this.pasteSheet(id, cx); });
     this.track(inp);
     this.answer = inp;
     this.answerFor = id;
+    this.typed = null;
+  }
+
+  // A line break ⌘Enter itself put into the answer box (gpui's multi-line Enter may insert one at the caret
+  // before the paste fires; unverified live, so defensive): when the box's latest change, under STRAY_MS
+  // ago, did nothing but insert one "\n" (detailing.js strayBreak), the text before it goes back into the
+  // box and the draft, so the sheet is not split. An Enter typed on purpose earlier is kept.
+  unbreak(id, cx) {
+    const k = this.typed;
+    if (!k || k.id !== id || this.answerFor !== id || !this.answer || Date.now() - k.at > STRAY_MS) return false;
+    if (!strayBreak(k.before, this.answer.value())) return false;
+    this.typed = null;
+    this.typeDraft(id, k.before, cx);
+    this.answer.set_value(k.before);
+    return true;
+  }
+
+  // ⌘Enter on an ask: the answer sheet of its turn (Reader copyAnswers: every open ask of that turn with
+  // an answer typed or picked, those below the threshold too, and this ask whatever its status, deferred
+  // or answered, when it has one: its box is what ⌘Enter was pressed in), staged like the sheet line's
+  // Paste N answers. The two signals one ⌘Enter may send (the command and the textarea's submit) make
+  // one paste: a second within 500 ms is dropped. true when it staged.
+  pasteSheet(id, cx) {
+    const now = Date.now();
+    if (now - this.sheetAt < 500) return false;
+    const st = this.viewStore(), it = st.item(id), s = it ? st.d.sessions[it.anchor?.sessionId] ?? null : null;
+    if (!it || !s || !isAgentAsk(it) || isClosed(it)) { this.flash = "⌘Enter pastes the answers of an open ask's turn: there is none here."; cx.notify(); return false; }
+    this.sheetAt = now;
+    this.unbreak(id, cx);
+    this.copyAnswers(s, it.anchor?.turn, cx, id);
+    return true;
   }
 
   // Which of the dialog's fields has the keyboard (Tab moves from it).
@@ -293,7 +350,20 @@ export class Detail extends Reader {
     if (!this.isCurrent()) return;
     if (c === "detail:close") { this.closedBy = "esc"; this.close(); return; }
     const st = this.viewStore(), r = this.resolve(st);
+    // ⌘↓ / ⌘↑ (keys.json mod:ledgr): the next or previous record in place, only while the dialog holds the
+    // keyboard (a capture box opened on top of it has it then, as for ⌘Enter); detail:next and
+    // detail:prev (scripts) and the header's controls always.
+    if (c === "detail-next" || c === "detail-prev") { if (this.holdsKeys(st, r)) this.step(c === "detail-next" ? 1 : -1, cx); return; }
+    if (c === "detail:next" || c === "detail:prev") { this.step(c === "detail:next" ? 1 : -1, cx); return; }
     if (!r) return;
+    // ⌘Enter: the capture box's /btw, here the turn's answers, only while the dialog holds the keyboard
+    // (a capture box opened on top of it has it then, and its ⌘Enter is its own).
+    if (c === "btw") {
+      if (!this.holdsKeys(st, r)) return;
+      if (r.kind === "ask") this.pasteSheet(r.x.id, cx);
+      else this.flash = "⌘Enter pastes the answers of an ask's turn; this is not an ask.";
+      return;
+    }
     const x = r.x;
     const s = r.kind === "pin" ? st.d.sessions[x.sessionId] ?? null : r.kind === "branch" ? st.d.sessions[x.parentSessionId] ?? null : st.d.sessions[x.anchor?.sessionId] ?? null;
     const item = r.kind === "ask" || r.kind === "question";
@@ -371,7 +441,7 @@ export class Detail extends Reader {
   // capture box opened on top is never taken.
   tabField(d, cx) {
     const st = this.viewStore(), r = this.resolve(st);
-    const fields = [r?.kind === "ask" && !isClosed(r.x) && this.answerFor === r.x.id ? this.answer : null, this.note?.input ?? null, this.conclude?.input ?? null].filter(Boolean);
+    const fields = this.fieldsOf(r);
     const inField = Boolean(this.fieldOn) && fields.includes(this.fieldOn);
     if (!inField && !this.keys.is_focused()) return;
     const ring = [...fields, this.keys];
@@ -380,17 +450,56 @@ export class Detail extends Reader {
     cx.timer.after(0, () => { try { next.focus(); } catch { /* a click still reaches it */ } });
   }
 
-  // Sub-rows, usage lines, the question of a branch: the dialog shows that record instead, in place
-  // (2.8). The per-item state goes; the open record follows.
+  // The dialog's fields for record r: the open ask's answer, the pin note, the Conclude text.
+  fieldsOf(r) {
+    return [r?.kind === "ask" && !isClosed(r.x) && this.answerFor === r.x.id ? this.answer : null, this.note?.input ?? null, this.conclude?.input ?? null].filter(Boolean);
+  }
+
+  // The dialog, or one of its fields, holds the keyboard (a field reported focus more recently than blur).
+  holdsKeys(st, r) {
+    if (Boolean(this.fieldOn) && this.fieldsOf(r ?? this.resolve(st ?? this.viewStore())).includes(this.fieldOn)) return true;
+    try { return this.keys.is_focused(); } catch { return false; }
+  }
+
+  // Sub-rows, usage lines, the question of a branch, ⌘↓ / ⌘↑: the dialog shows that record instead, in
+  // place (2.8). A pin note typed and not saved is saved first (saveNote); the rest of the per-item state
+  // goes; the open record follows (the panel's cursor with it). The keyboard goes to the dialog itself,
+  // never to a field: the answer box's own bindings (⌘↓ / ⌘↑ move its caret) run before the dialog's, so a
+  // second ⌘↓ from inside it would not step. Tab enters it.
   retarget(kind, id, session, cx) {
     if (!id) return;
+    const was = this.resolve(this.viewStore());
+    if (was?.kind === "pin") this.saveNote(was.x, cx);
     this.target = { kind, id, session: session ?? this.target?.session ?? null };
-    this.answer = null; this.answerFor = null; this.note = null; this.confirm = null; this.conclude = null; this.closeAsk = null;
+    this.answer = null; this.answerFor = null; this.typed = null; this.note = null; this.confirm = null; this.conclude = null; this.closeAsk = null;
     this.pinDel = null; this.whole = false; this.dd = null; this.scrolledTo = null; this.fieldOn = null; this.linkHit = null;
     this.prepare(cx);
     if (this.inApp) this.writeOpen();
     cx.timer.after(0, () => { try { this.keys.focus(); } catch { /* clicks still work */ } });
     cx.notify();
+  }
+
+  // The lane this record is drawn in, in the panel's order (listing.js laneOf), and where it stands there.
+  laneSpot(st, r) {
+    if (!r) return neighbors([], null);
+    return neighbors(laneOf(st, r.kind, r.x, { threshold: thresholdOf(this.cfg) }).ids, r.x.id);
+  }
+
+  // Next (d 1) or previous (d -1), from ⌘↓ / ⌘↑ or the header: the neighbouring record of its lane,
+  // shown in place (retarget), the keyboard on the dialog itself so the next ⌘↓ steps again (Tab enters
+  // the answer box). What was typed here goes first: the ask's draft (Reader sendDraft), a pin's note
+  // typed and not saved (retarget, saveNote). At either end nothing happens (no wrap); nor while a paste
+  // or a closing act is pending (the dialog closes when it is decided). true when it moved.
+  step(d, cx) {
+    const st = this.viewStore(), r = this.resolve(st);
+    if (!r || this.closing || this.pastePending()) return false;
+    const nb = this.laneSpot(st, r), id = d > 0 ? nb.next : nb.prev;
+    if (!id) return false;
+    if (r.kind === "ask") this.sendDraft(r.x.id, cx);
+    const kind = id.startsWith("pn_") ? "pin" : id.startsWith("br_") ? "branch" : kindOf(id, st.item(id)) ?? r.kind;
+    this.flash = "";
+    this.retarget(kind, id, this.target.session, cx);
+    return true;
   }
 
   // ── acts ─────────────────────────────────────────────────────────────
@@ -751,6 +860,18 @@ export class Detail extends Reader {
     this.close();
   }
 
+  // A note typed for pin p and not saved yet (the editor open on it, its text not the pin's note), saved now
+  // as Enter would: a move to another record (step) keeps it. true when one was posted.
+  saveNote(p, cx) {
+    const k = this.note;
+    if (!k || k.pinId !== p.id) return false;
+    const text = k.input.value();
+    this.note = null;
+    if (squash(text) === squash(p.note)) return false;
+    this.pinAct("pin_note", p, { note: text }, cx);
+    return true;
+  }
+
   // The note editor: its InputState is made here (a click), never in render. Enter saves; Esc discards.
   editPinNote(p, cx) {
     const input = InputState.new({ placeholder: "A one-line note: Enter saves, Esc cancels", value: p.note ?? "" });
@@ -962,11 +1083,27 @@ export class Detail extends Reader {
   // The session's own words in the header: its agent label, name and pane; a pin of a forgotten session
   // names it from the pin's source and says "forgotten".
   sessionBits(t, s, src = null, sid = null) {
-    if (s) return [pill(t, agentLabel(s.agent, s.profile)), div().flex_none().max_w(220).truncate().text_size(t.ts(11.5)).text_color(t.muted).child(sessionWords(s)),
+    const w = this.width < 760 ? 120 : 220;   // narrow: room for ← prev, "3 of 19", next →
+    if (s) return [pill(t, agentLabel(s.agent, s.profile)), div().flex_none().max_w(w).truncate().text_size(t.ts(11.5)).text_color(t.muted).child(sessionWords(s)),
       s.terminal ? div().flex_none().text_size(t.ts(10.5)).text_color(t.dim).child(P(s.terminal)) : null];
-    if (src) return [pill(t, agentLabel(src.agent, src.profile)), div().flex_none().max_w(220).truncate().text_size(t.ts(11.5)).text_color(t.muted).child(sessionWords({ ...src, sessionId: sid })),
+    if (src) return [pill(t, agentLabel(src.agent, src.profile)), div().flex_none().max_w(w).truncate().text_size(t.ts(11.5)).text_color(t.muted).child(sessionWords({ ...src, sessionId: sid })),
       div().flex_none().text_size(t.ts(10.5)).text_color(t.dim).child("forgotten")];
     return [];
+  }
+
+  // ← prev, "3 of 19", next → (2026-11-11): where this record stands in its lane (laneSpot) and the way to
+  // its neighbours (step). At an end its control is dimmed and takes no click; a lane of one shows none.
+  navBits(t, st, r) {
+    const nb = this.laneSpot(st, r);
+    if (!nb.at || nb.of < 2) return [];
+    const ctl = (id, label, to, d, tip) => div().id(id).flex_none().px(5).rounded(4).text_size(t.ts(11))
+      .when(Boolean(to), (x) => x.text_color(t.muted).cursor_pointer().hover((y) => y.bg(t.hover).text_color(t.foreground)).tooltip(tip)
+        .on_click((_e, cx) => { cx.stop_propagation(); this.step(d, cx); cx.notify(); }))
+      .when(!to, (x) => x.text_color(t.dim).opacity(0.45))
+      .child(label);
+    return [ctl("dt-prev", "← prev", nb.prev, -1, "The previous one in the list (⌘↑)"),
+      div().id("dt-pos").flex_none().text_size(t.ts(11)).text_color(t.dim).child(`${nb.at} of ${nb.of}`),
+      ctl("dt-next", "next →", nb.next, 1, "The next one in the list (⌘↓); what you typed here is kept")];
   }
 
   header(t, st, r) {
@@ -1003,6 +1140,7 @@ export class Detail extends Reader {
       .when(Boolean(state?.word), (y) => y.child(div().flex_none().text_size(t.ts(11)).text_color(tone(t, state.tone)).child(state.word)))
       .children(sess.filter(Boolean))
       .when(Boolean(demo), (y) => y.child(demo))
+      .children(this.navBits(t, st, r))
       .child(esc);
   }
 

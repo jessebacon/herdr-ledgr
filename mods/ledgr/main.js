@@ -61,7 +61,11 @@
 //   (the open dialog does them when it is on that item, and pick: and copy-answer: too). The dialog's own:
 //   detail:close, detail:done, detail:whole, detail:pick:<n>, detail:answer:<text>, and launch-branch,
 //   branch-split, branch-agent, send-to-trunk, conclude-edit:<text> (they need its state). It takes tab and
-//   backtab for its own fields only and ignores btw, pin, submit and escape (the capture box's).
+//   backtab for its own fields only; btw (⌘Enter, the capture box's /btw) on an ask, while it holds the
+//   keyboard, as the turn's answers pasted (its answer box is multi-line: Enter is a new line); detail-next
+//   and detail-prev (⌘↓ / ⌘↑, keys.json mod:ledgr; detail:next, detail:prev for scripts): the next or
+//   previous record of the lane in the panel's order, in place (2026-11-11). It ignores pin, submit and
+//   escape (the capture box's); the panel ignores detail-next and detail-prev.
 //   The settings dialog (2026-11-10): settings (the panel's gear: the dialog opens, an open detail dialog
 //   closes first; the host opens it when the panel is not shown), demo-settings (the dialog with the
 //   defaults and sample spaces, nothing saved). The dialog's own: settings:close,

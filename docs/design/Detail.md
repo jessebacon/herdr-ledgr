@@ -846,7 +846,9 @@ through the panel's own events.
 
 ## 7. Out of scope, and open questions
 
-Out of scope: moving through items inside the dialog (↑ ↓ to the next item in place); a draggable
+Out of scope: moving through items inside the dialog (↑ ↓ to the next item in place; built 2026-11-11 as
+⌘↓ / ⌘↑ and the header's ← prev / next →, with the multi-line answer box and the "drafted" row word: the
+design doc's Section 11 departures, `BUILD-NOTES-detail.md` 16); a draggable
 `window` dialog; keyboard shortcuts for actions in the dialog beyond Esc, Tab and Enter in fields;
 pinning a selection from the dialog (no API reads a TextView's selection); editing a question's text;
 the panel and views.js sharing their atoms (`btn`, `pill`, `menuButton` exist twice this round; the

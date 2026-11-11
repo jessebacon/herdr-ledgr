@@ -888,7 +888,7 @@ export class Store {
       const it = this.byHandle(s.sessionId, h);
       if (!it || !isAgentAsk(it) || isClosed(it)) continue;
       const a = squash(answers[it.handle]);
-      if (a) it.answer = a.slice(0, LIMITS.text);
+      if (a) it.answer = a.slice(0, LIMITS.answer);   // the whole answer (the draft's cap), so a draft is compared whole (listing.js draftPending)
       it.answeredTurn = turn;
       it.answeredBy = "sheet";
       if (it.status !== "answered") this.setStatus(it, "answered", at); else it.updatedAt = at;
@@ -1115,7 +1115,7 @@ export class Store {
     else if (action === "dismiss") this.setStatus(it, "dismissed", at);
     else if (action === "reopen") { const was = it.status; this.setStatus(it, "open", at); delete it.note; if (was === "rejoin_pending" || it.rejoin) this.cancelRejoin(it, at); }
     else if (action === "defer") { this.setStatus(it, "deferred", at); it.deferUntil = arg ?? "next_session"; }
-    else if (action === "draft") { it.draft = String(arg ?? "").slice(0, LIMITS.text); it.updatedAt = at; }
+    else if (action === "draft") { it.draft = String(arg ?? "").slice(0, LIMITS.answer); it.updatedAt = at; }
     else if (action === "btw") { it.btwStagedAt = at; it.updatedAt = at; }
     // A suggestion (below extract.threshold) becomes an open row that counts; it stays so whatever
     // the threshold later is. Only agent asks have a level.

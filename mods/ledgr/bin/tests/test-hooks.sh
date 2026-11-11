@@ -361,6 +361,42 @@ uprm $LM c1 "$CONF
 
 $SH1" >/dev/null
 t "a confluence then a sheet: both events" test "$(ev $LM confluence_landed | jq 'map(select(.prompt_id=="c1")) | length')$(lmev c1 | jq length)" = 11
+# A two-paragraph answer from the dialog's multi-line box (2026-11-11), as confluence.js answerLines writes
+# it: the blank line between its paragraphs left out, its next lines indented two spaces.
+SHM="ledgr answers $LM
+Answers to your asks from turn 18:
+A5: Transaction pooling, as you recommended.
+  A6: is the next one; raise the pool to 40 after the cutover.
+    (indented in the answer itself)
+A6: yes"
+MLA='.[0].handles==["A5","A6"] and .[0].answers=={"A5":"Transaction pooling, as you recommended.\nA6: is the next one; raise the pool to 40 after the cutover.\n(indented in the answer itself)","A6":"yes"}'
+uprm $LM ml1 "$SHM
+
+thanks, that's all" >/dev/null
+t "a multi-line answer, unwrapped: one event; its indented lines join it with line breaks (one that reads 'A6:' too), the closing words left out" jq -e "length==1 and $MLA" <<<"$(lmev ml1)"
+uprm $LM ml2 "My answers to A5, A6:
+$(printf '<pasted_content id="m">\n%s\n\n</pasted_content id="m">' "$SHM")" >/dev/null
+t "...pasted (wrapped, with the mod's trailing blank line) under a lead-in: the same" jq -e "length==1 and $MLA" <<<"$(lmev ml2)"
+uprm $LM ml3 "$SHM
+
+$SH2" >/dev/null
+t "...then a second sheet after a blank line: two events, the first answer intact" jq -e 'length==2 and .[0].answers.A5=="Transaction pooling, as you recommended.\nA6: is the next one; raise the pool to 40 after the cutover.\n(indented in the answer itself)" and .[1].handles==["A12"]' <<<"$(lmev ml3)"
+# An [A7] written inside an answer is the person's text, not a ref (review fix 5, 2026-11-11:
+# lib/ledgr_map.prompt_refs skips a sheet's lines, found as the landing finds them, wrapper included);
+# [A9] typed above the pasted sheet and [Q3] below it still are.
+uprm $LM rf1 "About [A9] first:
+$(printf '<pasted_content id="r">\n%s\n\n</pasted_content id="r">' "ledgr answers $LM
+Answers to your asks from turn 18:
+A5: Transaction pooling.
+  Raise the pool as in [A7] after the cutover.
+A6: yes, see [Q2]")
+and [Q3] typed below" >/dev/null
+t "an [A7] inside a multi-line answer and a [Q2] in a one-line one are no refs; [A9] above the sheet and [Q3] below are" jq -e 'map(select(.prompt_id=="rf1"))[0].refs==["A9","Q3"]' <<<"$(ev $LM prompt)"
+t "...and the sheet still lands, A5 and A6" jq -e 'length==1 and .[0].handles==["A5","A6"]' <<<"$(lmev rf1)"
+uprm $LM rf2 "ledgr answers $LM
+Answers to your asks from turn 18:
+A5: as in [A7]" >/dev/null
+t "...unwrapped, the same: no refs" jq -e 'map(select(.prompt_id=="rf2"))[0].refs==[]' <<<"$(ev $LM prompt)"
 
 echo "== landing: pins (Ask here: a parked question with its pinned passages)"
 LP=77777777-3333-0000-0000-000000000004; PQ=rq_0a1b2c3d-0000-4000-8000-00000000aa07

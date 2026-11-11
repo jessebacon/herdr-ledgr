@@ -212,11 +212,32 @@ holds(body("detail.js", "copyPinsMessage", "6, 7"), lambda b: "write_to_clipboar
 # ── rule 7: the staging and copy methods run nothing, open nothing, spawn nothing ──────────────────
 SIDE = ("hc(", "run(", "exec(", "openOverlay(", "goTo", "spawn(")
 for rel, names in (("reader.js", ("stage", "stageAnswers", "copyAnswers", "copyAnswer")),
-                   ("detail.js", ("askPinsHere", "sendToTrunk", "copyConfluence", "copyPin", "copyPinsMessage", "copyText"))):
+                   ("detail.js", ("askPinsHere", "sendToTrunk", "copyConfluence", "copyPin", "copyPinsMessage", "copyText", "pasteSheet", "step",
+                                  "unbreak", "saveNote", "retarget"))):
     for name in names:
         b = body(rel, name, "7")
         for bad in SIDE:
             holds(b, lambda b, bad=bad: bad not in b, f"rule 7: {rel} {name} calls {bad}")
+# ⌘Enter in the dialog's answer box (2026-11-11): the turn's sheet through Reader copyAnswers (so through
+# stageAnswers and the one door), nothing of its own; the box's Enter is a new line, never a paste.
+holds(body("detail.js", "pasteSheet", "7"), lambda b: "this.copyAnswers(" in b and "stage(" not in b and "write_to_clipboard(" not in b,
+      "rule 7: detail.js pasteSheet stages only through this.copyAnswers(")
+holds(body("detail.js", "makeAnswer", "7"), lambda b: "TextareaState.new(" in b and re.search(r'on\("submit", \(e, cx\) => \{ if \(e\?\.secondary\) this\.pasteSheet\(', b) is not None,
+      "rule 7: detail.js makeAnswer: a TextareaState whose submit pastes only with ⌘ (e.secondary), through pasteSheet")
+# Review fixes (2026-11-11): ⌘Enter carries the box's own ask (copyAnswers' own id) after putting back a line
+# break the keypress itself typed (unbreak: the box and the draft only); a sheet over the cap is refused
+# before the one door; the answer box's change handler pastes nothing; a step leaves the keyboard on the
+# dialog (retarget focuses this.keys, never a field: no focusFirst).
+holds(body("detail.js", "pasteSheet", "7"), lambda b: "this.unbreak(" in b and b.index("this.unbreak(") < b.index("this.copyAnswers(")
+      and "this.copyAnswers(s, it.anchor?.turn, cx, id)" in b, "rule 7: detail.js pasteSheet: unbreak first, then copyAnswers with its own ask")
+holds(body("detail.js", "unbreak", "7"), lambda b: "set_value(" in b and "typeDraft(" in b and "copyAnswers(" not in b and "write_to_clipboard(" not in b,
+      "rule 7: detail.js unbreak only sets the box and the draft back")
+holds(body("detail.js", "makeAnswer", "7"), lambda b: "pasteSheet(" in b and b.count("pasteSheet(") == 1 and "copyAnswers(" not in b and "stage(" not in b,
+      "rule 7: detail.js makeAnswer's change handler pastes nothing (pasteSheet only on ⌘ submit)")
+holds(body("detail.js", "retarget", "7"), lambda b: "this.keys.focus()" in b and "focusFirst(" not in b and "answer.focus(" not in b,
+      "rule 7: detail.js retarget (and so a step) puts the keyboard on the dialog itself, never in its answer box")
+holds(body("reader.js", "stageAnswers", "7"), lambda b: "sheetOverCap(" in b and b.index("sheetOverCap(") < b.index("this.stage("),
+      "rule 7: reader.js stageAnswers refuses a sheet over the cap before the one door")
 
 # ── rule 8: one Stage /btw, in detail.js, for a question without pins; with pins, copyPinsMessage ──
 BTW = re.compile(r"[\"'`]Stage /btw[\"'`]")
