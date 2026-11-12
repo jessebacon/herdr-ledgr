@@ -4,7 +4,13 @@
 
 First public shape of the mod. Built on Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311.
 
-### Recipe within the gallery's limit (2026-11-12)
+### Dialog frame as the gallery image (2026-11-12)
+
+- `preview.png` is now the detail dialog frame (the gallery and the mod page show one image per
+  mod, and the page strips images from the recipe body); the scan-list frame is
+  `docs/preview-list.png`, linked from the README. Jesse's choice.
+
+### b2f37a1: recipe within the gallery's limit
 
 - ledgr dropped off herdr.dev/mods: the gallery's index (`assets.herdr.dev/mods/index.json`) skips a
   `RECIPE.md` of 64 KiB (65,536 bytes) or more, and ours had grown to 66,294. The recipe is

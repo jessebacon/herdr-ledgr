@@ -12,7 +12,7 @@ A [Herdr](https://herdr.dev) mod for long conversations with coding agents.
 
 ![ledgr](preview.png)
 
-A click on a row opens it whole in the detail dialog, here on Ask 2: [docs/preview-dialog.png](docs/preview-dialog.png).
+The frame above is the detail dialog open on Ask 2. The panel on its own, the scan list beside the pane: [docs/preview-list.png](docs/preview-list.png).
 
 ## Status
 

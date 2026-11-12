@@ -1,7 +1,8 @@
-# Staging preview.png and docs/preview-dialog.png
+# Staging preview.png (the dialog) and docs/preview-list.png (the list)
 
-Two frames of one state. `preview.png` is a real Claude Code pane beside the ledgr panel as a scan
-list (one line per item); `docs/preview-dialog.png` is the same state with the detail dialog open on
+Two frames of one state. `docs/preview-list.png` is a real Claude Code pane beside the ledgr panel as a
+scan list (one line per item); `preview.png`, the gallery's one image (Jesse's choice, 2026-11-12), is
+the same state with the detail dialog open on
 Ask 2. Both are in authoritative mode (`asks.handoff: ledgr`, the default) on the tool path: the MCP
 server is registered, so the agent declares its asks with `declare_asks` and its reply ends with the
 pointer line only, no fenced block. Every step is a Herdr command, so the state can be rebuilt and
@@ -43,8 +44,8 @@ before it. For the same reason the pin is verified from the screen (`hc read`), 
 Resolved 2026-11-10 by the whole-turn fix (`BUILD-NOTES-hooks.md`, "Whole-turn text"): the turn file
 holds every assistant text of the turn, so THE MESSAGE shows the whole reply with the paragraph that
 holds the quote marked (a plan in one paragraph is marked whole), and the pin is verified from the
-saved turn (`verified: "turn"`). `docs/preview-dialog.png` was retaken the same day from a fresh run
-(`tally-05`; the plan's wording and the pin's sentence differ from `preview.png`'s `tally-30`, which
+saved turn (`verified: "turn"`). the dialog frame (now `preview.png`) was retaken the same day from a fresh run
+(`tally-05`; the plan's wording and the pin's sentence differ from the list frame's `tally-30`, which
 was kept). Of that day's four runs one saved only the pointer line, its quotes dropped: at Stop the
 transcript did not hold the plan's text record yet. Resolved the same day: part A writes the whole turn
 only once the transcript holds the final message, else the final message with `lagged: true`, and part
@@ -103,8 +104,8 @@ d ledgr.below-threshold         # unfold Ask 3 (this session's fold only, in mem
 d ledgr.pick:A2:0               # Ask 2: pick Netlify, so its row shows Paste and the sheet line counts 1
 d ledgr.open:A2; d ledgr.detail:close   # opening a dialog clears the panel's status line
 d ledgr.focus-list; d ledgr.cursor:A1   # the cursor row: Ask 1 shows Done
-# take preview.png now (below), then:
-d ledgr.open:A2                 # the dialog frame; take docs/preview-dialog.png
+# take the list frame now (below), then:
+d ledgr.open:A2                 # the dialog frame; take preview.png
 ```
 
 Haiku's wording differs per run; retake if the reply lists the items in prose or ends with a block
@@ -135,8 +136,8 @@ starting "Without using any tools:" instead of "Do not read or change any files:
   ```sh
   herdr-app shot /tmp/ledgr-shot.png
   # pane + panel of the 1787 x 1344 window at zoom 1.1 (Herdr's sidebar, tab bar and status bar left out)
-  sips --cropToHeightWidth 1262 1475 --cropOffset 48 311 /tmp/ledgr-shot.png --out preview.png
-  # the same crop, with the dialog open, for docs/preview-dialog.png
+  sips --cropToHeightWidth 1262 1475 --cropOffset 48 311 /tmp/ledgr-shot.png --out docs/preview-list.png
+  # the same crop, with the dialog open, for preview.png
   ```
 
   The sidebar left out of the crop lists the other spaces and their folders; check that none of it
