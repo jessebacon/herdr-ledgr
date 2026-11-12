@@ -1,727 +1,572 @@
 # ledgr
 
-A side panel that keeps a two-direction list of asks around one agent conversation. Questions you
-park while reading (⌘J, even while the agent is still streaming) sit in the top lane; the asks the
-agent made of you at the end of each turn (decide, confirm, do, provide, review) sit in the lane below,
-one line each; a click opens one whole in a centered dialog, its text selectable, where it is
-answered. Every ask has a level: blocking (the agent stopped or cannot finish
-without you), needed (the task is not truly done until you act), optional (an offer or suggestion).
-Asks below the threshold are kept in a folded "below threshold" line. A small always-visible ledgr
-button counts what is open and opens the panel; an optional chip in each pane header counts that
-pane's session. A parked question can be branched into its own forked Claude Code session, and its one
-approved answer carried back to the end of the trunk. A passage can be pinned before any question
-exists (⌘J, then ⌘S): pins are kept verbatim for good in a PINS lane above the questions, searched
-across every session, and become the context of a question asked in the trunk or in a branch. ledgr
-presses no keys in a terminal, and never Enter: answers, branch results and questions with their pins
-are pasted into the agent's prompt once its pane has the focus, for the person to send; `/btw`
-questions and search slices go to the clipboard and the pane is focused.
+A side panel that keeps a two-direction list of asks beside one agent conversation. Questions you
+park while reading (cmd-J, even while the agent is still streaming) sit in one lane; the asks the
+agent made of you at the end of each turn sit in the lane below, one line each, and a click opens
+one in a centered dialog where you answer it. Every ask is blocking, needed or optional, and those
+below your threshold fold away as suggestions. Passages you pin (cmd-J, then cmd-S) are kept
+verbatim for good, searchable across sessions, and become the context of a later question. A parked
+question can branch into its own forked Claude Code session whose one approved answer comes back to
+the end of the main conversation. A small always-visible ledgr button counts what is open; an
+optional chip in each pane header counts that pane's session. ledgr presses no keys in a terminal
+and never Enter: what it gives the agent is pasted into the prompt once the pane has the focus, for
+you to send.
 
 ![ledgr](preview.png)
 
-## Before you add it (disclosure)
-
-Tell the person all of this before copying anything (the manual's step 1).
-
-- **Registers Claude Code hooks.** Three entries (SessionStart, UserPromptSubmit, Stop) in each of
-  the Claude settings files you chose: `~/.claude/settings.json`, plus any other Claude config folder
-  (a Claude Code started with `CLAUDE_CONFIG_DIR`, such as a second account; the installer lists the
-  `~/.claude-*` folders and the `CLAUDE_CONFIG_DIR=` values in `~/.local/bin` wrappers and shell
-  start-up files it finds, and asks for each), each `bash "$HOME/.config/herdr-app/mods/ledgr/bin/adapters/claude/<event>.sh"`
-  with a 5 s timeout. They exit 0 at once and do nothing outside a Herdr terminal (`HC_TERMINAL_ID`
-  unset) or inside a process ledgr started (`LEDGR_INNER`).
-- **Prints an instruction into the session's context.** Unless `asks.handoff` is `prose` (or
-  `instruct_block` is false), the SessionStart hook prints the ledgr-asks instruction for the chosen
-  mode (`mods/ledgr/bin/lib/asks-instruction-ledgr.txt`, about 260 words: keep blocking and needed
-  items out of the reply, declare them with ledgr's `declare_asks` tool when it is there, else one
-  per line in a fenced `ledgr-asks` block, and end the prose with one line "ledgr: N items for you,
-  M blocking"; or `asks-instruction-both.txt`, about 200 words: list them as usual and declare them
-  too) once per session and again after `/clear` or
-  `/compact`; Claude Code adds it to the context. When the extractor finds a blocking ask in a reply
-  that had no block, the session's next prompt carries it once more (`instruct_reinject`); when you
-  change `asks.handoff`, each running session's next prompt carries the new wording once (to `prose`:
-  two lines telling it to stop, `asks-instruction-off.txt`). In a space where ledgr is off
-  (`spaces.disabled`) nothing is printed, except three lines (`asks-instruction-space-off.txt`:
-  ignore every earlier ledgr instruction, declare nothing, list needs in the reply as usual) once to
-  a session that had a wording, at its first prompt after the space was turned off or at a resume or
-  compact while off; when the space is on again, its next prompt carries the mode's wording once.
-  Nothing else is ever printed.
-- **Registers an MCP server with Claude Code (asked; default yes when you answer the questions, never
-  with `--yes` unless the answers or `--mcp on` say so).** For each chosen Claude config folder the
-  installer shows and then runs Claude Code's own command,
-  `claude mcp add --scope user --transport stdio ledgr -- <python3> -I -B ~/.config/herdr-app/mods/ledgr/bin/mcp/ledgr_mcp.py`
-  (with `CLAUDE_CONFIG_DIR` set for a folder other than `~/.claude`; Claude Code writes it into that
-  folder's `.claude.json`, `~/.claude.json` for the default; backup first), and adds four allow
-  entries, `mcp__ledgr__declare_asks`, `mcp__ledgr__open_asks`, `mcp__ledgr__parked_questions` and
-  `mcp__ledgr__resolve_asks`, to that folder's settings file so a call never prompts. The server starts
-  with each Claude Code session of that folder and offers tools only inside a Herdr terminal
-  (`HC_TERMINAL_ID`; outside it, none). It can: record the items the agent declares for this turn
-  (`declare_asks`: an `asks` spool event, its per-turn state in `ledgr-data/mcp/`, and the pointer line
-  it returns), close this session's asks your message answered or dropped (`resolve_asks`: one `act`
-  spool event per ask, marked as closed by the agent; you can reopen it), list this session's open
-  asks (`open_asks`) and the questions you released to the agent (`parked_questions`). It reads and writes
-  only `ledgr-data/` (log `log/mcp.log`), makes no network call and runs nothing else. `--check`
-  reports the registration and the entries per folder and prints the command when one is missing;
-  `./uninstall.sh` runs `claude mcp remove --scope user ledgr` per folder and removes the entries.
-- **Reads the Claude config folder.** The hooks read the session's transcript (the path Claude Code
-  passes them, `<config>/projects/…/<id>.jsonl`) for the turn's last message and its uuid, and
-  `<config>/sessions/<pid>.json` for a session name; the installer reads and writes the Claude
-  settings files you chose for the hook and allow entries (backup first), and `claude mcp add` writes
-  `.claude.json` (above). Nothing else there.
-- **Calls one network endpoint.** At the end of each turn the hooks' extractor sends that turn's last
-  assistant message (at most 60,000 characters) and the session's open asks to the configured
-  provider: the Anthropic Messages API (`claude-haiku-5-5`, the default), an OpenAI-compatible server
-  you name, or `claude -p` on your Claude Code subscription. A declaration skips the call (a
-  `declare_asks` call that turn, or a valid fenced `ledgr-asks` block in the message, unless
-  `extract.audit_rate`, default 0, samples the block turn for a comparison); provider `none` never
-  calls. The MCP server makes no network call. The API key is read from the macOS Keychain
-  (service `ledgr`, account = provider name) at each call and never written to disk: `/usr/bin/curl`
-  gets it in a config on stdin, and the message in a 0600 file under `ledgr-data/tmp/`, deleted after.
-- **Runs programs.** The mod, through `exec` and `hc`: `hc read <terminal>` (checks a clipboard quote
-  against a working agent's screen, and a passage to pin against the screen when no saved turn holds
-  it), `hc run … -- claude --resume <sid> --fork-session …`
-  (Launch on a Branch: a new Claude Code session on your plan), `hc run … -- claude --resume <sid>`
-  (Resume session), `hc kill` and `hc rm` (Close branch, after its answer landed),
-  `git -C <cwd> rev-parse` (whether "isolate in a worktree" applies), `/usr/bin/which claude` once,
-  and `bash mods/ledgr/bin/adapters/claude/extract.sh --retry …` (the Retry button). The hooks run
-  `python3`, `/usr/bin/security find-generic-password` (the key), `/usr/bin/curl` (the call) and,
-  at SessionStart and each prompt, `hc get $HC_TERMINAL_ID --json` (read only, killed after 300 ms)
-  for the terminal's `herdr.space` label, to know whether ledgr is off in that space.
-- **May launch your browser or an editor, only when you click a link in the detail dialog.** In the
-  dialog's message and an ask's text and quote, a web link you click opens in your browser
-  (`cx.open_url`, http and https only), and a file path you click opens with `links.editor`: by
-  default `open <path>` (the system's default app; an app, package, disk image or jar is only revealed
-  in Finder, `open -R`, and a script or a file with no extension opens as text, `open -t`, never run),
-  or `zed <path>:<line>`, `code -g <path>:<line>`, or a command of your own (a shell, an interpreter or
-  a terminal is refused). Before opening it, ledgr looks for the path in the session's folder, then at
-  its git toplevel (`git -C <cwd> rev-parse --show-toplevel`); Reveal in Finder runs `open -R`. Each
-  has a 5 s limit, all in `mods/ledgr/opener.js`. Nothing opens without your click.
-- **Reads the clipboard and pastes into a prompt.** The capture box reads the clipboard when it opens,
-  to offer the copied passage as the question's quote (attached only if it matches the agent's saved
-  turn text or screen) or to pin it with ⌘S (pins mode reads none). The panel and the detail dialog write the clipboard for
-  Paste answer, Paste answers, Paste into trunk, Ask here (a question with its pins), `/btw`, Copy for
-  prompt, a pin's Copy and Go to anchor, and, except for a pin's Copy, focuses the pane
-  (`pane.focus`). For the Paste actions and Ask here it then runs Herdr's `terminal.paste` (what ⌘V
-  runs: the clipboard into the focused terminal, no key names, no Enter) once Herdr reports that
-  terminal focused on two looks in a row
-  and the clipboard, read back, still holds ledgr's text: the message waits in the prompt until the
-  person sends it. Never into a terminal with no agent (a shell could run the lines) or an agent
-  waiting on its own prompt; `ui.pasteIntoPrompt: false` turns the paste off (clipboard plus focus
-  only). That is all it does to a terminal.
-- **Writes under the Herdr home only.** The mod, its hooks and the MCP server write `ledgr-data/`
-  (store, spool, saved turn texts, per-session `decisions.md`, the MCP server's per-turn declarations
-  in `mcp/`, logs, `config.json`) and the mod's own files. The installer also writes the Claude files
-  named above (backup first) and its own state, backups and the files as they were before ledgr in
-  `~/.local/state/ledgr/`.
-- **Never:** sends keystrokes to a terminal (no `hc keys`, no `hc send`, no find bar; Enter is never
-  pressed, and the one paste above is the only text that reaches a prompt;
-  `bin/tests/test_no_keystrokes.py` checks the source and allows `terminal.paste` in one function);
-  reaches the network beyond the one extraction provider; contacts any other application (except the
-  browser or editor a link you click in the detail dialog opens); reads files
-  outside the Herdr home and the Claude config folders you chose (the installer also reads
-  `~/.local/bin` wrappers and shell start-up files to find those folders, and `~/.local/state/ledgr/`).
-
 ## What you see
 
-- **Host button** (`ledgr` with props `{view: "host"}`), a 96 px block beside the status bar (or the
-  tab bar, or floating at the bottom-right of the terminals), drawn on `chrome` with a 1 px `border`
-  line on the bar's side. A 22 px pill: the ledgr icon (13 px), "ledgr" (12 px) and, when anything is
-  open, a count badge (10.5 px): open asks plus parked questions across sessions, in `blocked` with
-  `◆` when a blocking ask is open (`1 ◆ 4`), in `accent` after a turn ends with something new, else
-  `muted`. `selected` background while the panel is shown. Its tooltip gives the counts and "click to
-  show or hide the panel".
-- **Panel** (props `{view: "panel"}`; by default a child of the right-hand `panel-body` stack, the
-  column's width, 280-900 px). Rounded card, `background` fill, 1 px `border`, 12.5 px text.
-  - Header, 42 px: "ledgr", a session button (agent label pill such as `claude` or `codex`, then the
-    session name, a small dim `pane t21`, chevron) that opens the session list (live sessions grouped
-    by agent and profile, each group headed by how its asks arrive: `declares asks` in `accent`,
-    `extractor only` or `no asks`; then ENDED SESSIONS), the hold control (a faint "hold" while the
-    panel follows focus; held, an `accent` pill "held" whose tooltip says "Held on this session; click
-    to follow focus"; text only, since the `pin` icon belongs to the PINS lane; it read "pinned" before
-    2026-11-07), `turn N` (in `working` colour with "· working" while the agent works), an `off` pill
-    where ledgr is off, a `demo` pill in demo mode, and at the right a gear (`settings.svg`, 13 px,
-    `dim`; tooltip "Settings: text size, threshold, closing list, …") that opens the settings dialog.
-  - The session list's first row is the switch for the focused pane's space: "ledgr off in this
-    space" (or "ledgr on in this space", in `accent`) with the space's name small and dim beside it;
-    rows of sessions in an off space read "off" instead of "N open".
-  - Off in this space: instead of the lanes and the footer, "ledgr is off in this space", a dim line
-    (no chips, no ⌘J, no instruction or extraction; items are kept and show again when it is on), a
-    primary button "ledgr on in this space", and a line pointing at the session menu. A session
-    held or picked in another space still shows its lanes; one whose own space is off reads "ledgr
-    is off in <space name>".
-  - The agent label names the session's Claude profile when it is not the default one: a Claude Code
-    started with `CLAUDE_CONFIG_DIR=~/.claude-work` (a second account, `claude-work`) reads `claude · work`
-    in the header pill, in its session-list group (`CLAUDE · WORK`, a group of its own) and row pill, in
-    the capture box, and on the branch manifest's Parent line (`app (claude · work) · pane t1z …`);
-    `~/.claude` (profile `default`) reads `claude` alone. The hooks record the folder and profile at
-    each session start and prompt; the header pill's tooltip names the folder. A session from before
-    this reads `claude` until its next prompt.
-  - Names a person reads are words: `Ask 9`, `Question 1`, `pane t21` (never a bare `t21`), "branch of
-    Question 1" with its short id (`br-q1-c51e`) small beside it. The short forms stay in every machine
-    format: the answer sheet's `A9: …` lines, the confluence and answer markers, `[A9]` / `[Q1]` refs in
-    a prompt, store keys.
-  - **PINS** lane (top): the shown session's pins, newest first, five, then "N more ›", and
-    "archived (N) ›" at the bottom; with none, "No pins in this session. Select a passage in the
-    agent's pane, ⌘J, then ⌘S." The head: chevron, "PINS", a search box ("Search pins, every
-    session", a small `search` icon) taking the free width, and "N pins"; while pins are checked, a
-    bar under it reads "3 selected · Ask about these 3 pins… · clear". A row is one line (26 px): a
-    12 px checkbox (tooltip "add to question"), the `pin` icon (`accent`, `dim` when archived),
-    `Pin 4`, the passage's first line cut with "…", and a state word: its age ("3 days ago"), `unverified`, `used`, `sent`, `answered` (`done`) or
-    `archived`; the tooltip holds the passage's first 300 characters and the note. The rest (the
-    passage whole, the note, the anchor, the usage lines, Ask here…, Branch…, Note, Copy, Go to anchor,
-    Archive; Restore and Delete for an archived pin) is in its dialog (below). While a query is typed
-    the lane shows every session's matches instead: a count ("3 matches", "first 200 of N") with the
-    toggles "archived too" and "this session only", one group per session (agent pill, name, "(this
-    session)", "forgotten", or "open session" in `accent`), and the same one-line pin rows.
-  - **YOUR QUESTIONS** lane (second): parked questions, newest first, then the session's branches. A
-    row is one line: the status glyph (hollow while a question parked mid-turn waits for its anchor),
-    `Question 3`, one pill (`2 pins` in `accent`, `bookmark`, `/btw`), the text's first line (a
-    bookmark: its quote's first line in quotes), and a state word: `parked`, `anchoring`, `sent at
-    turn 18`, `branch working` / `needs you` / `idle` / `concluded`, `rejoining`, `answered`, `done`,
-    `resolved by branch`, `not needed`, `cleared`, `deferred`. A question about an ask hangs indented
-    under it. A branch row: the `git-branch` icon (a spinner while it works), "branch of Question 3",
-    its short id (`br-q3-c51e`) as a dim pill, the question's first line dim, and its live word. The
-    lane head carries a quiet `Clear 3` (10.5 px, `dim`) while the session has open or deferred parked questions without a branch; clicked once it
-    reads "Clear 3 questions? 1 branched kept" in `blocked` on a faint `blocked` tint for 4 s, then
-    "Clearing 3…" until the writer has applied it. Cleared rows sit in the closed fold reading
-    `cleared`.
-  - **ASKED OF YOU** lane (third): folded or open only when you click its head (kept across reloads);
-    while the agent works the head says "agent working" in `working`. The head carries the threshold
-    control, a quiet `blocking only ▾` / `blocking + needed ▾` / `everything ▾` menu that writes
-    `extract.threshold` to `config.json`. Grouped by turn: the newest group and any group holding an
-    open blocking ask are open, older groups one line (`turn 12 · 2 asks, 1 open`); your click wins,
-    and a group you folded that still holds a blocker adds `◆ 1 blocking` in `blocked`. Each row is one
-    line: glyph, `Ask 5`, one pill (its kind; `blocking` in `blocked` for a blocking ask), the text's
-    first line, and a state word (`open`, `answer ready`, `raised again` in `accent` for an ask you
-    dismissed that the agent raised again, `answered`, `answered by you`, `closed by agent`, `done`,
-    `not needed`, `deferred`; `drafted` in `dim` on an ask below the threshold or deferred whose answer
-    is typed or picked and not sent, until the sheet lands). Blocking asks sort first in their group with a `◆` glyph (`blocked`).
-    Asks below the threshold sit in one folded line at the bottom of their group, `below threshold
-    (N)`: open, each row is dim with a hollow glyph, its level as the pill, the state `below
-    threshold` and a Promote button; they never count. A spinner and "extracting turn N" sit in the
-    lane head while extraction runs; a failed turn shows "asks not extracted for turn N: <error>" with Retry. Under an
-    open group with answers typed or picked: **Paste 2 answers into pane t21** and a dim "pasted into
-    the prompt, never sent" ("Copy 2 answers for pane t21" and "clipboard + focus the pane; nothing is
-    typed" with `ui.pasteIntoPrompt` off).
-  - Row buttons, 18 px, bordered: Done on the row under the pointer and on the cursor row; Paste (Copy
-    with `ui.pasteIntoPrompt` off) in place of the state word once an ask's answer is typed or picked;
-    Promote on an ask below the threshold. A click anywhere else on a row opens its dialog; the row
-    whose dialog is open is drawn `raised`. Once a click has given the list the keyboard, the cursor
-    row is `selected` with a 2 px `accent` left edge.
-  - Footer, 30 px: `older than a day (n) ›  deferred (n) ›  closed (n) ›` folds; a status line below for
-    the last action's result.
-- **Detail dialog** (props `{view: "detail", …}`; a click or Enter on a row): centered, 0.6 × 0.75 of
-  the window, which dims; `popover` fill inside Herdr's dialog frame. Header, 44 px: glyph, `Ask 15`
-  (13 px semibold), its pill, the facts (`decide · turn 17 · declared by the agent`), the state word,
-  the session (agent pill, name, `pane t21`), `← prev  3 of 19  next →` (the item's place in its lane,
-  in the panel's order; at an end its control is dimmed; none for a lane of one) and `Esc`. From 760 px wide two columns, each scrolling
-  on its own: the item on the left (46 %), THE MESSAGE on the right (its turn as markdown, the passage
-  marked with a 2 px `accent` bar on an `accent` tint and scrolled into view, `around` / `whole`,
-  Copy); narrower, one column with the message last. Left sections: an ask's TEXT, QUOTE, OPTIONS
-  (chips, the recommended one "(rec.)"), ANSWER (the Answer… box, two lines growing to ten then
-  scrolling, with Paste answer beside it, and "⌘Enter pastes the answers for turn N (Enter starts a new
-  line)"), RESULT, QUESTIONS ABOUT IT; a question's TEXT, QUOTE (BOOKMARKED
-  PASSAGE for a bookmark), ABOUT, PINS (N), BRANCHES, the Branch confirmation, RESULT; a pin's PASSAGE
-  (badges `unverified`, `clipped`, `archived`), NOTE, ANCHOR, USED IN ("used in Question 3", "sent in
-  Question 3 at turn 14", "answered in Question 5 (branch br-q5-1a2b, turn 16)") and ITS MESSAGE (or
-  "That message is no longer saved; the pin keeps the passage."); a branch's status, QUESTION,
-  MANIFEST, ASKED IN THIS BRANCH, its confluence or CONCLUSION, the Conclude editor, PREAMBLE, with
-  THE BRANCH'S LAST MESSAGE on the right. A dim foot line in words (`Ask 13 · found by the extractor
-  · needed · turn 19 · #<hash>`, `Pin 4 · pinned by you · turn 12 · #<hash>`). Lines inside it (a
-  question's pins, a branch's question) are one-line rows that open in place. Footer: the status line,
-  the buttons (a primary where the item has one, such as Ask here or Paste confluence again, while an
-  open ask's Paste answer sits beside its field; Done, Defer ▾, the kind's own, ⋯ for the rest; an
-  archived pin's Restore and Delete, which reads "Delete Pin 4? It cannot come back" in `blocked` for
-  4 s), and key hints `Esc close · Tab next field · ⌘Enter paste the turn's answers · Enter newline`. Every text meant for reading is
-  selectable, the person's and pinned text exactly as stored, with Copy beside the text, the quote,
-  the passage and the message. While a paste is pending or a closing act is written, the body and the
-  buttons dim. An item no longer in the ledger reads "This is no longer in the ledger…" with Close.
-  (Checked against the live look in the 2026-11-10 preview retake: `docs/preview-dialog.png`.)
-- **Settings dialog** (props `{view: "settings", opener, demo}`; the header's gear or `ledgr.settings`):
-  centered, 0.5 × 0.7 of the window, `popover` fill. Header, 44 px: the gear in `accent`, "ledgr
-  settings" (13 px semibold), a `demo` pill in the demo, `Esc`. One scrolling column of rows, each a
-  semibold label with its control at the right (wrapping under it when narrow) and one dim line in
-  words below: Text scale (`−` `120 %` `+` and a `100 %` reset), Threshold (`blocking only`, `blocking
-  + needed`, `everything`, the chosen one in `accent`), Who owns the closing list (`ledgr`, `both`,
-  `prose`), Paste into the prompt, Animations, Fold asks while the agent works, Open the panel on new
-  asks (`on` / `off` each), Branch depth (`−` `2` `+`, 0 to 4, "0 (off)"), and Off spaces: one line
-  per Herdr space by name ("this space" beside the focused pane's) with `on` / `off`, then an off id
-  Herdr no longer has (`spdead000000… (no longer in Herdr)`) with Drop. Footer: the status line (what
-  the last click saved, or why not), then "~/.config/herdr-app/ledgr-data/config.json: edit anything
-  else there; it applies within a second." and an `Esc close` hint.
-- **Text scale** (`ui.textScale`, 0.8 to 1.6, default 1): every text size above is its size times the
-  scale, to a half pixel (the panel, both dialogs, the box, the host button, the chip), and so are the
-  heights of one-line rows and buttons, the row glyph column and the checkboxes; icons keep their size.
-  The host button and the chip stop growing at 26 px so they stay inside their bars; the pane header's
-  own name and folder keep Herdr's size.
-- **Capture box** (⌘J): a popup at the top of the window, 600 × 320, no dimming, so the stream stays
-  visible. Title "Park a question", then `t21 · <name> · turn N (working)` and the agent pill; the
-  question field (placeholder "Park a question about what you are reading… (⌘S pins the passage;
-  this line is its note)"); the clipboard quote with a checkbox when it checks out, "Pin only (⌘S)"
-  for a passage over 600 characters, else a "Quote (optional)" field and a one-line reason; key hints
-  `Enter park · ⌘Enter park + /btw · ⌘S pin · Esc cancel`; `session: t21 ↻ 1/3` to switch. Opened
-  from the PINS lane (600 × 340), the box is in pins mode: title "Ask about 2 pins", the pins' labels
-  under the field ("Pin 4 · “The gateway retries each…”", four at most, then "+N more"), no quote,
-  key hints Enter and Esc only. Over a pane in a space
-  where ledgr is off: the title, "ledgr is off in this space", "Nothing is parked. The ledgr panel's
-  session menu (›) turns it on again for this space." and an Esc hint; no field.
-- **Header chip** (optional mod `ledgr-pane`: Herdr's `pane` header plus the chip), 18 px, 10.5 px
-  text: hidden with nothing open; `? 2` dim while the agent works and you parked questions this turn;
-  `1 blocking · 2 asks · 1 parked` in `blocked` on a faint `blocked` tint while a blocking ask is open,
-  also while the agent works (beside the header's own spinner, without pulsing); `2 parked · 3 asks`
-  in `accent` on a faint `accent` tint after a turn ends with something new; `? 1 · 2` muted once
-  seen; a small spinner while that turn's asks are being extracted. Turning loud pulses the chip once:
-  a halo that fades over about 0.9 s.
-- **Motion** (`ui.animations`, default true; false stops all of it): only on a state change. A row
-  entering its lane fades in from 6 px above under a highlight that decays over about a second
-  (`blocked` tint for a blocking ask, `accent` otherwise; several at once staggered 45 ms). A row
-  leaving fades out in place and, when you closed it yourself, collapses. An ask that becomes answered
-  glows `done`. Lane folds do not ease.
+Colours are Herdr theme names (accent, blocked, working, done, muted, dim, chrome, border,
+background, popover, selected, raised); sizes are at text scale 100 %. Names a person reads are
+words everywhere: Ask 9, Question 1, Pin 4, pane t21, branch of Question 1 (its short id small
+beside it).
+
+- **Host button.** A 96 px block beside the status bar (or the tab bar, or floating at the bottom
+  right of the terminals) on chrome, a 1 px border line on the bar's side. Inside, a 22 px pill: the
+  ledgr icon (13 px), the word ledgr (12 px) and, when anything is open, a count badge (10.5 px) of
+  open asks plus parked questions across sessions: blocked with a diamond while a blocking ask is
+  open (1 ◆ 4), accent after a turn ends with something new, else muted. On selected while the panel
+  is shown; the tooltip gives the counts.
+- **Panel.** By default a child of the right-hand side panel stack, the column's width (280 to 900
+  px): a rounded card on background, 1 px border, 12.5 px text, three lanes between a header and a
+  footer.
+  - Header, 42 px: ledgr; a session button (an agent pill such as claude or codex, the session name,
+    a small dim "pane t21", a chevron) that opens the session list; the hold control (a faint "hold"
+    while the panel follows focus, an accent pill "held" when it stays on one session); "turn N", in
+    working with "· working" while the agent works; an "off" pill where ledgr is off; a "demo" pill
+    in the demo; at the right a 13 px dim gear for the settings dialog.
+  - Session list: first a switch for the focused pane's space ("ledgr off in this space", or
+    "ledgr on in this space" in accent, the space's name small and dim beside it); then live
+    sessions grouped by agent and profile, each group headed by how its asks arrive ("declares asks"
+    in accent, "extractor only", "no asks"), each row reading "N open" or "off"; then ENDED
+    SESSIONS, where one whose terminal is gone offers Forget (two clicks). A session from a second
+    Claude config folder (~/.claude-work) is labelled "claude · work" everywhere, with its own
+    group; the default folder reads "claude".
+  - PINS lane (top): the shown session's pins, newest first, five, then "N more ›" and
+    "archived (N) ›". The head: a chevron, PINS, a search box ("Search pins, every session") taking
+    the free width, and "N pins"; with pins checked, a bar "3 selected · Ask about these 3 pins… ·
+    clear". A row, 26 px: a 12 px checkbox, the pin icon (accent, dim when archived), Pin 4, the
+    passage's first line, a state word (its age, unverified, used, sent, answered in done,
+    archived); the tooltip holds the passage's start and the note. Empty: "No pins in this session.
+    Select a passage in the agent's pane, ⌘J, then ⌘S." With a query typed, every session's matches:
+    a count ("first 200 of N"), the toggles "archived too" and "this session only", and one group
+    per session, marked "forgotten" when it is.
+  - YOUR QUESTIONS lane: parked questions, newest first, then the session's branches. A row: a
+    status glyph (hollow while a question parked mid-turn waits for its anchor), Question 3, one
+    pill ("2 pins" in accent, "bookmark", "/btw"), the text's first line, a state word (parked,
+    anchoring, sent at turn 18, branch working, needs you, concluded, rejoining, answered, done,
+    resolved by branch, not needed, cleared, deferred). A question about an ask hangs indented under
+    it. A branch row: the git-branch icon (a spinner while it works), "branch of Question 3", its
+    short id as a dim pill, its live word. While open or deferred questions without a branch exist,
+    the head carries a quiet "Clear 3" (10.5 px, dim).
+  - ASKED OF YOU lane: folded or open only by your click; while the agent works the head says
+    "agent working" in working, and its threshold menu reads "blocking only ▾",
+    "blocking + needed ▾" or "everything ▾". Grouped by turn: the newest group and any group with an
+    open blocking ask are open, older ones one line ("turn 12 · 2 asks, 1 open"; a folded one still
+    holding a blocker adds "◆ 1 blocking" in blocked). A row: glyph, Ask 5, one pill (its kind, or
+    "blocking" in blocked), the text's first line, a state word (open, answer ready, raised again in
+    accent, answered, answered by you, closed by agent, done, not needed, deferred, or "drafted" in
+    dim when an answer is typed and not sent). Blocking asks sort first with a ◆ glyph in blocked.
+    Asks below the threshold sit in one folded line at the bottom of their group,
+    "below threshold (N)": dim rows with a hollow glyph, their level as the pill and Promote; they
+    never count. While extraction runs, a spinner and "extracting turn N" sit in the head; a failure
+    shows "asks not extracted for turn N: <error>" and Retry. Under an open group with answers
+    typed: "Paste 2 answers into pane t21" and a dim "pasted into the prompt, never sent".
+  - Row buttons, 18 px, bordered: Done on the hovered and the cursor row; Paste in place of the
+    state word once an ask's answer is typed or picked; Promote below the threshold. A click
+    elsewhere on a row opens its dialog, and that row is drawn raised. Once a click has given the
+    list the keyboard, the cursor row is selected with a 2 px accent left edge.
+  - Footer, 30 px: the folds "older than a day (n) ›", "deferred (n) ›", "closed (n) ›", and a
+    status line with the last action's result.
+  - Off in this space: instead of the lanes, "ledgr is off in this space", a dim line (nothing is
+    captured or extracted here; items are kept), a primary button "ledgr on in this space", and a
+    line pointing at the session menu. A held session whose own space is off reads "ledgr is off in
+    <space name>".
+- **Detail dialog** (a click or Enter on a row). Centered, 60 % by 75 % of the window, which dims;
+  popover fill inside Herdr's dialog frame. Header, 44 px: glyph, Ask 15 (13 px semibold), its pill,
+  the facts ("decide · turn 17 · declared by the agent"), the state word, the session,
+  "← prev  3 of 19  next →" (dimmed at either end) and Esc. From 760 px wide, two columns that
+  scroll on their own: the item (46 %), and THE MESSAGE (the turn as markdown, the passage marked
+  with a 2 px accent bar on an accent tint and scrolled into view; around or whole; Copy); narrower,
+  one column. Sections: an ask's TEXT, QUOTE, OPTIONS (chips, "(rec.)" on the recommended one),
+  ANSWER (a box two lines tall growing to ten, Paste answer beside it, "⌘Enter pastes the answers
+  for turn N (Enter starts a new line)"), RESULT, QUESTIONS ABOUT IT; a question's TEXT, QUOTE,
+  ABOUT, PINS (N), BRANCHES, the Branch confirmation; a pin's PASSAGE (badges unverified, clipped,
+  archived), NOTE, ANCHOR, USED IN, ITS MESSAGE (or "That message is no longer saved; the pin keeps
+  the passage."); a branch's QUESTION, MANIFEST, ASKED IN THIS BRANCH, CONCLUSION, Conclude editor,
+  PREAMBLE. Footer: the status line; the buttons (a primary where the kind has one, Done, Defer ▾,
+  the kind's own, ⋯ for the rest); the hints "Esc close · Tab next field · ⌘Enter paste the turn's
+  answers · Enter newline". Reading text is selectable, the person's and pinned text exactly as
+  stored, with Copy beside it; the dialog dims while a paste is pending.
+- **Settings dialog** (the gear). Centered, 50 % by 70 %, popover fill. Header, 44 px: the gear in
+  accent, "ledgr settings" (13 px semibold), Esc. Rows of a semibold label, its control at the right
+  and one dim line below: Text scale (− 120 % + and a 100 % reset), Threshold (blocking only,
+  blocking + needed, everything), Who owns the closing list (ledgr, both, prose), Paste into the
+  prompt, Animations, Fold asks while the agent works, Open the panel on new asks (on or off each),
+  Branch depth (− 2 +, 0 to 4), Open files with, and Off spaces (each Herdr space by name, on or
+  off; an id Herdr no longer has, with Drop); the chosen value in accent. Footer: the status line
+  (what the last click saved, or why not) and the path of config.json, "edit anything else there".
+- **Text scale** (0.8 to 1.6) multiplies every text size above, the heights of one-line rows and
+  buttons, the glyph column and the checkboxes, to a half pixel; icons keep their size, and the host
+  button and the chip stop at 26 px to stay inside their bars.
+- **Capture box** (cmd-J). A popup at the top of the window, 600 by 320, no dimming, so the stream
+  stays visible. Title "Park a question", then "t21 · <name> · turn N (working)" and the agent pill;
+  the question field ("Park a question about what you are reading… (⌘S pins the passage; this line
+  is its note)"); the copied passage with a checkbox when it checks out ("Pin only (⌘S)" over 600
+  characters), else a "Quote (optional)" field and a one-line reason; the hints "Enter park · ⌘Enter
+  park + /btw · ⌘S pin · Esc cancel"; "session: t21 ↻ 1/3" to switch. From the PINS lane, pins mode,
+  600 by 340: "Ask about 2 pins", up to four pin labels, no quote. Over a pane where ledgr is off:
+  "ledgr is off in this space", "Nothing is parked. The ledgr panel's session menu (›) turns it on
+  again for this space.", no field.
+- **Header chip** (optional), in each pane header, 18 px, 10.5 px text: hidden with nothing open;
+  "? 2", dim, while the agent works and you parked questions this turn; "1 blocking · 2 asks · 1
+  parked" in blocked on a faint blocked tint while a blocking ask is open, even while the agent
+  works (beside the header's spinner, not pulsing); "2 parked · 3 asks" in accent on a faint accent
+  tint after a turn ends with something new; "? 1 · 2" muted once seen; a small spinner during
+  extraction.
+- **Motion**, on a state change only, none with Animations off: a row entering fades in from 6 px
+  above under a highlight that decays over about a second (blocked tint for a blocking ask, else
+  accent; staggered 45 ms); a row leaving fades out and, when you closed it, collapses; an ask that
+  becomes answered glows done; a chip turning loud pulses once, a halo fading over about 0.9 s.
 
 ## How it behaves
 
-- Asks arrive two ways. Declared first: the agent, told by the SessionStart instruction, declares a
-  blocker or a needed decision with ledgr's `declare_asks` tool when the MCP server is registered (the
-  rows appear at once, "declared by the agent (tool)", and are settled at Stop), else ends the reply
-  with a fenced `ledgr-asks` block, which ledgr reads at Stop; either way with no model call, and the
-  agent says what it needs instead of ledgr guessing. Extracted as the
-  fallback: a reply without a block goes to the provider (Haiku by default); a blocking ask found that
-  way puts the instruction into the session's next prompt once more. `extract.threshold` applies to
-  both. An agent ledgr has no adapter for gets the parked-questions lane only
-  (`mods/ledgr/bin/adapters/README.md` is the contract).
-- Who owns the closing list (`asks.handoff`, the installer's "Who owns the closing list the agent
-  gives you?"). `ledgr` (the default: if ledgr is installed, let it be authoritative): the agent puts
-  every blocking and needed item only in the block and ends its prose with exactly one line,
-  `ledgr: 3 items for you, 1 blocking` (or `ledgr: 1 item for you`), with no list in prose, so the
-  reply's last screen stays the work's and the list is in the panel. `both`: the reply lists them as
-  usual and the block declares them too. `prose`: no instruction at all; the extractor reads each
-  reply. A change applies to new sessions at once and to running ones at their next prompt. Hover
-  "agent working" on the asks lane head to see the mode.
-- The block's readable form, whatever the mode: one line per item,
-  `- blocking · decide · Choose the default template · "the sentence it comes from" · options: compact | detailed`
-  (level and kind required, text required, the quote in straight or curly double quotes and
-  optional, options optional). A JSON array is still read; a block that mixes the two is rejected,
-  and a malformed bullet is dropped with a reason, as a JSON item with an unknown level is.
-- Agent status: working lets the counts collect and puts "agent working" on the asks lane head; at
-  Stop (blocked, done, idle) the host badge and the chip surface. An open blocking ask keeps the chip
-  `blocking` through prompts and permission waits; it pulses when a turn ends still blocking. The
-  panel never opens itself; no toast, no sound.
-- Status is not an ask: a statement of what is done, pending or uncommitted yields nothing; an ask
-  exists only when the message asks you to do or decide something, or says the agent waits on you. A
-  closing line that only offers to go on is optional unless the message says the agent cannot proceed.
-  A quote is the one or two sentences that make the ask.
-- Severity: `extract.threshold` in `ledgr-data/config.json` (optional, needed or blocking; default
-  needed) decides which levels are open rows and count. The writer and the panel read `config.json`
-  again whenever it changes: no restart.
-- The host button and ⌘⇧J (`ledgr.toggle`) show or hide the panel. The panel follows the focused
-  agent's session unless held (the header's hold control), across spaces too; a chip click shows the
-  panel on that chip's session. A focused agent pane with no ledgr session yet says so ("no ledgr session yet", and that it
-  joins at its next prompt or turn end; a Claude Code with its own `CLAUDE_CONFIG_DIR` needs the hook
-  entries in that folder's settings.json) instead of showing a session from elsewhere; a shell in the
-  same space keeps the last session.
-- The list and the dialog. A click on a row, or Enter on the cursor row, opens its dialog; one dialog
-  at a time (opening another closes the first; a line inside it opens that item in place). A click
-  gives the list the keyboard: ↑ ↓ (one), PageUp / PageDown (eight), Home / End move the cursor over
-  every row, lane head and fold line, scrolling only as far as needed; Enter does what a click there
-  does; Space checks a pin; Esc clears the cursor. ↑ ↓ also work from the pins search box, where Enter
-  opens the cursor's pin, else the first result. `ledgr.focus-list` (no key bound) gives the list the
-  keyboard without the pointer. The dialog takes the keyboard: Esc or a click outside closes it; Tab
-  and Shift-Tab move between its fields; Enter in the answer starts a new line and ⌘Enter pastes the
-  turn's answers, this ask's own too when it is deferred or answered (an answer of several lines goes
-  into the sheet with its paragraphs joined by one line break and its next lines indented two spaces,
-  which the hook reads as the same answer and whose `[A7]`-style handles it does not count as refs;
-  the box holds 4,000 characters, the status line saying so when it cuts; a sheet over 24,000 is
-  refused: "…the turn's answers are N characters, over the 24,000 one message carries: paste fewer at
-  once"), in a note Enter saves it. ⌘↓ and ⌘↑ (or the header's next → and ← prev) show the next or previous item of
-  its lane in place, in the order the panel lists it: the asks of the session by turn, newest first,
-  each turn's blocking asks first, then its others, then those below the threshold; YOUR QUESTIONS,
-  the PINS, a fold's items within their own lane. The answer typed (or a pin's note typed and not
-  saved) is posted first, the keyboard stays on the dialog so the next ⌘↓ steps again (Tab enters the
-  new ask's answer box; ⌘↓ / ⌘↑ are the dialog's only while it holds the keyboard, never a capture box's
-  on top of it), the panel's cursor follows, and at either end nothing moves. Its text is selected with the pointer and copied with ⌘C, or with its Copy buttons. When
-  it closes, the list keeps its place: the cursor returns to that row, the dialog's last words show
-  in the status line, an answer typed there shows on the row (Paste), and the keyboard returns to the
-  list after Esc or a closing act (Done, Not needed, Defer, Archive, Delete, each written to the spool
-  before the dialog closes), stays in the pane after a paste, Go to anchor or Focus, and stays where
-  you clicked after a click outside. Answers typed in the dialog are posted when it closes; a Conclude
-  text being edited is kept for a day and offered back.
-- ⌘J opens the capture box over a streaming agent; the box takes the keyboard. Enter parks; Enter on an
-  empty question with a quote parks a bookmark; Enter with nothing closes. ⌘Enter parks and puts
-  `/btw About "<quote>": <question>` on the clipboard, then focuses the agent's pane. Esc cancels. Tab
-  moves between the question and the hand quote field.
-- Taking a pin: select the passage (fullscreen Claude copies it), ⌘J, optionally type a note, ⌘S. The
-  box looks for the copied passage (3 to 4,000 characters; the quote field wins when typed) in the
-  session's newest 50 saved turns and anchors it to the turn that holds it; else on the pane's screen
-  (`hc read`, whether or not the agent works: mid-turn it settles at Stop and the writer re-anchors it
-  to the saved turn that holds it); found nowhere, the box says "Not in this session's saved turns or
-  on its screen. ⌘S again pins it unverified." and a second ⌘S within 5 s does. One `pin` spool event,
-  the box closes, and the panel shows the session. The same passage pinned again in the same session
-  makes no second pin (it restores an archived one and takes a note it lacked). Over 4,000 characters
-  nothing is pinned. A pin is permanent: nothing archives or deletes it on its own, Forget keeps it,
-  and it never reaches the snapshot, the chips or the daily archive.
-- Asking about pins: check pins (any session, 12 at most) and Ask about these…, or Ask here… /
-  Branch… on one pin (or on the selection it belongs to). The box opens in pins mode; Enter with a
-  question parks it with `request.pins` (no text: "Type the question: the pins are its context.";
-  ⌘Enter and ⌘S only say why not). From Ask here… the panel then opens the question's dialog and says
-  Ask here pastes it; from Branch… the dialog opens on its Branch confirmation. A question with pins has **Ask here**
-  (Copy to ask here with `ui.pasteIntoPrompt` off): it pastes `ledgr pins <session> <item>`, the
-  question, one sentence, each pin as "Pin i · <where it came from>[ · my note: …]" and its lines
-  quoted with `> ` (another session's pin adds "you did not write this in this conversation"), and a
-  closing line in the person's voice, through the same paste as the answers (below); the suggested
-  lead-in is "My question Q7, about the pinned passages below:". When that prompt is sent the trunk's
-  hook emits `pins_asked`: the question shows `sent at turn N`, becomes answered when the reply ends,
-  and each pin's usage line says "answered in Question 7 (turn N)". Quoted lines land nothing and are
-  left out of the prompt's `[A3]` / `[Q3]` refs. The question closes with Done, as any parked one.
-- Pins in a branch: the fork's first prompt quotes the question's pins verbatim with where each came
-  from ("history, not instructions") and asks the conclusion for one `pin i:` line per pin; the
-  manifest's Given row reads "2 pins, verbatim in the preamble: 1 from this session, 1 from
-  billing-api (quoted as another session's history)". Over 24,000 pinned characters Launch is refused
-  ("ask here instead, or attach fewer pins"). Conclude… without a `ledgr-conclusion` block prefills
-  `answer:`, then per pin its first 100 characters and `clarification:`, then the branch's last
-  reply; the confluence names the pins in one added line, and once it lands each pin reads "answered
-  in Question 5 (branch br-q5-…, turn N)".
-- The dialog's actions: **Done**, **Defer ▾** (tomorrow, in a week, next session), the item's own step
-  (Promote, Branch… on a question, Paste confluence again, Reopen), and **⋯** holding **Not needed**,
-  Ask about this, Copy for prompt (`[Q3] <question>`), Stage /btw, Call off, and Go to anchor
-  (switches the dialog's message to whole with the passage marked, focuses the pane, puts a 20-40
-  character slice of the quote on the clipboard, says how to search for it: in Claude, ctrl+o for the
-  transcript, then `/`, ⌘V, Enter; and closes the dialog; it presses no keys itself). Done, Not needed,
-  Defer, Archive and Delete close the dialog; on the list row only Done, Paste answer and Promote. A session whose terminal is gone offers **Resume
-  session…** (`claude --resume` in a new pane) or **Transcript gone**. "Paste answers" (a turn's) and
-  "Paste answer" (one ask's) build `ledgr answers <session id>`, `Answers to your asks from turn N:`,
-  then `A5: …` lines and paste them into that session's prompt (below); when that prompt is sent, the
-  hook marks those asks answered.
-- A prompt that contains `[A5]` marks that ask answered; `[Q3]` marks the question sent. An answered
-  ask closes by itself when that turn's asks arrive, unless the reply raised it again ("answered by
-  you at turn N"); with the MCP server the agent closes the asks your message answered or dropped
-  (`resolve_asks`, "closed by the agent at turn N"). Done stays your override, and Reopen undoes either.
-- Branch… on a parked question (in its dialog): a confirmation shows the context manifest (what the fork knows and does
-  not know) and its placement; Launch starts the fork beside the trunk. Conclude… opens an editor
-  prefilled with the branch's `ledgr-conclusion` block; Paste into trunk stages `ledgr confluence
-  <branch> <item>` + the question + "Conclusion:" + your text + a closing line in your voice, pastes
-  it into the trunk's prompt (below) and marks the question `rejoin_pending` (↩). When the trunk's
-  hook sees that prompt submitted, the question resolves, the branch shows REJOINED, and a line lands
-  in `ledgr-data/sessions/<sid>/decisions.md`. Close branch (two clicks) then ends its terminal.
-- The paste (`ui.pasteIntoPrompt`, default true): Paste answer(s), Paste into trunk, Paste
-  confluence again and Ask here put the message on the clipboard, focus the target's pane and run Herdr's
-  `terminal.paste` once Herdr reports that terminal focused on two looks 50 ms apart (within 600 ms)
-  and the clipboard still holds the message. Nothing is sent: the status line says "Answer for Ask 2
-  pasted into the prompt in pane t3, not sent: add a word of your own, such as “My answer to A2:”,
-  then press Enter." Nothing is pasted when the target is not live, runs no agent, or waits on its
-  own prompt (a permission menu), or when the focus does not arrive in time; the status line says so
-  and how to paste with ⌘V. A second click while a paste is pending stages nothing ("Still pasting
-  into …"). From the dialog, the dialog stays open, dimmed, until the paste is decided, then closes
-  with the keyboard in that pane (pasted, or on the clipboard with the pane focused); when nothing was
-  focused it stays open and says what to do. A paste joins a draft
-  already in the prompt. With the switch off the buttons read Copy answers, Copy answer, Send to trunk,
-  Copy confluence again and Copy to ask here, and the person types a lead-in, then ⌘V, Enter.
-  Either way the message ends with one empty line (marker line still first), so two pastes into one prompt stay apart; the
-  trunk's hook lands each message a prompt holds, one event apiece.
-- Clear all questions: Clear N on the YOUR QUESTIONS head, clicked twice within 4 s, sends one
-  `clear_questions` event for the shown session. Every open or deferred parked question without a
-  branch is dismissed and marked cleared (a launch that was refused or failed counts as no branch);
-  a branched or `rejoin_pending` question always stays, so no branch is left with nothing to close
-  it. The status line says "3 questions cleared, 1 branched kept". Reopen in the closed fold brings
-  one back.
-- Off per space (`spaces.disabled`, Herdr space ids): the session menu's first row turns ledgr off or
-  on for the focused pane's space, written to `config.json` with the same compare-and-swap as the
-  threshold menu. In an off space the hooks send no event, print no instruction (the off text once,
-  above), land nothing and start no extraction, and the MCP server records nothing and answers
-  `off: true`, so the agent lists its needs in prose as if ledgr were not installed. The writer
-  draws no chip there and does not open the panel for it, ⌘J parks nothing, and the panel shows the
-  off state. Items are kept, hidden, and return when the space is on again. A space the hooks cannot
-  name (no label, no `hc`) counts as on; a lookup that fails or takes over 300 ms keeps the space
-  recorded before.
-- Settings: every click in the settings dialog is written to `config.json` at once and shows at once
-  (the dialog redraws at a new text scale as it is clicked). One writer for the mod: `reader.js`
-  `editConfig` reads the file, changes the one key (`ui.textScale`, `extract.threshold`,
-  `asks.handoff` with `instruct_block` as the installer writes it, `ui.pasteIntoPrompt`,
-  `ui.animations`, `ui.foldAsksWhileWorking`, `surface.openPanelOnAsks`, `branch.maxDepth`,
-  `links.editor`, `spaces.disabled`), keeps every other key as it was, and writes it back only if the file still holds
-  what it read (Herdr's `writeTextFile` compare-and-swap); a missing file starts from the defaults.
-  Clicks queue, so quick ones never collide; a write that finds the file changed (the hooks creating
-  it, another copy, an editor) writes nothing, reads the file again (the dialog shows what is there)
-  and says "… not saved: config.json changed while it was being saved …; try once more". The lane
-  head's threshold menu and the session menu's space switch go through the same writer. Every copy
-  follows the file within a second (the writer republishes the chips, the threshold and
-  `shared("ledgr.ui")`; the panel and the dialogs read it again). A running session gets a new closing
-  list wording at its next prompt. The dialog stages, copies, runs and opens nothing. It is one dialog
-  at a time with the detail dialog (opening either closes the other); Esc or a click outside closes it,
-  writing any click still queued first, and the panel's status line then shows its last words. The
-  demo (`ledgr.demo-settings`) shows the defaults and two sample spaces and saves nothing.
-- Links in the detail dialog (2026-11-10). In the agent's message and an ask's text and quote, a web
-  link opens in the browser on a click, and a file path the agent wrote is a link too: `src/app.js:12`,
-  `./x`, `~/x`, `/etc/hosts`, `docs/a.md`, `foo.py#L12`, or a code span that is exactly a path
-  (`links.js` `linkify` rewrites each to `https://ledgr.invalid/path/<the path>?line=N`, an address
-  that leads nowhere, and the dialog's `on_link_click` takes the click). Fenced and indented code,
-  existing links and URLs are left as written; so is prose that only looks like a path ("and/or",
-  "1.5", "e.g.", "Node.js", `/btw`, `github.com/x/y`). A click looks for the path as given (absolute,
-  or under ~), else in the record's folder (the session's; a pin's own; a branch's own session's),
-  then at that folder's git toplevel, and opens the first that exists with `links.editor` (`open` by
-  default; the settings dialog's "Open files with" sets `zed`, `code` or a command of your own with
-  `{path}`, `{line}`, `{col}`). The status line says what opened, or which places were looked in;
-  once a path is found, Reveal in Finder and Copy path sit beside it. The dialog stays open. The
-  person's words, pins, answers and conclusions are shown exactly as stored, so their paths are not
-  links. The demo opens web links and says where it would look for a path.
+- **Agent status.** Working: counts collect quietly and the asks lane head says "agent working".
+  When a turn ends (done, idle, or blocked on a permission menu), the host badge and the chip
+  surface what is new; an open blocking ask keeps the chip blocking throughout. The panel never
+  opens itself unless Open the panel on new asks is on.
+- **How asks arrive.** An ask has a kind (decide, confirm, do, provide, review) and a level judged
+  by what the task needs, never by tone: blocking (the agent stopped or cannot finish without you),
+  needed (the task is not done until you act), optional (an offer or suggestion). Declared first:
+  told at session start, the agent declares each blocking or needed item with ledgr's declare_asks
+  tool when the MCP server is registered (rows appear at once, "declared by the agent (tool)",
+  settled at the turn's end), else in a fenced ledgr-asks block at the end of its reply. Either way
+  no model is called. Extracted as the fallback: a reply that declared nothing goes to the provider
+  (Claude Haiku by default); a blocking ask found that way puts the instruction into that session's
+  next prompt once more. Only what you must do, decide, provide or review is an ask: not status
+  (what is done, pending or uncommitted), and not what the agent waits on from its own subagents,
+  tools or builds, even when it writes "I need"; a closing offer to go on is optional; the quote is
+  the one or two sentences that make the ask. The threshold decides which levels are open rows that
+  count; the rest fold as suggestions, and Promote lifts one. An agent ledgr has no adapter for gets
+  the questions lane only.
+- **Who owns the closing list.** ledgr, the default: the agent keeps blocking and needed items out
+  of its prose and ends with exactly one line, "ledgr: 3 items for you, 1 blocking", so the reply's
+  last screen stays the work's. both: the reply lists them as usual and declares them too. prose: no
+  instruction at all; the extractor reads every reply. A change reaches running sessions at their
+  next prompt.
+- **Following focus.** The host button and cmd-shift-J show or hide the panel. It follows the
+  focused agent's session across spaces unless held; a chip click shows the panel on that chip's
+  session. A focused agent pane with no ledgr session yet says "no ledgr session yet" and that it
+  joins at its next prompt (a second config folder needs its own hook entries); a shell keeps the
+  last session.
+- **The list's keyboard.** A click gives the list the keyboard: Up and Down move one, PageUp and
+  PageDown eight, Home and End to either end, over every row, lane head and fold line; Enter does
+  what a click there does (a row opens its dialog); Space checks a pin; Esc clears the cursor. Up
+  and Down also work from the pins search box, where Enter opens the cursor's pin or the first
+  result.
+- **The dialog.** One at a time (opening another closes the first; a line inside it opens in place).
+  It takes the keyboard: Esc or a click outside closes it; Tab and Shift-Tab move between fields;
+  Enter in the answer box is a new line; cmd-Enter pastes the turn's answers (this ask's own too
+  when deferred or answered); Enter in a note saves it. cmd-Down and cmd-Up (or next → and ← prev)
+  show the next or previous item of its lane in place, in the panel's order (asks by turn, newest
+  first, blocking first, below the threshold last; questions; pins), posting the typed answer first;
+  the panel's cursor follows, and at either end nothing moves. A several-line answer is read back as
+  one; the box holds 4,000 characters, and a sheet over 24,000 is refused. On close, a typed answer
+  is posted, the cursor returns to the row, the dialog's last words show in the status line, and the
+  keyboard returns to the list after Esc or a closing act, stays in the pane after a paste or Go to
+  anchor, and stays where you clicked otherwise. A Conclude text being edited is kept for a day.
+- **Its actions.** Done; Defer ▾ (tomorrow, in a week, next session); the kind's own step (Promote,
+  Branch…, Paste confluence again, Reopen); and ⋯ with Not needed, Ask about this, Copy for prompt
+  ("[Q3] <question>"), Stage /btw, Call off and Go to anchor, which shows the message whole with the
+  passage marked, focuses the pane, puts a 20 to 40 character slice of the quote on the clipboard,
+  says how to search for it (in Claude: ctrl+o, /, cmd-V, Enter) and closes the dialog, pressing no
+  keys. Done, Not needed, Defer, Archive and Delete close it. A session whose terminal is gone
+  offers Resume session… (claude --resume in a new pane). An archived pin's Delete reads "Delete Pin
+  4? It cannot come back" in blocked for 4 s and needs a second click.
+- **Answering.** Paste answers (a turn's, under its group or by cmd-Enter) and Paste answer (one
+  ask's) build one message: a marker line naming the session, "Answers to your asks from turn N:",
+  one "A5: …" line per answer. When that prompt is sent, the hook marks those asks answered, and
+  each closes when that turn's asks arrive unless the reply raised it again ("answered by you at
+  turn N"). Typing [A5] in a prompt marks Ask 5 answered; [Q3] marks Question 3 sent. With the MCP
+  server the agent closes the asks your message settled ("closed by the agent at turn N"). Done is
+  your override; Reopen undoes any of these.
+- **The paste.** Paste answer, Paste answers, Paste into trunk, Paste confluence again and Ask here
+  put the message on the clipboard, focus the target pane, and paste with Herdr's own paste action
+  once Herdr reports that terminal focused on two looks 50 ms apart, within 600 ms, with the
+  clipboard still holding the message. Nothing is sent: "Answer for Ask 2 pasted into the prompt in
+  pane t3, not sent: add a word of your own, such as “My answer to A2:”, then press Enter." Nothing
+  is pasted into a terminal that is not live, runs no agent or waits on its own prompt (a permission
+  menu), or when the focus is late; the status line then says to paste with cmd-V. A second click
+  while a paste is pending stages nothing; a dialog stays open until the paste is decided. A paste
+  joins a draft already in the prompt. With Paste into the prompt off, the buttons read Copy
+  answers, Copy answer, Send to trunk, Copy confluence again, Copy to ask here, and you type a
+  lead-in, then cmd-V, Enter. Every message ends with one empty line, so two pastes into one prompt
+  stay apart and land one by one.
+- **Parking.** cmd-J opens the capture box over a streaming agent; the box takes the keyboard. Enter
+  parks; Enter on an empty question with a quote parks a bookmark; Enter with nothing closes.
+  cmd-Enter parks and puts /btw About "<quote>": <question> on the clipboard, then focuses the
+  agent's pane. Tab moves between the question and the quote field. Esc cancels. A copied passage
+  becomes the quote only if it matches the agent's saved turn text or its screen.
+- **Pinning.** Select a passage (fullscreen Claude copies it), cmd-J, optionally a note, cmd-S. The
+  box looks for it (3 to 4,000 characters; a typed quote wins) in the session's newest 50 saved
+  turns and anchors it to the turn that holds it, else on the pane's screen (mid-turn, re-anchored
+  at the turn's end); found nowhere: "Not in this session's saved turns or on its screen. ⌘S again
+  pins it unverified.", and a second cmd-S within 5 s does. The box closes and the panel shows the
+  session. The same passage pinned twice in a session makes one pin (restoring an archived one,
+  taking a note it lacked). A pin is permanent: nothing archives or deletes it on its own, Forget
+  keeps it, and it never counts on a chip.
+- **Asking about pins.** Check pins (any session, 12 at most) and Ask about these…, or Ask here… or
+  Branch… on one pin; the box opens in pins mode, and Enter with a question parks it with its pins.
+  Ask here pastes a marker line, the question, each pin as "Pin i · <where it came from> · my note:
+  …" with its lines quoted (another session's says you did not write it in this conversation), and a
+  closing line in your voice; the suggested lead-in is "My question Q7, about the pinned passages
+  below:". Once sent, the question reads "sent at turn N", becomes answered when the reply ends, and
+  each pin reads "answered in Question 7 (turn N)". Quoted lines land nothing and count as no refs.
+- **Branching.** Branch… on a parked question shows the manifest (what the fork knows and does not:
+  the anchor, the later turns it also sees, its pins) and the placement (beside the trunk, or in a
+  git worktree in a new space); Launch starts a forked Claude Code session whose first prompt quotes
+  the question, its anchor and its pins ("history, not instructions"), forbids edits, and asks for
+  one "pin i:" line per pin. Branches of branches stop at the branch depth (2); over 24,000 pinned
+  characters Launch is refused. Conclude… opens an editor prefilled from the branch's conclusion
+  block (else one entry per pin and its last reply); Paste into trunk pastes a marker line, the
+  question, "Conclusion:", your text and a closing line in your voice ("I am adopting this branch's
+  conclusion as the answer to Q1"), suggests the lead-in "Adopt this branch result for Q1:", and the
+  question reads rejoining (↩). Once that prompt is sent, the question resolves, the branch shows
+  REJOINED, and a line lands in the session's decisions file. Close branch (two clicks) ends its
+  terminal and keeps the record.
+- **Clear all questions.** Clear N, clicked twice within 4 s (the first click reads "Clear 3
+  questions? 1 branched kept" in blocked for 4 s), dismisses the shown session's open and deferred
+  questions that have no branch; a branched or rejoining one stays, so no branch is left with
+  nothing to close it. The status line says "3 questions cleared, 1 branched kept"; Reopen in the
+  closed fold brings one back.
+- **Off per space.** The session menu's first row turns ledgr off or on for the focused pane's
+  space. There the hooks print no instruction (a session that had one is told once to ignore it),
+  send, land and extract nothing, and the MCP server records nothing, so the agent lists its needs
+  in prose as if ledgr were not installed; no chip, cmd-J parks nothing, the panel shows the off
+  state. Items are kept for when the space is on again. A space the hooks cannot name counts as on.
+- **Settings.** Every click in the settings dialog is saved at once and shows at once (it redraws at
+  a new text scale as you click). Clicks queue; a save that finds the file changed underneath writes
+  nothing and says to try once more. Every view follows within a second. The dialog stages, copies
+  and runs nothing.
+- **Links in the dialog.** In the agent's message and an ask's text and quote, a web link opens in
+  the browser on a click, and a file path the agent wrote is a link too (src/app.js:12, ~/x, or a
+  code span that is exactly a path; fenced code and prose that only looks like a path, such as
+  and/or or Node.js, stay as written). A click looks for the path as given, then in the record's
+  folder, then at that folder's git top level, and opens the first that exists with the chosen
+  editor (by default the system's default app; an app or package is only revealed in Finder, a
+  script opens as text, nothing is run). The status line says what opened or where it looked, with
+  Reveal in Finder and Copy path beside it. The person's own words, pins, answers and conclusions
+  are never linked. Nothing opens without a click.
 
 ## Built from
 
-- **Layout** (a personal one; a shipped layout is cloned first): the panel block
-  `{ "id": "ledgr", "type": "block", "content": { "mod": "ledgr", "props": { "view": "panel" } } }`
-  appended to the `panel-body` stack (its parent column `panel` shows and hides), or, with no such
-  stack, a hidden `ledgr-panel` column (380 px, 280-900) after the tab block, named in `config.json`
-  `ui.panel`. The host block `{ "id": "ledgr-host", "type": "block", "size": { "px": 96 },
-  "content": { "mod": "ledgr", "props": { "view": "host", "bar": "status" } } }` beside the `status`
-  block in a `ledgr-host-row` row that takes the status block's size (or the same beside `tabs`, or a
-  `floating` entry of the tab block, edge `bottom`, align `end`). Optional: the tab block's pane header
-  `content.mod` set to `ledgr-pane`. Exact pieces: `setup/layout-blocks.json`.
-- **`mods/ledgr/`**: `mod.json` (`place: none`, popup overlay at top, offset 40, 600 × 320, `version`);
-  `main.js` routes on props (`view: "host"` → `host.js`; `view: "detail"` → `detail.js` and `view:
-  "settings"` → `settings.js`, tested before the capture box; `view: "panel"` → `panel.js`; an
-  `overlay` or `view: "capture"` → `capture.js`); `reader.js` (the `Reader` the panel and both dialogs
-  extend: reading `store.json`, acts, drafts, staging, and `editConfig` / `saveConfig`, the one writer
-  of `config.json`), `settings.js` (the settings dialog: its rows, `editFor`, `spaceRows`),
-  `listing.js` (pure: a list row's model and the cursor), `detail.js` (the dialog),
-  `views.js` (its renderers), `detailing.js` (pure: its props and overlay spec and the settings
-  dialog's, verbatim text, the close rules), `links.js` (pure: the paths in a message, `linkify`,
-  `parseLink`, where a path is looked for, `links.editor` and the argv that opens it), `opener.js`
-  (the reading copies' only process calls: `openPath`, `revealPath`, `gitToplevel`, each 5 s);
-  `writer.js` (the single writer); `store.js`, `spool.js`, `nav.js`,
-  `config.js` (defaults, paths, where the panel lives, `liveHome`, `LIMITS` with the five pin
-  limits, the text scale: `TEXT_SCALE`, `textScaleOf`, `withScale`), `branch.js`, `confluence.js` (the composers, the pins message among them, and `pinText`,
-  the one normaliser of a pinned passage), `pinning.js` (pure: what ⌘S pins and its anchor, the box
-  key `PIN_KEY`; not an engine file), `words.js`, `adapters.js` (reads each
-  `bin/adapters/<name>/adapter.json` capability manifest for the session menu's "declares asks / extractor only / no asks"), `fixtures.js` (demo), `ledgr.svg`;
-  `bin/` (Python 3.9+, standard library only): `adapters/README.md` (the adapter contract: identity,
-  turn signal, instruction injection, turn text, optional fork and resume), the Claude Code adapter,
-  the block parser, the extractor and its providers, `mcp/ledgr_mcp.py` (the stdio MCP server:
-  `declare_asks`, `resolve_asks`, `open_asks`, `parked_questions`; JSON-RPC over stdin and stdout,
-  tools only inside a Herdr terminal: `HC_TERMINAL_ID`, or `LEDGR_TERMINAL`), the offline tests.
-- **Detail dialog**: `openOverlay({mod: "ledgr", kind: "dialog", width: 0.6, height: 0.75, props:
-  {view: "detail", session, kind, id, open, sel, opener, demo}})` (`detailing.js` `detailSpec`;
-  `mod.json` keeps its one overlay, the capture box). Its own copy of the mod: it reads `store.json` and
-  the turn files, posts the same spool events as the panel did, never pings or claims the writer, and
-  writes only `shared("ledgr.detail")` `{open, closed}`, which the panel reads to raise the open row
-  and, on close, to restore its cursor, flash, typed answers and keyboard. Staging has one door:
-  `nav.js` `stageIntoPrompt` ← `nav.js` `stageMessage` ← `reader.js` `Reader.stage` ← the staging
-  methods (`bin/tests/test_no_keystrokes.py`, 11 rules; rule 13: `exec(` only in `opener.js` among the
-  reading copies, reached from `detail.js` only through `openPath`, `revealPath`, `gitToplevel`).
-  Links: `TextView.markdown(…).on_link_click` in `views.js` `readable`, `detail.js` `openLink`. Spec
-  `docs/design/Detail.md`; notes `docs/build-notes/BUILD-NOTES-detail.md`.
-- **Settings dialog**: `openOverlay({mod: "ledgr", kind: "dialog", width: 0.5, height: 0.7, props:
-  {view: "settings", opener, demo}})` (`detailing.js` `settingsSpec`), from the panel (an open detail
-  dialog closed first) or, with no panel shown, from the host holding the writer. A third reading
-  copy on `Reader`: it reads `config.json` (never `store.json`), writes it only through
-  `Reader.saveConfig` → `reader.js` `editConfig` (compare-and-swap, queued), and writes
-  `shared("ledgr.detail")` like the detail dialog (kind "settings", no id), so the panel's
-  `closeDetail` closes whichever dialog is open. `bin/tests/test_no_keystrokes.py` rule 12: it stages,
-  copies, runs and opens nothing. Every copy's theme is `withScale(theme(), textScaleOf(cfg))`; the
-  writer publishes `ui.textScale` in `shared("ledgr.ui")` for the host, the chip and the box.
-- **Writer election**: only the holder of `shared("ledgr.writer")` `{id, by, at}` writes
-  `ledgr-data/store.json`. The host block runs a writer (role `host`); a mod that imports an engine
-  copy from its own `ledgr/` folder runs one under its own name; the panel runs one only as a fallback
-  (role `panel`) when no host answers its `ledgr.ping` within 4 s. A host that starts later takes over;
-  a host that lost the role takes it back when the claim is empty or a panel's, or when the holder does
-  not answer a ping (checked at most every 2 minutes); a closing copy releases the role.
-- **`mods/ledgr-pane/`** (optional): `mod.clone` of the shipped `pane` (0.1.13) plus the chip; it only
-  reads `shared("ledgr.chips")` and `shared("ledgr.ui")`, and runs no writer.
-- **`keys.json`**: `"cmd-j": "mod.open:ledgr"`, `"cmd-shift-j": "ledgr.toggle"`, and
-  `"mod:ledgr": { "cmd-enter": "ledgr.btw", "tab": "ledgr.tab", "shift-tab": "ledgr.backtab",
-  "cmd-s": "ledgr.pin", "cmd-down": "ledgr.detail-next", "cmd-up": "ledgr.detail-prev" }` (the
-  installer writes the `mod:ledgr` section from its `MOD_KEYS`; `btw` is the box's /btw and, in the
-  detail dialog, the turn's answers).
-- **Pins**: the store's own `pins` map in `store.json` (beside `items`; `pn_<uuid>` ids, handles `P1`,
-  `P2`… per session), applied by the writer from the box's `pin` event and the panel's `pin_note`,
-  `pin_archive`, `pin_restore` and `pin_delete` (by pin id, whatever became of the session); a
-  question's pins ride in the `capture` Request (`request.pins`). The marker `ledgr pins <session id>
-  <item id>` (`confluence.js` `pinsMessage`; `bin/lib/ledgr_landing.py` `PINS`); the hook's
-  `pins_asked` event (`claude_hook.py`, `ledgr_spool.pins_asked`); refs leave quoted lines out when
-  the marker is there (`ledgr_map.prompt_refs`). Spec `docs/design/Pins.md`; notes
-  `docs/build-notes/BUILD-NOTES-pins.md`.
-- **Shipped mods used**: `workspace-chrome` icons (`spinner.svg`, `pin.svg` for the PINS lane,
-  `search.svg` for its search box, `settings.svg` for the gear, chevrons),
-  the `worktree` dialog (Branch's "isolate in a worktree"), and `pane` (what `ledgr-pane` clones).
-- **herdr**: `watchFolder`, `readTextFile`, `writeTextFile`, `fs/promises`, `shared`/`setShared`
-  (`ledgr.writer`, `ledgr.ping`, `ledgr.chips` (`a` counts at or above the threshold, `b` the blocking
-  ones, `w` the agent working), `ledgr.focus`, `ledgr.ui` `{animations, panel, off, textScale}`, `ledgr.detail`), `focused`
-  (its `space` too), `agents` (their `space`), `panes`, `terminals` (the `herdr.space` label),
-  `spaces` (a space's name for the switch), `layout`, `placement`, `run` (`pane.focus`, `layout.select`,
-  `layout.show`, `layout.hide`, `mod.open`, `terminal.keep`, `terminal.peek`; `terminal.paste` in
-  `nav.js` `stageIntoPrompt` only), `openOverlay` (the capture box, the detail and settings dialogs),
-  `closeOverlay`, `nextCommand`, `hc`, `exec`; `cx.read_from_clipboard`, `cx.write_to_clipboard`,
-  `cx.focus_handle`, `cx.open_url` (a web link clicked in the dialog), `ScrollHandle`,
-  `TextView.markdown(…).selectable(true)` and its `on_link_click`.
-- **Data**, `<Herdr home>/ledgr-data/`: `store.json` (written only by the writer; items, sessions,
-  branches and the `pins` map), `spool/` (one JSON
-  event per file), `terminals/<t>.json` (identity map, with the terminal's `space`),
-  `sessions/<sid>.json` (with `space` and `ledgr_off`) and
-  `sessions/<sid>/decisions.md`, `turns/<sid>/<n>.md`, `mcp/<sid>/<turn>.json` (tool declarations),
-  `snapshot.json`, `archive/`, `log/`, `tmp/`, `config.json` (`extract.provider`, `model`,
-  `base_url`, `mode`, `threshold`; `asks.handoff`, `instruct_block`, `instruct_reinject`;
-  `ui.animations`, `ui.foldAsksWhileWorking`, `ui.pasteIntoPrompt`, `ui.textScale`, `ui.panel`; `spaces.disabled`;
-  `links.editor`;
-  the full list with defaults is in the README's Configuration table).
-- **Install.** Both paths end in the same files:
-  - `./install.sh` asks each question with its reason (defaults in brackets are what is installed
-    now); `./install.sh --yes --answers ledgr.install.json` asks nothing (schema:
-    `setup/answers.example.json`; an API key comes from `LEDGR_API_KEY`, never from the file). It
-    preflights (Herdr home and version, layouts shipped or personal, Claude Code, python3, `security`,
-    an existing ledgr, key conflicts), copies the mods, writes `config.json`, stores the key in the
-    Keychain, merges `keys.json`, patches the chosen personal layout (cloning a shipped one first),
-    adds the hook entries after printing them, registers the MCP server and its allow entries when
-    chosen (the command printed first), runs `herdr-app check` and the offline tests.
-    `./install.sh --check` is the doctor; `./uninstall.sh` reverses it.
-  - By hand, as the manual describes: copy `mods/ledgr/` (and `mods/ledgr-pane/` if wanted) to `mods/`;
-    merge `keys.json`, asking before replacing a key in use; add the blocks from
-    `setup/layout-blocks.json` to a personal layout; add the three hook entries above to
-    `~/.claude/settings.json` (and each other Claude config folder's settings.json you use); optionally
-    run the `claude mcp add` command above per config folder and add the four allow entries
-    (`mods/ledgr/bin/mcp/README.md`); `chmod +x mods/ledgr/bin/adapters/claude/*.sh`; store the key with
-    `security add-generic-password -s ledgr -a anthropic -w`; `herdr-app check mods/ledgr` (and
-    `mods/ledgr-pane`).
-- **Example integration** (`examples/personal-overlay/`, not part of the mod): a personal tab bar
-  (`my-tabs`) that hosts the writer from an engine copy; its pane header is the public `ledgr-pane`.
-  `./install.sh --overlay examples/personal-overlay` deploys it and writes the engine copy; its
-  `answers.json` is that setup's answer set with only the primary Claude settings file (the owner's
-  real one, with a second config folder, is a gitignored `answers.local.json`).
+- **Layout** (a personal one; clone a shipped one first with `layout.clone`). The exact pieces are
+  in `setup/layout-blocks.json`: the panel `{ "id": "ledgr", "type": "block", "content": { "mod":
+  "ledgr", "props": { "view": "panel" } } }` appended to the `panel-body` stack (its parent column
+  `panel` shows and hides), or, with no such stack, a hidden `ledgr-panel` column (380 px, min 280,
+  max 900) after the tab block, named in `config.json` `ui.panel`; the host `{ "id": "ledgr-host",
+  "type": "block", "size": { "px": 96 }, "content": { "mod": "ledgr", "props": { "view": "host",
+  "bar": "status" } } }` beside `status` in a `ledgr-host-row` row that takes the status block's
+  size (or beside `tabs`, or a `floating` entry of the tab block, `edge: bottom`, `align: end`);
+  optionally the tab block's pane header with `content.mod` `ledgr-pane`.
+- **`mods/ledgr/`**, every view a copy routed by `main.js` on `props.view`: `host.js`, `panel.js`,
+  `detail.js`, `settings.js` (both tested before the box), else `capture.js`. `mod.json`: `{
+  "place": "none", "title": "ledgr", "version": "0.1.0", "overlay": { "kind": "popup", "at": "top",
+  "offset": 40, "width": 600, "height": 320 } }`, no `focusable` (a focusable host would be an empty
+  pane stop). The rest: `reader.js` (the `Reader` the panel and both dialogs extend; `editConfig`,
+  the only writer of `config.json`: compare-and-swap through `writeTextFile`, queued); `listing.js`
+  (pure: rows, cursor, `laneOf`); `views.js`, `detailing.js` (the dialogs' renderers and specs);
+  `links.js` (pure) and `opener.js` (the reading copies' only process calls); `writer.js`
+  (`ENGINE_FILES`); `store.js` (event application, chips, snapshot); `spool.js`; `nav.js`;
+  `config.js` (defaults, paths, `liveHome`, `LIMITS`, `withScale`); `branch.js` (manifest, preamble,
+  launch argv); `confluence.js` (the composers, `pinText`); `pinning.js` (pure: what cmd-S pins,
+  `PIN_KEY`); `words.js`; `adapters.js` (each `bin/adapters/<name>/adapter.json`, for the session
+  list's group heads); `fixtures.js` (the demo); `ledgr.svg`.
+- **`mods/ledgr/bin/`**, Python 3.9+, standard library only, no Node: `adapters/claude/` (the three
+  hook scripts, `claude_hook.py`, `claude_extract.py`, `extract.sh`, `last_assistant.py`,
+  `adapter.json`), `lib/` (agent-neutral: `ledgr_map.py`, `ledgr_spool.py` (the event contract),
+  `ledgr_landing.py`, `ledgr_extract.py`, `parse_block.py`, `ledgr_config.py`, the instruction
+  texts, the extraction prompt and schema), `providers/`, `mcp/`, `tests/run-all.sh`. The adapter
+  contract for other agents: `bin/adapters/README.md`.
+- **The hooks.** Each skips a subagent (`agent_id` on stdin) and any process ledgr started
+  (`LEDGR_INNER`, owner-pid rule), exits 0, and logs to `ledgr-data/log/hook.log`. SessionStart
+  writes `terminals/<t>.json` (terminal to session id, transcript path, cwd, turn, space) and
+  `sessions/<sid>.json` (`config_dir`, `profile`, `space`, `ledgr_off`, `instruct_mode`), spools
+  `session_start` (a fork carrying `LEDGR_PARENT` also `branch_started`, a compact `compacted`), and
+  prints the mode's instruction (`lib/asks-instruction-ledgr.txt` or `-both.txt`). UserPromptSubmit
+  counts the turn, spools `prompt` with its `[A5]` / `[Q3]` refs, then one `answers_landed`,
+  `confluence_landed` or `pins_asked` per marker message; it prints the instruction once after a
+  turn whose blocker only the model found (`instruct_reinject`), the new wording once after an
+  `asks.handoff` change (`asks-instruction-off.txt` for `prose`), `asks-instruction-space-off.txt`
+  once when the space went off. Stop part A writes `turns/<sid>/<turn>.md` (every assistant text
+  block of the turn, `last_assistant_message` last; that message alone, marked `lagged`, while the
+  transcript lags) and `<turn>.json`, and spools `pending`; part B (`extract.sh`, in the background)
+  finds the message uuid (at 0, 1, 2, 4 s, rewriting lagged files), spools `stop`, settles the turn
+  from `mcp/<sid>/<turn>.json`, else a valid block, else the provider with forced JSON output, and
+  spools `asks`. Stop prints nothing.
+- **The block**, one bullet per item: `- blocking · decide · Choose the default template · "the
+  sentence it comes from" · options: compact | detailed` (level and kind required; quote and options
+  optional); a JSON array is still read, never mixed with bullets; a bad item is dropped with a
+  reason.
+- **Landing markers**, always the message's first line: `ledgr answers <session id>`,
+  `ledgr confluence <branch id> <item id>`, `ledgr pins <session id> <item id>`. The hook finds one
+  as the first line of a pasted block (Claude Code wraps a paste in `<pasted_content id="…">`
+  lines), or of the prompt after at most a one-line lead-in, never inside a code fence.
+  `ledgr_landing.detect_all` ends a sheet at a wrapper line, the next marker, or a blank line not
+  followed by an `A<n>:` line; an indented line continues an answer; quoted (`> `) lines give no
+  refs.
+- **The MCP server** (`bin/mcp/ledgr_mcp.py`, stdio JSON-RPC; tools only when `HC_TERMINAL_ID` or
+  `LEDGR_TERMINAL` is set): `declare_asks` (items with level, kind, text, quote, options,
+  recommended, `repeat_of`; writes `mcp/<sid>/<turn>.json`, spools `asks` with `source: "tool"`,
+  `replaces_turn` on a later call, and returns the pointer line), `resolve_asks` (handles and a
+  note; one `act` event per ask, `actor: "agent"`, recorded as `resolvedBy: "agent"`), `open_asks`
+  (this session's open asks with handles, from `snapshot.json`), `parked_questions` (an empty list
+  with a note until the panel has a release action). In an off space each answers `off: true` and
+  writes nothing. Its `instructions` say: `resolve_asks` first when the user's message settles an
+  open ask, `declare_asks` once when the reply's work is done. Details: `bin/mcp/README.md`.
+- **Spool and writer.** Every change is one JSON event, written atomically to `ledgr-data/spool/`:
+  from the hooks, the box (`capture` with `request.pins`, at most 12; `pin`), the panel and dialogs
+  (`act`, `clear_questions`, `retry`, `branch`, `conclude`, `close_branch`, `resume`, `forget`,
+  `pin_note`, `pin_archive`, `pin_restore`, `pin_delete`) and the MCP server. Only the holder of
+  `shared("ledgr.writer")` `{id, by, at}` applies them to `store.json` and `snapshot.json`, then
+  unlinks each file. The host block runs a writer (role `host`), a mod with an engine copy one under
+  its name, the panel one only when no host answers its `ledgr.ping` within 4 s; a host takes the
+  role back from a panel or a silent holder (checked at most every 2 minutes); a closing copy
+  releases it. The writer also launches, closes and resumes branches, runs Retry, writes
+  `sessions/<sid>/decisions.md`, archives closed items daily, and publishes the chips.
+- **Data**, `~/.config/herdr-app/ledgr-data/`: `store.json` (the source of truth: `items`,
+  `sessions`, `branches`, `terminals`, and its own `pins` map, `pn_<uuid>` ids with per-session
+  handles P1, P2, which nothing reading items ever sees); `snapshot.json` (`{v, updatedAt, items}`:
+  open, answered and deferred items plus those dismissed in the last 7 days, read by the extractor
+  and the MCP server); `spool/`; `terminals/`; `sessions/`; `turns/<sid>/` (the newest 50 per
+  session); `mcp/<sid>/`; `archive/<yyyy-mm>.jsonl`; `log/`; `tmp/`; `config.json`. Limits are code,
+  `config.js` `LIMITS`: pin 4,000 characters, note 200, 12 pins per question, 24,000 pinned
+  characters per branch, 200 search results; an answer 4,000, a sheet 24,000.
+- **`config.json`**, read again on every change, no restart (settings dialog row in brackets):
+
+```
+extract.threshold     needed            blocking | needed | optional  [Threshold]
+extract.provider      anthropic         anthropic | openai-compatible | cli
+extract.model         claude-haiku-5-5
+extract.mode          block-first       always-model | block-only (provider none)
+extract.base_url      null              openai-compatible only
+extract.timeout_s     20
+extract.max_chars     60000
+extract.cli_fallback  false             no key: use claude -p
+extract.audit_rate    0                 declared turns also sent, 0 to 1
+asks.handoff          ledgr             ledgr | both | prose  [Who owns the closing list]
+instruct_block        true              the master switch; false means prose
+instruct_reinject     true
+ui.textScale          1                 0.8 to 1.6  [Text scale]
+ui.pasteIntoPrompt    true              [Paste into the prompt]
+ui.animations         true              [Animations]
+ui.foldAsksWhileWorking false           [Fold asks while the agent works]
+ui.panel              {"column": "panel", "stack": "panel-body", "child": "ledgr"}
+surface.openPanelOnAsks false           [Open the panel on new asks]
+branch.maxDepth       2                 0 turns Branch off  [Branch depth]
+links.editor          open              zed | code | "cmd {path}:{line}"  [Open files with]
+spaces.disabled       []                Herdr space ids  [Off spaces]
+retention_days        14                closed items move to archive/
+```
+
+- **`keys.json`** (the installer writes `mod:ledgr` from its `MOD_KEYS`; `ledgr.btw` is the box's
+  /btw and, in the dialog, the turn's answers):
+
+```json
+{ "global": { "cmd-j": "mod.open:ledgr", "cmd-shift-j": "ledgr.toggle" },
+  "mod:ledgr": { "cmd-enter": "ledgr.btw", "tab": "ledgr.tab", "shift-tab": "ledgr.backtab",
+    "cmd-s": "ledgr.pin", "cmd-down": "ledgr.detail-next", "cmd-up": "ledgr.detail-prev" } }
+```
+
+- **Hook entries**, one per event in each chosen Claude settings file (`UserPromptSubmit` runs
+  `user-prompt-submit.sh`, `Stop` runs `stop.sh`):
+
+```json
+"SessionStart": [{ "matcher": "*", "hooks": [{ "type": "command", "timeout": 5,
+  "command": "bash \"$HOME/.config/herdr-app/mods/ledgr/bin/adapters/claude/session-start.sh\"" }]
+}]
+```
+
+- **Dialogs.** `openOverlay({mod: "ledgr", kind: "dialog", width: 0.6, height: 0.75, props: {view:
+  "detail", session, kind, id, open, sel, opener, demo}})` and `{width: 0.5, height: 0.7, props:
+  {view: "settings", opener, demo}}` (`detailing.js` `detailSpec`, `settingsSpec`); `mod.json` keeps
+  its one overlay, the box. Each dialog is a reading copy: it never claims the writer and writes
+  only `shared("ledgr.detail")` `{open, closed}`, which the panel reads to raise the open row and,
+  on close, restore its cursor, typed answers and keyboard. Text is
+  `TextView.markdown(…).selectable(true)` with `on_link_click`.
+- **One door to a terminal**: `nav.js` `stageIntoPrompt` ← `stageMessage` ← `reader.js`
+  `Reader.stage` ← the staging methods; `terminal.paste` only there, without arguments, after the
+  focus check.
+- **Shipped mods used**: `workspace-chrome` icons (`spinner.svg`, `pin.svg`, `search.svg`,
+  `settings.svg`, chevrons), the `worktree` dialog (a branch isolated in a worktree), `pane` (what
+  `ledgr-pane` clones). **`mods/ledgr-pane/`** (optional) is `mod.clone` of `pane` 0.1.13 plus the
+  chip; it only reads `shared("ledgr.chips")` (`a` counts at or above the threshold, `b` blocking,
+  `w` working) and `shared("ledgr.ui")` `{animations, panel, off, textScale}`, and runs no writer.
+- **herdr**: `watchFolder`, `readTextFile`, `writeTextFile`, `fs/promises`, `shared` / `setShared`
+  (`ledgr.writer`, `ledgr.ping`, `ledgr.chips`, `ledgr.focus`, `ledgr.ui`, `ledgr.detail`),
+  `focused`, `agents`, `panes`, `terminals` (the `herdr.space` label), `spaces`, `layout`,
+  `placement`, `run` (`pane.focus`, `layout.select`, `layout.show`, `layout.hide`, `mod.open`,
+  `terminal.keep`, `terminal.peek`, `terminal.paste`), `openOverlay`, `closeOverlay`, `nextCommand`,
+  `hc`, `exec`; `cx.read_from_clipboard`, `cx.write_to_clipboard`, `cx.focus_handle`, `cx.open_url`,
+  `ScrollHandle`.
+- **Commands** (the full list is in `main.js`): bound, `ledgr.toggle`, `ledgr.btw`, `ledgr.tab`,
+  `ledgr.backtab`, `ledgr.pin`, `ledgr.detail-next`, `ledgr.detail-prev`; unbound, `ledgr.settings`,
+  `ledgr.focus-list`, the demos `ledgr.demo`, `ledgr.demo-detail[:<handle>]`, `ledgr.demo-settings`,
+  `ledgr-pane.demo-chip:<state>`, and one per click for shots and checks
+  (`ledgr.session:<terminal>`, `ledgr.open:<handle>`, `ledgr.act:<handle>:<action>`,
+  `ledgr.detail:<close|done|next|…>`, …), which `docs/preview-recipe.md` uses.
+- **Install.** `./install.sh` asks, each with its reason and the installed value as default: which
+  Claude settings files to hook (it lists `~/.claude`, `~/.claude-*` and the `CLAUDE_CONFIG_DIR=`
+  values in `~/.local/bin` wrappers and shell start-up files), the provider (model, base URL, key),
+  "Who owns the closing list the agent gives you?", the threshold, animations, folding while
+  working, the layout (cloning a shipped one), the panel's place, the host, the chip, the two keys
+  (asking before replacing one in use), and "Register ledgr's MCP server with Claude Code …?": per
+  folder `claude mcp add --scope user --transport stdio ledgr -- <python3> -I -B
+  ~/.config/herdr-app/mods/ledgr/bin/mcp/ledgr_mcp.py` (with `CLAUDE_CONFIG_DIR` for a folder other
+  than `~/.claude`) and four allow entries, `mcp__ledgr__declare_asks`, `mcp__ledgr__open_asks`,
+  `mcp__ledgr__parked_questions`, `mcp__ledgr__resolve_asks`. It shows a plan, applies it, and runs
+  `herdr-app check` and the offline tests. `--yes --answers FILE` asks nothing
+  (`setup/answers.example.json`; a key only from `LEDGR_API_KEY`); `--check` is the doctor;
+  `./uninstall.sh` reverses it. A host in another mod cannot import from `mods/ledgr/`, so the
+  installer writes byte-identical copies of `writer.js` `ENGINE_FILES` into `mods/<host>/ledgr/`
+  (the panel warns on drift); the public install needs none (`examples/personal-overlay/` is one
+  such host, not part of the mod).
+- **Deeper**: the build spec `docs/design/Herdr ledger mod design.md` (Section 11 lists every
+  deviation), `docs/design/Detail.md`, `docs/design/Pins.md`, the builders' notes in
+  `docs/build-notes/` (`BUILD-NOTES-mod.md`, `-hooks`, `-phase2`, `-phase3`, `-detail`, `-pins`).
 
 ## Watch out
 
-- A layout block's copy starts only the first time it is shown, which is why the writer lives in the
-  always-shown host block and not in the panel. Without a host, nothing is ingested until the panel has
-  been shown once; the panel's fallback writer then catches up from the spool.
-- Herdr refuses imports that resolve outside a mod's folder, symlinks included. A host in another mod
-  needs byte-identical copies of `writer.js` `ENGINE_FILES` in its own `ledgr/` folder; `install.sh`
-  writes them, and the panel warns when one differs.
-- On Herdr 0.1.13, `herdr-app check` shares the running window's shared state: a copy that claimed the
-  writer role during a check left a claim nobody held. ledgr claims and pings only when it can read the
-  home's `AGENTS.md`, which check refuses.
-- `<mod>.<command>` reaches shown copies only: `ledgr.toggle` needs the host block; `herdr-app do
-  ledgr.demo` needs the panel visible.
-- Herdr's shipped tab bar remembers the side panel per space and does not know ledgr: switching space
-  can hide the ledgr panel. The host button and ⌘⇧J bring it back.
-- Saving any file under `mods/ledgr/` (including `bin/`) reloads every ledgr copy; the hooks keep their
-  bytecode under `ledgr-data/.pycache` for that reason.
-- Dialog text wraps by itself (list rows are one line, cut with "…"). Never cap a text box with `max_h` plus `overflow_hidden`: the default line
-  height is about 1.6, so a 34 px cap cut a 12.5 px ask inside its second line. Preview boxes that must
-  stay short scroll instead. For shots (`docs/preview-recipe.md` stages `preview.png` with them):
-  `ledgr.fold-mine`, `ledgr.fold-asks`, `ledgr.collapse-all` (closes the open dialog; `expand-all` and
-  `expand-branches` are gone, rows open in the dialog), `ledgr.open:<handle>` (the dialog on A3, Q2,
-  P4 or a branch's hc name), `ledgr.cursor:<handle>`,
-  `ledgr.list-key:<up|down|pageup|pagedown|home|end|enter|space|escape>`, `ledgr.focus-list`,
-  `ledgr.demo-detail[:<handle>]` (the demo, then the dialog on that item, A15 by default), the dialog's
-  `ledgr.detail:close`, `detail:done`, `detail:whole`, `detail:pick:<n>`, `detail:answer:<text>`,
-  `detail-next` and `detail-prev` (also `detail:next`, `detail:prev`),
-  `ledgr.settings` and `ledgr.demo-settings` (the settings dialog; the demo saves nothing), its
-  `ledgr.settings:close` and `ledgr.settings:scale:<up|down|reset|0.8…1.6>`,
-  `ledgr.hide-branch:<hc name>` (demo only),
-  `ledgr.pick:<handle>:<n>`, `ledgr.copy-answer:<handle>`, `ledgr.session:<terminal>`,
-  `ledgr.below-threshold`, `ledgr.act:<handle>:<resolve|dismiss|reopen|promote>`,
-  `ledgr.whole:<handle>` and `ledgr.menu:<handle>:<defer|more>` (both open the dialog in that state) /
-  `menu:threshold` / `menu:off`,
-  `ledgr.threshold:<level>`, `ledgr.space:<off|on|toggle>` (the focused pane's space; in the demo it
-  only draws the off state), `ledgr.clear-questions` (a click on Clear N: twice to clear), for pins
-  `ledgr.fold-pins`, `ledgr.pins-search:<text>`, `ledgr.pin-select:<P handle>`, `ledgr.ask-pins`,
-  `ledgr.ask-here:<Q handle>`, `ledgr.pin-note:<P handle>:<text>`, `ledgr.pin-archive:<P handle>`,
-  `ledgr.pin-restore:<P handle>` (the shown session), in the demo
-  `ledgr.demo-ask:<level>` and `ledgr.demo-answer:<handle>`, and `ledgr-pane.demo-chip:<state|off>`.
-- One dialog at a time, and every command reaches every shown copy, the dialog included: each is
-  handled by one copy. The dialog takes its own (`detail:*`, `launch-branch`, `send-to-trunk`, …) only
-  while `ledgr.detail` names it as open; the panel leaves `go:`, `whole:`, `pick:`, `copy-answer:`
-  and the Phase 3 commands to a dialog already open on that item. Tab and Shift-Tab (`mod:ledgr`)
-  reach the dialog too; it takes them only while it or one of its fields has the keyboard, so a Tab in
-  a capture box opened on top is not taken.
-- Closing an overlay cancels its copy's tasks once `close()` resolves (Probe P1, 2026-11-10; work
-  survives only while `close()` awaits, at most 250 ms). So the dialog stages while open and closes
-  only once the paste is decided, an act that closes it writes its spool event first, and `main.js`
-  `close` awaits `release` (the closed record, then every unwritten event and draft).
-- The list's keyboard needs a click, or `ledgr.focus-list`: `mod.json` has no `focusable`, since one
-  `mod.json` serves the panel, the host block and the dialogs, and a focusable host would be a pane
-  stop with nothing to do. After a dialog closes, Herdr gives the keyboard to the focused terminal;
-  the panel takes it back (30 ms, again at 300 ms) when the dialog closed by Esc or an act.
-- A selection cannot run across the message's three blocks (before, the passage, after); the Copy
-  beside the message copies the turn whole.
-- The live check of the list and the dialog (`docs/design/Detail.md` 6.5: drag-select and ⌘C in a
-  dialog, Esc against a click outside, where the keyboard goes after a close, ⌘J over an open dialog)
+What it assumes about the setup, and what it touches outside its own folder (tell the person before
+adding it):
+
+- **Claude Code hooks** in each Claude settings file the person chooses (the entries above). Outside
+  a Herdr terminal (`HC_TERMINAL_ID` unset) they do nothing. Their only output into the model's
+  context is the instruction (about 260 words for `ledgr`, 200 for `both`, none for `prose`) at the
+  moments listed under The hooks, and in an off space the three-line off text, once.
+- **One network endpoint.** At each turn's end that declared nothing, the extractor sends that
+  turn's last assistant message (at most 60,000 characters) and the session's open asks to the
+  chosen provider: the Anthropic Messages API (`claude-haiku-5-5`), an OpenAI-compatible server the
+  person names, or `claude -p` on their subscription. A declaration skips the call (unless
+  `extract.audit_rate` samples it); provider `none` never calls; the MCP server makes no call. The
+  key is read from the macOS Keychain (service `ledgr`, account = provider) at each call and never
+  written to disk: `/usr/bin/curl` gets it in a config on stdin and the message from a 0600 file
+  under `ledgr-data/tmp/`, deleted after.
+- **An MCP server**, when chosen: registered with Claude Code's own `claude mcp add` (Claude Code
+  writes that folder's `.claude.json`; `~/.claude.json` for the default), plus the four allow
+  entries in that folder's settings file. It reads and writes only `ledgr-data/` (log `log/mcp.log`)
+  and runs nothing else.
+- **Files outside the mod folder**: `ledgr-data/` (its data and `config.json`), the session's
+  transcript (`<config>/projects/…/<id>.jsonl`, the path Claude Code passes the hooks) for the
+  turn's text and uuid, and `<config>/sessions/<pid>.json` for a session name. The installer also
+  reads `~/.claude-*`, `~/.local/bin` wrappers and shell start-up files to find config folders.
+- **Programs.** Through `hc`: `hc read <terminal>` (the box checks a passage against the screen),
+  `hc run … -- claude --resume <sid> --fork-session …` (Launch), `hc run … -- claude --resume <sid>`
+  (Resume session), `hc kill` and `hc rm` (Close branch). Through `exec` in the writer: `bash
+  mods/ledgr/bin/adapters/claude/extract.sh --retry …` (Retry), `/usr/bin/which claude` once.
+  Through `exec` in the dialogs, only in `opener.js`, 5 s each, only after a click: `realpath`, the
+  chosen editor (`open <path>`, `open -R` for an app, `open -t` for a script; `zed`, `code -g`, or
+  the person's command, never a shell, interpreter or terminal), `open -R` (Reveal in Finder),
+  `git -C <cwd> rev-parse --show-toplevel`. Web links go to `cx.open_url` (http and https only). The
+  hooks run `python3`, `/usr/bin/security find-generic-password`, `/usr/bin/curl`, and
+  `hc get $HC_TERMINAL_ID --json` (read only, killed after 300 ms) at session start and each prompt.
+- **The terminal and the clipboard.** The box reads the clipboard when it opens; a paste reads it
+  back first. The only write into a terminal is Herdr's `terminal.paste` after a confirmed focus
+  (`ui.pasteIntoPrompt: false` turns it off). Never `hc send` (it presses Enter and would submit a
+  draft), never `hc keys` (Go to anchor once pressed `ctrl+o /`, which toggles Claude's transcript
+  viewer), never `terminal.search`, never Enter. `bin/tests/test_no_keystrokes.py` and
+  `test_nav.mjs` enforce it, and hold every `exec(` of the reading copies to `opener.js`.
+- **What the installer writes**: the chosen Claude settings files (hook and allow entries, backup
+  first), `.claude.json` through `claude mcp add`, the Keychain item, `keys.json`, one personal
+  layout, and its own state in `~/.local/state/ledgr/` (`install-state.json`, `pristine/`,
+  `backup-<stamp>/`). `./uninstall.sh` reverses all of it (restoring the saved originals when only
+  ledgr's entries differ, removing the MCP server with `claude mcp remove --scope user ledgr`),
+  deletes `ledgr-data/` only on a separate yes, and never touches the Keychain item.
+- **Platform**: macOS (Keychain, `security`), Herdr 0.1.13 or newer, Claude Code for the hooks,
+  python3 3.9+ at `/opt/homebrew/bin`, `/usr/local/bin` or `/usr/bin` (or `LEDGR_PYTHON`). Providers
+  `cli` and `openai-compatible` are untested end to end.
+
+What tripped the build up:
+
+- A layout block's copy starts only the first time it shows, so the writer lives in the always-shown
+  host block, not the panel; without a host nothing is ingested until the panel has been shown once
+  (its fallback writer then catches up from the spool).
+- Herdr refuses imports that resolve outside a mod's folder, symlinks included: hence the engine
+  copies.
+- On Herdr 0.1.13, `herdr-app check` shares the running window's shared state (a checked copy once
+  left a writer claim nobody held): claim and ping only when the home's `AGENTS.md` is readable,
+  which check refuses (`config.js` `liveHome`).
+- `<mod>.<command>` reaches shown copies only (`ledgr.toggle` needs the host block, `ledgr.demo` a
+  visible panel), and every one of them, an open dialog too: the dialog takes its own only while
+  `ledgr.detail` names it open, and Tab and Shift-Tab only while it or a field has the keyboard, so
+  a box opened on top keeps its Tab.
+- Herdr's shipped tab bar remembers the side panel per space and does not know ledgr, so a space
+  switch can hide the panel; the host button and cmd-shift-J bring it back.
+- Saving any file under `mods/ledgr/`, `bin/` included, reloads every copy, so the hooks keep their
+  bytecode in `ledgr-data/.pycache`.
+- Closing an overlay cancels its copy's tasks once `close()` resolves (at most 250 ms of grace). So
+  the dialog stages while open and closes only once the paste is decided, a closing act writes its
+  spool event first, and `main.js` `close` awaits `release`.
+- The list's keyboard needs a click or `ledgr.focus-list`: `mod.json` has no `focusable`. After a
+  dialog closes, Herdr gives the keyboard to the focused terminal; the panel takes it back (30 ms,
+  again at 300 ms) after Esc or an act.
+- Never cap a text box with `max_h` plus `overflow_hidden`: at a line height of about 1.6, a 34 px
+  cap cut a 12.5 px ask in its second line; short boxes scroll. A selection cannot run across the
+  message's three blocks (before, the passage, after); its Copy takes the turn whole.
+- cmd-Enter in the answer box: which of the textarea and the `mod:ledgr` section takes it first is
+  not settled live; a line break it adds within 300 ms is put back (`detailing.js` `strayBreak`).
+  The same is open for cmd-Down and cmd-Up. The dialog's live check (`docs/design/Detail.md` 6.5)
   has not been done.
-- The box's pin key is ⌘S, in the box's own section (`mod:ledgr`). Pick an in-box key no Herdr
-  section binds: the first one shared its chord with Herdr's global picker (`mod.open:picker`) and
-  was in conflict with it in the live check (2026-11-07), and ⌘⇧P is Herdr's palette. `cmd-s` is
-  bound in no shipped Herdr section, global or terminal. A key change touches four places:
-  `pinning.js` `PIN_KEY`, `keys.json`, the installer's `MOD_KEYS` (`test_compose.mjs` checks those
-  three agree) and the label in `words.js` `PINS_EMPTY`.
-- Pins are permanent by design: nothing archives, expires or deletes one, Forget keeps them, and they
-  never move to `archive/`. `store.json` is written whole after every change; a pin is at most about
-  4.5 KB with its fields, so a thousand average pins add about a megabyte. Delete is for an archived
-  pin only, in two clicks; remove test pins that way, never by editing `store.json`.
-- Caps: a pin keeps at most 4,000 characters (the box refuses a longer clipboard; the writer cuts and
-  marks `clipped`), a question carries at most 12 pins (the 13th check is refused), and a branch is
-  refused over 24,000 pinned characters, because the preamble is one argv element and neither the
-  `hc run` nor the worktree dialog's limit has been measured. Search shows 200 at most ("first 200 of
-  N"). The hooks keep the newest 50 turns per session, so an old pin's dialog often says its
-  message is gone; the pin keeps the passage.
-- A pin holds the text fullscreen Claude copies (markdown marks dropped), not the saved markdown. A
-  screen pin whose turn is interrupted, or taken in a session without hooks, keeps the turn the box
-  recorded and is never re-anchored.
-- Off per space has two known gaps: a branch launched into an off space records its lineage but sends
-  no `branch_started` event; and the capture box over an off pane stays open until Esc, Enter or a
-  click dismisses it.
-- Motion is native (`transition`), never a timer; an idle panel does not render. No reduced-motion
-  setting reaches a mod: `ui.animations: false` is the switch.
-- A branch shares the trunk's checkout unless isolated: the preamble forbids edits, nothing enforces it.
-  The fork is taken at the end of the session, so it also sees every turn after the anchor; the
-  manifest says how many.
-- The confluence resolves only when the trunk's UserPromptSubmit hook sees the marker line as the first
-  line of a pasted block, or of the prompt after at most a one-line lead-in. Paste into trunk puts
-  the message in the prompt as a paste, marker first; add a word of your own (the panel suggests
-  "Adopt this branch result for Q1:") and press Enter. With `ui.pasteIntoPrompt` off, type that
-  lead-in before ⌘V.
-- Assumes macOS (Keychain, `security`), Claude Code for the hooks (no asks lane for other agents yet),
-  and python3 3.9 or newer at `/opt/homebrew/bin`, `/usr/local/bin` or `/usr/bin` (or `LEDGR_PYTHON`).
-  Providers `cli` (`claude -p`) and `openai-compatible` are untested end to end.
-- The MCP server's `parked_questions` does nothing yet: the panel has no action that releases a parked
-  question to the agent, so it returns an empty list with a note. Its tools appear only when the
-  agent's client passes `HC_TERMINAL_ID` to stdio servers (Claude Code does unless
-  `CLAUDE_CODE_MCP_ALLOWLIST_ENV=1`).
+- The pin key: the first choice clashed with Herdr's global picker; `cmd-s` is bound in no shipped
+  Herdr section. A change touches `pinning.js` `PIN_KEY`, `keys.json`, the installer's `MOD_KEYS`
+  (`test_compose.mjs` checks the three agree) and `words.js` `PINS_EMPTY`.
+- Pins never move to `archive/`; remove a test pin through the panel (archive, then Delete), never
+  by editing `store.json`, which is written whole on every change (a pin is at most about 4.5 KB
+  there). A pin holds the text fullscreen Claude copies (markdown marks dropped); a screen pin whose
+  turn is interrupted, or taken without hooks, keeps the turn the box recorded. The hooks keep the
+  newest 50 turns, so an old pin's message is often gone.
+- The 24,000-character branch cap exists because the preamble is one argv element and neither
+  `hc run`'s nor the worktree dialog's limit is measured. A branch shares the trunk's checkout
+  unless isolated (the preamble forbids edits; nothing enforces it), and the fork is taken at the
+  end of the session, so it also sees every turn after the anchor; the manifest says how many.
+- The transcript lags: Claude Code writes a turn's records after Stop fires, hence part A's `lagged`
+  file and part B's re-read; a declared turn that never catches up checks its quotes against the
+  final message plus the turn's partial text.
+- Known gaps: one dialog at a time; a branch launched into an off space records lineage but sends no
+  `branch_started`; a box over an off pane stays until dismissed; `parked_questions` returns nothing
+  until the panel can release a question; the MCP tools appear only when the client passes
+  `HC_TERMINAL_ID` to stdio servers (Claude Code does unless `CLAUDE_CODE_MCP_ALLOWLIST_ENV=1`); no
+  reduced-motion setting reaches a mod, so `ui.animations` is the switch, and motion is native
+  transitions, never a timer.
 
 ## Done when
 
-- `herdr-app check` passes for `mods/ledgr` and `mods/ledgr-pane`, also with `FORCE_DEMO = true` in
-  `config.js`; `bin/tests/run-all.sh` reports every suite OK.
-- A few seconds after Herdr starts, with the panel never shown, `shared("ledgr.writer").by` is `host`
-  (or the overlay mod's name).
-- The host button shows "ledgr"; a click and ⌘⇧J each show and hide the panel.
-- `herdr-app do mod.open --name ledgr` opens the box over a working agent; Enter writes
-  `ledgr-data/spool/<ms>-capture-mod-<rand>.json`, which the writer applies and unlinks within a
-  second; the row appears in YOUR QUESTIONS and the chip shows `? 1 · 0`.
+- `herdr-app check mods/ledgr` and `herdr-app check mods/ledgr-pane` pass, also with
+  `FORCE_DEMO = true` in `config.js`; `bash mods/ledgr/bin/tests/run-all.sh` reports every suite OK;
+  from the repo, `python3 -I -B setup/tests/test_ledgr_setup.py` passes.
+- A few seconds after Herdr starts, with the panel never shown, `shared("ledgr.writer").by` is
+  `host`; a click on the host button and cmd-shift-J each show and hide the panel.
+  `./install.sh --check` reports the hooks registered per chosen settings file, a writer holding the
+  role, the Keychain item resolving and, when chosen, `ledgr` registered with all four allow entries
+  per folder.
 - A JSON file moved into `ledgr-data/spool/` from a shell is applied and unlinked in under a second.
-- `herdr-app do ledgr.demo` (panel shown) draws the three lanes with every status (PINS with Pin 1
-  and Pin 2, Question 9 with "2 pins"); turn 17 shows Ask 6 ("Run
-  the load test after tonight's deploy") first with `◆` and `blocking`, and `below threshold (2)` (A13,
-  A14) folded at the bottom; every row is one line at 280 and 360 px (nothing wraps; Done and Paste fit),
-  and the long cases (A10-A12, Q8) show whole in their dialogs.
-- In the demo, `ledgr.session:t27`, then `ledgr.whole:A1`, opens Ask 1's dialog on the whole
-  1,511-word message; its message column scrolls to the last line ("LAST LINE OF THE 1,500-WORD
-  MESSAGE").
-- `herdr-app do ledgr.demo-detail` opens the dialog on Ask 15, centered at about 60 % × 75 %, the
-  passage marked in THE MESSAGE; `demo-detail:Q3`, `:Q9`, `:P2`, `:br-q3-7c1e` and `:Q5` each draw
-  their sections, in two columns and, in a narrow window, one; Esc closes it and the cursor is on that
-  row.
-- Editing `extract.threshold` in `ledgr-data/config.json`, or choosing on the lane head's menu, changes
-  the counts and the lanes within a couple of seconds, with no restart.
-- The header's gear opens the settings dialog (about 50 % × 70 %, an open detail dialog closed first);
-  `+` on Text scale redraws the dialog, the panel, the host button and the chips larger within a
-  second, and `config.json` holds `ui.textScale` 1.05 with every other key as it was; Esc closes it and
-  the panel's status line says what was saved. `herdr-app do ledgr.demo-settings` shows two sample
-  spaces and a stale id with Drop, and saves nothing.
-- `./install.sh --check` reports the three hooks registered, a writer holding the role and the Keychain
-  item resolving; when the MCP server was chosen, `ledgr` registered (user scope) and the four allow
-  entries present for each chosen config folder.
-- With the MCP server registered, a Claude Code turn that leaves something for you ends with the
-  pointer line only (no block), and the rows show "declared by the agent (tool)".
-- In a throwaway session, a selected sentence, ⌘J, ⌘S shows Pin 1 in the PINS lane ("turn N", not
-  "unverified", and no other Herdr action ran); Ask about it, then Ask here pastes a message whose first
-  line is `ledgr pins <session> <item>`, and once sent `hook.log` has `pins_asked` and the pin reads
-  "answered in Question N (turn M)" (the full walk-through: `docs/design/Pins.md` 8.4).
-- In a throwaway session, the live check of `docs/design/Detail.md` 6.5 passes: a sentence
-  drag-selected in the dialog copies with ⌘C, Paste answer leaves the sheet in the prompt unsent with
-  the keyboard in that pane, and ↓, Enter and Esc work on the list.
+  `herdr-app do mod.open --name ledgr` over a working agent opens the box; Enter writes a `capture`
+  event and the row appears in YOUR QUESTIONS, the chip showing `? 1 · 0`.
+- `herdr-app do ledgr.demo` draws the three lanes with every status: Pin 1 and Pin 2, Question 9
+  with "2 pins", turn 17 with Ask 6 first (◆, blocking) and "below threshold (2)" folded; every row
+  is one line at 280 and 360 px. `ledgr.demo-detail` opens Ask 15's dialog with the passage marked,
+  and `demo-detail:Q3`, `:P2`, `:br-q3-7c1e` draw their sections, in two columns and, narrow, in
+  one; Esc leaves the cursor on that row. `ledgr.demo-settings` shows two sample spaces and a stale
+  id, and saves nothing.
+- A threshold chosen on the lane head, or edited in `config.json`, changes the counts within a
+  couple of seconds; + on Text scale grows every view within a second, and `config.json` holds
+  `ui.textScale` 1.05 with every other key as it was.
+- In a throwaway Claude Code session in a scratch folder (never a large live one), with the MCP
+  server registered: a turn that needs something of the person ends with the pointer line only, and
+  its rows read "declared by the agent (tool)". An answer typed in the dialog and Paste answer leave
+  the sheet unsent in the prompt, the keyboard in that pane; once sent, `hook.log` has
+  `answers_landed` and the ask reads "answered by you" when the reply ends.
+- In the same session, a selected sentence, cmd-J, cmd-S shows Pin 1 ("turn N", not unverified); Ask
+  about it, then Ask here pastes a message starting `ledgr pins <session> <item>`, and once sent
+  `hook.log` has `pins_asked` and the pin reads "answered in Question N (turn M)". Close the pane
+  and Forget the session: the pin is still found by search, in a group marked forgotten.

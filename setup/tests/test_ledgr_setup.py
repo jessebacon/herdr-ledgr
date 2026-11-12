@@ -433,9 +433,64 @@ def test_mcp():
         shutil.rmtree(root)
 
 
+# RECIPE.md: herdr.dev's gallery index skips a recipe of 64 KiB or more (ledgr dropped off the mods page
+# on 2026-11-12 at 66,294 bytes), and the manual fixes its six parts. The repo's own file, read relative
+# to the repo root, then the guard itself on scratch recipes.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def recipe_text(parts=None, before="", intro="One paragraph of what the person sees.", pad=0, code_in=None):
+    parts = parts or L.RECIPE_PARTS
+    body = [before + "# ledgr", "", intro, "", "![ledgr](preview.png)", ""]
+    for p in parts:
+        body += [f"## {p}", "", ("- uses `code` here" if p == code_in else "- plain words") + ("x" * pad if p == parts[-1] else ""), ""]
+    return "\n".join(body)
+
+
+def test_recipe():
+    path = os.path.join(REPO_ROOT, "RECIPE.md")
+    n, probs, warns = L.recipe_check(path)
+    ok(n is not None and n < L.RECIPE_LIMIT, f"RECIPE.md under the gallery's {L.RECIPE_LIMIT:,} bytes (is {n})")
+    ok(probs == [], "RECIPE.md: the manual's form (" + "; ".join(probs) + ")")
+    for w in warns:
+        print(f"WARN {w}")
+    ok(L.RECIPE_LIMIT == 65536 and L.RECIPE_WARN == 57344, "limits: 64 KiB fails, 56 KiB warns")
+    root = tempfile.mkdtemp(prefix="ledgr-recipe-test-")
+    try:
+        def check(text):
+            f = os.path.join(root, "RECIPE.md")
+            write(f, text)
+            return L.recipe_check(f)
+        n, probs, warns = check(recipe_text())
+        ok(probs == [] and warns == [], "a minimal recipe in the manual's form passes")
+        n, probs, warns = check(recipe_text(pad=L.RECIPE_LIMIT))
+        ok(n >= L.RECIPE_LIMIT and any("gallery skips" in x for x in probs), "64 KiB or more fails")
+        n, probs, warns = check(recipe_text(pad=L.RECIPE_WARN + 100 - len(recipe_text().encode())))
+        ok(L.RECIPE_WARN <= n < L.RECIPE_LIMIT and probs == [] and len(warns) == 1, "from 56 KiB: a warning, no failure")
+        n, probs, _ = check(recipe_text(parts=["What you see", "Built from", "How it behaves", "Watch out", "Done when"]))
+        ok(any("parts" in x for x in probs), "parts out of order fail")
+        n, probs, _ = check(recipe_text(parts=["Before you add it"] + L.RECIPE_PARTS))
+        ok(any("parts" in x for x in probs), "an extra ## section fails")
+        n, probs, _ = check(recipe_text(parts=L.RECIPE_PARTS[:-1]))
+        ok(any("parts" in x for x in probs), "a missing part fails")
+        n, probs, _ = check(recipe_text(before="Read me first.\n\n"))
+        ok(any("start with" in x for x in probs), "anything before the title fails")
+        n, probs, _ = check(recipe_text(intro="One paragraph.\n\nA second one."))
+        ok(any("one paragraph" in x for x in probs), "two paragraphs before the image fail")
+        n, probs, _ = check(recipe_text(code_in="How it behaves"))
+        ok(any("code in How it behaves" in x for x in probs), "code in How it behaves fails")
+        n, probs, _ = check(recipe_text(code_in="Built from"))
+        ok(probs == [], "code in Built from is fine")
+        n, probs, _ = check(recipe_text().replace("- plain words\n\n## Done when", "```\n## not a heading\n```\n\n## Done when"))
+        ok(probs == [], "a ## line inside a code fence is no heading")
+        ok(L.recipe_check(os.path.join(root, "missing.md"))[0] is None, "a missing file: bytes None")
+    finally:
+        shutil.rmtree(root)
+
+
 if __name__ == "__main__":
     for t in (test_dump, test_settings_write, test_mend_newline, test_restore_original, test_retire, test_settings_list, test_handoff,
-              test_keep_config_edits, test_mcp):
+              test_keep_config_edits, test_mcp, test_recipe):
         t()
     print(f"setup: {PASS} passed, {FAIL} failed" + ("" if FAIL else "  OK"))
     sys.exit(1 if FAIL else 0)

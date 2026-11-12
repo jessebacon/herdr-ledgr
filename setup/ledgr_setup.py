@@ -67,6 +67,13 @@ GENERATED = {"gpui-kit.d.ts", "jsconfig.json", ".DS_Store"}   # Herdr (or Finder
 PANEL_BLOCK = {"id": "ledgr", "type": "block", "content": {"mod": "ledgr", "props": {"view": "panel"}}}
 DEFAULT_PLACE = {"column": "panel", "stack": "panel-body", "child": "ledgr"}
 HOST_ID, HOST_ROW, PANEL_COL = "ledgr-host", "ledgr-host-row", "ledgr-panel"
+# RECIPE.md, the brief herdr.dev lists the mod by. The gallery's index (assets.herdr.dev/mods/index.json)
+# skips a recipe of 64 KiB or more (2026-11-12: ledgr dropped off the mods page at 66,294 bytes), and
+# the manual ("Layouts and mods other people made") fixes its parts and their order. Checked by
+# setup/tests/test_ledgr_setup.py (fails) and reported by --check (not counted: the install is unaffected).
+RECIPE = os.path.join(REPO, "RECIPE.md")
+RECIPE_LIMIT, RECIPE_WARN = 64 * 1024, 56 * 1024
+RECIPE_PARTS = ["What you see", "How it behaves", "Built from", "Watch out", "Done when"]
 
 
 # ── small helpers ─────────────────────────────────────────────────────────────────────────────
@@ -247,6 +254,48 @@ def replace_child(parent, old, new):
                     lst[i] = new
                     return True
     return False
+
+
+# ── RECIPE.md ─────────────────────────────────────────────────────────────────────────────────
+def recipe_check(path=RECIPE, name=MOD):
+    """(bytes, problems, warnings) for a RECIPE.md. Problems: 64 KiB or more (the gallery skips it); not
+    the manual's form, which is `# <name>` on the first line, one paragraph, `![<name>](preview.png)`,
+    then exactly the five `##` parts of RECIPE_PARTS in that order, with code (backticks) only in Built
+    from and Watch out. A warning from 56 KiB. bytes is None when the file cannot be read."""
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError as e:
+        return None, [f"RECIPE.md cannot be read: {e}"], []
+    n, probs, warns = len(raw), [], []
+    if n >= RECIPE_LIMIT:
+        probs.append(f"RECIPE.md is {n:,} bytes: the gallery skips a recipe of {RECIPE_LIMIT:,} bytes or more")
+    elif n >= RECIPE_WARN:
+        warns.append(f"RECIPE.md is {n:,} bytes, {RECIPE_LIMIT - n:,} under the gallery's {RECIPE_LIMIT:,}")
+    lines, fence, heads = raw.decode("utf-8", "replace").split("\n"), False, []
+    for i, ln in enumerate(lines):
+        if ln.startswith("```"):
+            fence = not fence
+        elif not fence and re.match(r"#{1,2} ", ln):
+            heads.append((i, ln))
+    if lines[0] != f"# {name}":
+        probs.append(f"RECIPE.md must start with `# {name}`, nothing before it")
+    if [ln for _, ln in heads if ln.startswith("# ")] != [f"# {name}"]:
+        probs.append(f"RECIPE.md must have one `# ` heading, `# {name}`")
+    parts = [(i, ln[3:].strip()) for i, ln in heads if ln.startswith("## ")]
+    if [p for _, p in parts] != RECIPE_PARTS:
+        probs.append(f"RECIPE.md parts {[p for _, p in parts]} are not the manual's {RECIPE_PARTS}, in that order, and nothing else")
+    first = parts[0][0] if parts else len(lines)
+    intro = [b.strip() for b in "\n".join(lines[1:first]).split("\n\n") if b.strip()]
+    if len(intro) != 2 or intro[1] != f"![{name}](preview.png)":
+        probs.append(f"RECIPE.md: after the title, one paragraph and then `![{name}](preview.png)`, nothing else")
+    ends = [i for i, _ in parts[1:]] + [len(lines)]
+    prose = {"the opening paragraph": lines[1:first]}
+    prose.update({p: lines[i + 1:e] for (i, p), e in zip(parts, ends) if p in ("What you see", "How it behaves")})
+    for where, body in prose.items():
+        if "`" in "\n".join(body):
+            probs.append(f"RECIPE.md: code in {where} (the manual keeps code to Built from and Watch out)")
+    return n, probs, warns
 
 
 # ── context ───────────────────────────────────────────────────────────────────────────────────
@@ -2028,6 +2077,15 @@ def cmd_check(ctx, args):
     say(f"  layout          {('layouts/' + lay['name'] + '.json: panel ' + lay['panel'] + ', host ' + lay['host'] + ', chip ' + lay['chip']) if lay else 'no layout holds the ledgr panel'}")
     if not lay:
         bad.append("no layout holds the ledgr panel")
+    n, rprobs, rwarns = recipe_check()
+    if n is None:
+        say("  recipe          RECIPE.md not found beside the installer (only the repo has it)")
+    else:
+        say(f"  recipe          RECIPE.md {n:,} bytes, the gallery's limit {RECIPE_LIMIT:,}: "
+            + ("OVER, herdr.dev/mods skips it" if n >= RECIPE_LIMIT else "near it" if n >= RECIPE_WARN else "ok")
+            + ("" if rprobs else "; the manual's six parts in order"))
+        for x in rprobs + rwarns:
+            say(f"  ! {x}")
     head("Result")
     for b in bad:
         say(f"  X {b}")

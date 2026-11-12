@@ -4,7 +4,25 @@
 
 First public shape of the mod. Built on Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311.
 
-### Multiline answers, drafted mark, next question (2026-11-11)
+### Recipe within the gallery's limit (2026-11-12)
+
+- ledgr dropped off herdr.dev/mods: the gallery's index (`assets.herdr.dev/mods/index.json`) skips a
+  `RECIPE.md` of 64 KiB (65,536 bytes) or more, and ours had grown to 66,294. The recipe is
+  rewritten to the manual's form, 47,986 bytes: `# ledgr`, one paragraph, the preview, then exactly
+  What you see, How it behaves, Built from, Watch out and Done when. The first two parts are prose
+  with no code (key names and labels as words); the 9.3 KB "Before you add it (disclosure)" section
+  is folded into the opening of Watch out ("what it assumes about the setup"); repetition, history
+  and most of the shot-command list are cut, with the build spec, `Detail.md`, `Pins.md`, the build
+  notes and `docs/preview-recipe.md` named in Built from for the detail. No rename: the manual needs
+  no match between the mod folder and the repository's name.
+- The guard: `setup/ledgr_setup.py` `recipe_check` (`RECIPE_LIMIT` 64 KiB fails, `RECIPE_WARN` 56
+  KiB warns) also checks the form (the title first, one paragraph and the image, the five `##` parts
+  in order and no others, no code in the opening, What you see or How it behaves). `test_recipe` in
+  `setup/tests/test_ledgr_setup.py` runs it on the repo's file and on scratch recipes (+15, 97), and
+  `./install.sh --check` prints the recipe's size against the limit (reported, not counted as a
+  problem). `docs/publishing-requirements.md` gains the limit's row.
+
+### 8d44cb6: multiline answers, drafted mark, next question
 
 - The detail dialog's answer box takes several lines: a `Textarea`, two lines growing to ten, then it
   scrolls (`detail.js` `makeAnswer`, `views.js` `answerBox`). Enter is a new line; the paste of the
