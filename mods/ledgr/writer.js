@@ -3,14 +3,19 @@
 // {view: "host"}, role "host"), or any other mod that carries a copy of the engine (an overlay's
 // tab bar, role = its name). The ledgr panel runs one only as a fallback (role "panel") when no
 // host writer answers its ping.
-//   - claims shared("ledgr.writer") = {id, by, at}; whoever holds the key writes, nobody else.
+//   - claims shared("ledgr.writer") = {id, by, at, fault?, failed?}; whoever holds the key writes,
+//     nobody else. The holder renews it every tick (a heartbeat: an `at` older than two minutes means
+//     no writer is running) and whenever its health changes: `fault` while store.json cannot be written,
+//     `failed` = the events kept in spool/failed (the panel's status line says both, words.js).
 //     Hosts elect one writer among themselves: a host that starts later takes over; a host that
 //     lost the role takes it back (re-reading store.json first) when the claim is empty or held by
 //     a panel fallback; a host that goes away releases it (release(), from the View's close);
 //   - loads store.json before reading or unlinking any spool file;
 //   - ingests ledgr-data/spool with watchFolder, writes store.json after every change and before
-//     unlinking the files it applied; publishes shared("ledgr.chips"); writes snapshot.json and
-//     archive/; runs the extractor's --retry for `retry` events;
+//     unlinking the files it applied (past Herdr's 1 MiB text-file cap through spool.js writeLarge);
+//     an event whose apply throws is left out of the store and moved to spool/failed (applyBatch);
+//     publishes shared("ledgr.chips"); writes snapshot.json and archive/; runs the extractor's
+//     --retry for `retry` events;
 //   - track(cx) from the host's render: interrupts and tier-3 status turns (spec 6.5, 2.9);
 //   - respond(cx) from the host's render: answers a panel's shared("ledgr.ping") by re-claiming;
 //   - Phase 2: launches the branches the store accepted from a panel's `branch` event
@@ -37,13 +42,43 @@ import { randomUUID } from "crypto";
 import { shared, setShared, readTextFile, writeTextFile, watchFolder, agents, terminals, panes, run, exec, hc, openOverlay, appHome, home } from "herdr";
 import { DEFAULTS, loadConfig, dataDir, spoolDir, turnPath, storePath, binDir, agentLabel, panelPlace, panelShown, showPanel, liveHome, disabledSpaces, terminalSpace, textScaleOf } from "./config.js";
 import { Store, isHuman, thresholdOf } from "./store.js";
-import { SpoolReader, readMap, writeAtomic } from "./spool.js";
+import { SpoolReader, readMap, writeAtomic, overCap, countFailed } from "./spool.js";
 import { maxDepthOf, hcRunArgs, claudeArgv, resumeArgs, transcriptPathOf } from "./branch.js";
 
 export const ENGINE_FILES = ["config.js", "store.js", "spool.js", "writer.js", "branch.js", "confluence.js"];
 const DAY = 86400e3;
 const squash = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
 const plain = (s) => squash(String(s ?? "").replace(/[`*_#>]+/g, ""));
+
+// Replaces path with text past writeTextFile's 1 MiB (spool.js TEXT_FILE_MAX): fs.writeFile to a
+// dotfile beside it, read back and compared (a short write never replaces the file), then `mv -f` over
+// it (one rename, so a reader sees the old file or the new one, never half of one). The mod has no
+// rename of its own; the mv is here, in the writer, because a reading copy starts no process
+// (tests/test_no_keystrokes.py rule 13). Resolves null, or the error's text (the temporary file is
+// removed and path is left as it was).
+export async function writeLarge(path, text) {
+  const cut = String(path).lastIndexOf("/");
+  const rand = Math.floor(Math.random() * 0x100000).toString(16).padStart(5, "0");
+  const tmp = `${path.slice(0, cut)}/.${path.slice(cut + 1)}.large-${Date.now()}-${rand}`;
+  try {
+    await fs.writeFile(tmp, text);
+    const back = await fs.readFile(tmp, "utf8");
+    if (back !== text) throw new Error(`the temporary copy read back ${back.length} of ${text.length} characters`);
+    const r = await exec("/bin/mv", ["-f", tmp, path]);
+    if (r?.code !== 0) throw new Error(`mv exited ${r?.code}${r?.stderr ? `: ${String(r.stderr).trim().slice(0, 160)}` : ""}`);
+    return null;
+  } catch (e) {
+    await fs.unlink(tmp).catch(() => {});
+    return String(e?.message ?? e);
+  }
+}
+
+// A file the writer derives (snapshot.json) replaced whole, whatever its size: writeAtomic under the
+// cap, else (over it, or an old copy over it that writeTextFile cannot compare) writeLarge.
+export async function writeWhole(path, text) {
+  if (!overCap(text) && (await writeAtomic(path, text))) return true;
+  return (await writeLarge(path, text)) === null;
+}
 
 export function writerClaim() {
   const w = shared("ledgr.writer");
@@ -58,7 +93,7 @@ export class Writer {
     this.live = new Store(null);
     this.storeText = null;          // store.json as last read or written (writeTextFile's expected)
     this.writeChain = Promise.resolve(true);
-    this.reader = new SpoolReader((batch, cx) => this.applyBatch(batch, cx));
+    this.reader = new SpoolReader((batch, cx) => this.applyBatch(batch, cx), () => this.beat());
     this.started = false;
     this.retired = false;
     this.passages = new Map();
@@ -66,12 +101,26 @@ export class Writer {
     this.lastStatus = new Map();
     this.pendingStatus = [];
     this.note = null;               // last problem, for a host that shows one
+    this.fault = null;              // store.json could not be written (published in the claim)
     this.claimAt = 0;
   }
 
   claim() {
     this.claimAt = Date.now();
-    setShared("ledgr.writer", { id: this.id, by: this.role, at: this.claimAt });
+    const w = { id: this.id, by: this.role, at: this.claimAt };
+    if (this.fault) w.fault = this.fault;
+    if (this.reader?.failed > 0) w.failed = this.reader.failed;
+    setShared("ledgr.writer", w);
+  }
+
+  // The holder's claim again, with its health: every tick, and when the health changes.
+  beat() { if (this.amWriter()) this.claim(); }
+
+  setFault(fault) {
+    if (fault === this.fault) return;
+    this.fault = fault;
+    if (fault) this.note = fault;
+    this.beat();
   }
 
   holds() { return !this.retired && writerClaim()?.id === this.id; }
@@ -115,6 +164,8 @@ export class Writer {
     for (const rec of await readMap()) this.live.applyMap(rec);
     await this.saveStore();
     await this.reader.drain(cx);
+    this.reader.failed = await countFailed();
+    this.beat();
     this.publish();
     this.scheduleSnapshot(cx);
     if (this.reader.missing) this.waitForSpool(cx); else this.watch(cx);
@@ -196,27 +247,47 @@ export class Writer {
 
   // Writes store.json if it changed: writeTextFile replaces an existing file atomically and only
   // if it still holds what this writer last read or wrote; on a mismatch the current file is
-  // re-read and replaced while the role is held. Chained, so writes never overlap.
+  // re-read and replaced while the role is held. Past writeTextFile's 1 MiB (the new text or the
+  // file it replaces) through writeLarge. A failure is the writer's `fault` (the panel shows it)
+  // until a write succeeds. Chained, so writes never overlap.
   saveStore() {
     const go = async () => {
       if (!this.amWriter()) return false;
       const text = this.live.toText();
       if (text === this.storeText) return true;
       await fs.mkdir(dataDir(), { recursive: true }).catch(() => {});
-      try { await writeTextFile(storePath(), text, this.storeText); }
-      catch {
-        const cur = await fs.readFile(storePath(), "utf8").catch(() => null);
-        if (!this.amWriter()) return false;
-        try { await writeTextFile(storePath(), text, cur); }
-        catch (e) { this.note = `store.json not written: ${String(e?.message ?? e)}`; return false; }
-      }
+      const r = await this.writeStoreText(text);
+      if (r === false) return false;                        // the role went elsewhere meanwhile
+      if (r !== true) { this.setFault(`store.json not written: ${r}`); return false; }
       this.storeText = text;
+      this.setFault(null);
       // snapshot.json follows every store change (the extractor reads it at each Stop).
-      await writeAtomic(`${dataDir()}/snapshot.json`, JSON.stringify(this.live.snapshot())).catch(() => false);
+      await writeWhole(`${dataDir()}/snapshot.json`, JSON.stringify(this.live.snapshot())).catch(() => false);
       return true;
     };
     this.writeChain = this.writeChain.then(go, go);
     return this.writeChain;
+  }
+
+  // true written, false the role was lost, else the error's text.
+  async writeStoreText(text) {
+    if (!overCap(text) && !overCap(this.storeText)) {
+      try { await writeTextFile(storePath(), text, this.storeText); return true; }
+      catch (e) {
+        const cur = await fs.readFile(storePath(), "utf8").catch(() => null);
+        if (!this.amWriter()) return false;
+        if (!overCap(cur)) {
+          try { await writeTextFile(storePath(), text, cur); return true; }
+          catch (e2) { return String(e2?.message ?? e2 ?? e?.message ?? e); }
+        }
+      }
+    }
+    if (!this.amWriter()) return false;
+    // Never over a store.json this writer could not read (writeTextFile's expected null refuses that too).
+    if (this.storeText === null && (await fs.readdir(dataDir()).catch(() => [])).map((n) => String(n).split("/").pop()).includes("store.json")) {
+      return "store.json is there but was not read when the writer started; not replaced";
+    }
+    return (await writeLarge(storePath(), text)) ?? true;
   }
 
   commit(cx) {
@@ -255,6 +326,10 @@ export class Writer {
     });
   }
 
+  // Applies a batch of spool events (SpoolReader). An event whose apply throws is left out whole:
+  // the store goes back to what it was before the batch and the batch is applied again without it
+  // (an event is never half applied), and the reader moves it to spool/failed. Returns false (not
+  // the writer, or store.json not written: every file stays), true, or {failed}.
   async applyBatch(batch, cx) {
     if (!this.amWriter()) return false;
     const settles = [], retries = [], launches = [], decisions = [], closes = [], resumes = [];
@@ -264,8 +339,24 @@ export class Writer {
       this.applyConfig(await loadConfig());
       if (!this.amWriter()) return false;
     }
-    for (const { ev } of batch) {
-      const r = this.live.apply(ev);
+    const failed = [], before = this.live.toText();
+    let done;
+    for (;;) {
+      done = [];
+      let threw = false;
+      for (const b of batch) {
+        if (failed.some((f) => f.name === b.name)) continue;
+        try { done.push({ ev: b.ev, r: this.live.apply(b.ev) }); }
+        catch (e) {
+          failed.push({ name: b.name, error: String(e?.message ?? e), stack: String(e?.stack ?? "") });
+          threw = true;
+          break;
+        }
+      }
+      if (!threw) break;
+      this.live.d = Store.fromText(before).d;
+    }
+    for (const { ev, r } of done) {
       settles.push(...r.settle);
       retries.push(...(r.retry ?? []));
       launches.push(...(r.launch ?? []));
@@ -291,7 +382,7 @@ export class Writer {
     for (const sid of resumes) this.resumeSession(sid, cx);
     if (newAsks && this.cfg.surface?.openPanelOnAsks && this.panelShown() === false) showPanel(panelPlace(this.cfg));
     cx.notify();
-    return true;
+    return failed.length ? { failed } : true;
   }
 
   panelShown() { return panelShown(panelPlace(this.cfg)); }
@@ -536,7 +627,7 @@ export class Writer {
     this.snapDone = true;
     cx.spawn(async () => {
       if (!this.amWriter() || !(await fs.exists(dataDir()).catch(() => false))) return;
-      await writeAtomic(`${dataDir()}/snapshot.json`, JSON.stringify(this.live.snapshot()));
+      await writeWhole(`${dataDir()}/snapshot.json`, JSON.stringify(this.live.snapshot()));
     });
   }
 
@@ -562,12 +653,15 @@ export class Writer {
     await this.saveStore();
   }
 
-  // The host's 60 s timer: safety rescan, deferred items waking, housekeeping. A host that does
-  // not hold the role checks instead that the holder is alive (probe).
+  // The host's 60 s timer: safety rescan, the heartbeat (the claim renewed with the writer's
+  // health), deferred items waking, housekeeping. A host that does not hold the role checks instead
+  // that the holder is alive (probe).
   tick(cx) {
     if (!this.amWriter()) { this.probe(cx); return; }
     cx.spawn(async (cx) => {
       await this.reader.drain(cx);
+      this.reader.failed = await countFailed();
+      this.beat();
       if (!this.watching && this.reader.missing === false) this.watch(cx);
       const changed = this.live.wake();
       // The safety net for watchConfig (a watch that stopped): config.json once a minute.

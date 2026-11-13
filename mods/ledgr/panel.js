@@ -63,7 +63,7 @@ import { Writer, writerClaim, engineDrift } from "./writer.js";
 import { isLive } from "./nav.js";
 import { demoData, DEMO_SESSION } from "./fixtures.js";
 import { THRESHOLD_WORDS, itemWords as H, paneWords as P, sessionWords, stageLabels, clearLabel, clearConfirm, clearedWords, OFF_HERE, spaceToggleWords, handleWords,
-  pinsWords, PINS_EMPTY, pinsSearchEmpty, pinsSelectedWords, askAboutPinsWords, pinNameWords, pinLabel } from "./words.js";
+  pinsWords, PINS_EMPTY, pinsSearchEmpty, pinsSelectedWords, askAboutPinsWords, pinNameWords, pinLabel, writerHealthWords } from "./words.js";
 import { loadAdapters, adapterOf, asksMode } from "./adapters.js";
 import { thenRequest, thenStale } from "./pinning.js";
 import { Reader } from "./reader.js";
@@ -663,7 +663,8 @@ export class Panel extends Reader {
     const list = off ? [this.offView(t, off)] : s ? this.body(t, st, s)
       : [this.away && st.sessionsList().length ? this.awayState(t, this.away) : this.emptyState(t)];
     this.settleCursor(cx);
-    const note = this.flash || this.writerNote || (this.fallback() ? this.writer.note : null);
+    // The writer's health (its claim: store.json not written, events kept in spool/failed) before its last note.
+    const note = this.flash || this.writerNote || writerHealthWords(writerClaim()) || (this.fallback() ? this.writer.note : null);
     return v_flex().id("ledgr").track_focus(this.keys).on_key_down((e, cx) => this.onKey(e, cx))
       .size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border)
       .text_color(t.foreground).text_size(t.ts(12.5))

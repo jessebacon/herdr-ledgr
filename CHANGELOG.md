@@ -4,7 +4,18 @@
 
 First public shape of the mod. Built on Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311.
 
-### Dialog frame as the gallery image (2026-11-12)
+### The writer past 1 MiB (2026-11-12)
+
+- ledgr froze for every session at 15:35: Herdr's `writeTextFile` refuses a file over 1 MiB, and a
+  nine-item `asks` event took `store.json` from 1,041,470 to 1,049,830 bytes. The writer caught the
+  error into a note nobody showed, kept the events in memory, published chips from them and left
+  every spool file in place. Fix: a store or snapshot over 1 MiB is written through `fs.writeFile`
+  to a temp file, read back, then moved into place (`writer.js` `writeLarge`); an event that throws
+  is quarantined to `spool/failed/` with its error and the batch applied without it; the writer's
+  claim renews every tick and carries `fault` and `failed`, which the panel's status line shows.
+  Fixture `bin/tests/fixtures/spool-stall/`, writer tests 66.
+
+### e5c9a34: dialog frame as the gallery image
 
 - `preview.png` is now the detail dialog frame (the gallery and the mod page show one image per
   mod, and the page strips images from the recipe body); the scan-list frame is

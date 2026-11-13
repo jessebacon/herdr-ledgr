@@ -119,7 +119,16 @@ merged = K.deep_merge(K.defaults(), {"spaces": {"disabled": ["spA"]}})
 assert merged["spaces"]["disabled"] == ["spA"], merged["spaces"]
 PY
 fi
+# The writer (tests/test_writer.mjs): the 2026-11-12 stall (store.json past Herdr's 1 MiB text-file cap),
+# a save fault on the status line, an event that throws moved to spool/failed, the heartbeat. Its own
+# scratch folder and a herdr stub with Herdr's 1 MiB cap.
+WOUT=""
+if [ "$rc" = 0 ]; then
+  WTMP=$(mktemp -d "${TMPDIR:-/tmp}/ledgr-writer.XXXXXX")
+  WOUT=$("$NODE" tests/test_writer.mjs "$WTMP" 2>&1) || { rc=1; echo "$WOUT" | cut -c1-2000; echo "FAIL: writer"; }
+  rm -rf "$WTMP"
+fi
 # The store's summary line last (run-all.sh shows the last line), with the parser check on it.
-if [ "$rc" = 0 ]; then echo "${OUT%, 0 failure(s)}; landing parser reads the confluence, the answer sheets (a multi-line answer too) and the pins message (and with their blank line; a sheet after a 45,000-character pins message, a 24,000-character one whole), the ref scan skipping a sheet's lines, 0 failure(s)"; else echo "$OUT"; echo "FAIL: store or landing parser"; fi
+if [ "$rc" = 0 ]; then echo "${OUT%, 0 failure(s)}; landing parser reads the confluence, the answer sheets (a multi-line answer too) and the pins message (and with their blank line; a sheet after a 45,000-character pins message, a 24,000-character one whole), the ref scan skipping a sheet's lines; ${WOUT#OK: }"; else echo "$OUT"; echo "FAIL: store, landing parser or writer"; fi
 rm -rf "$TMP"
 exit $rc

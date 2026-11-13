@@ -294,8 +294,8 @@ if panel is not None:
     ok(re.search(r"^  saveConfig\(", panel, flags=re.M) is None and "writeTextFile(" not in panel, "rule 12: panel.js writes config.json only through Reader saveConfig")
 
 # ── rule 13: a process starts only from opener.js, and only on a click (2026-11-10) ─────────────────
-# Among the reading copies (every .js file but writer.js, whose extractor, branch launcher and `which claude`
-# are the writer's own), exec( is opener.js's alone, in four shapes: the argv links.js openerArgv built
+# Among the reading copies (every .js file but writer.js, whose extractor, branch launcher, `which claude` and
+# the `mv` that puts a store.json past 1 MiB in place (writeLarge, 2026-11-12) are the writer's own), exec( is opener.js's alone, in four shapes: the argv links.js openerArgv built
 # (openPath: open, zed, code or the person's command; openerArgv refuses a shell, an interpreter, a program
 # that runs another, a terminal and a line break, wherever the command names them), open -R <path>
 # (revealPath), git -C <cwd> rev-parse --show-toplevel (gitToplevel) and realpath <path> (realPathOf, which

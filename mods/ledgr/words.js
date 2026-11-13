@@ -54,6 +54,19 @@ export const clearedWords = (n, kept = 0) => `${qs(n)} cleared${kept ? `, ${kept
 // ledgr off in a space (config.json spaces.disabled): the session menu's toggle for the focused pane's
 // space, and the state the panel and the capture box show there.
 export const OFF_HERE = "ledgr is off in this space";
+
+// The writer's health on the panel's status line, from its claim (writer.js claim: `fault` while
+// store.json cannot be written, `failed` = the events it moved to ledgr-data/spool/failed because
+// their apply threw).
+export const failedEventsWords = (n) => `${n} event${n === 1 ? "" : "s"} failed, see spool/failed`;
+export function writerHealthWords(w) {
+  if (!w || typeof w !== "object") return null;
+  const out = [];
+  if (w.fault) out.push(`ledgr writer: ${String(w.fault).slice(0, 200)}; new events wait in the spool`);
+  const n = Math.max(0, Math.floor(Number(w.failed) || 0));
+  if (n) out.push(failedEventsWords(n));
+  return out.length ? out.join(" · ") : null;
+}
 export const spaceToggleWords = (off, here = true) => `ledgr ${off ? "on" : "off"} in ${here ? "this space" : "that space"}`;
 
 // A branch by what it is for: "branch of Question 1". Its hc name (br-q1-c51e) is the short id

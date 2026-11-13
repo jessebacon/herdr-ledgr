@@ -142,7 +142,8 @@ export class Capture {
   // ledgr is off. Pins mode only, for a session no map record names.
   async storedSession(sid) {
     if (!sid) return null;
-    const text = await readTextFile(storePath()).catch(() => null);
+    // fs.readFile, not readTextFile: store.json can pass readTextFile's 1 MiB (it did on 2026-11-12).
+    const text = await fs.readFile(storePath(), "utf8").catch(() => null);
     let s = null;
     try { s = JSON.parse(text)?.sessions?.[sid] ?? null; } catch { return null; }
     if (!s || typeof s !== "object" || s.sessionId !== sid) return null;
