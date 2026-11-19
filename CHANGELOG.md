@@ -4,7 +4,88 @@
 
 First public shape of the mod. Built on Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311.
 
-### The writer past 1 MiB (2026-11-12)
+### A writer that holds its claim but does not move (2026-11-19)
+
+- ledgr stopped applying the spool at 09:46:20 and stayed so for hours, the second silent freeze in a
+  week. One drain applied its events and saved `store.json` (1.63 MB, through `writeLarge`) but never
+  returned, so its `running` flag stayed set and every later drain returned at once; the tick still
+  renewed the claim, so no host and no panel took over; the MCP server answered `ok: true` with "they
+  appear in the panel"; `./install.sh --check` said healthy. 103 events queued, none lost. Which
+  await hung is unknown (Herdr leaves a cancelled task's promise pending for ever, and the writer
+  kept no diagnostics); the change is for the class of failure, not that one await.
+- Progress in the claim: `shared("ledgr.writer")` now carries `pass` (the running pass or start: its
+  start, the step it waits in, since when), `done` (when the last pass ended) and `stall` (the
+  watchdog's last finding). Every drain is a pass with named steps (`spool.js`: list, read, apply,
+  unlink; `writer.js`: apply: config.json, re-anchor, decisions.md, save: store.json writeTextFile /
+  temporary copy / read back / mv, snapshot.json; a start's steps).
+- The watchdog (`writer.js` `watchdog`, `unstick`, from the 60 s tick): a pass or a start that has
+  waited in one step longer than `PASS_STUCK_MS` (90 s), or a spool event older than that while no
+  pass runs, is stuck. The holder says so (`fault` and `stall` in the claim, the panel's status line,
+  `ledgr-data/log/writer.log` with the step, the pass and what the save chain waits in), gives the pass
+  up and starts again from `store.json` on disk. A new generation (`gen`, `SpoolReader.epoch`):
+  nothing the given-up pass awaits can apply, save, record or unlink anything when it settles, if
+  ever; a start removes the `.store.json.large-*` copies an earlier save left before it reads, so a
+  late `mv` finds nothing to move, and fails (the watchdog starts again) unless a second listing proves
+  none is left; the `ingested` ids keep an event applied twice from counting twice. After
+  `MAX_UNSTICKS` (3) restarts with no pass finished, the copy backs off (`backOff`, `cooling`: 5 min,
+  then twice that each time up to 30 min) and keeps the claim, which says it is stuck and when it tries
+  again; it never gives the role up on its own, since with one host nobody else would take it. Another
+  host takes over a claim that has not moved for `TAKEOVER_STUCK_MS` (240 s), and so does a shown
+  panel.
+- Limits on the save chain (`SAVE_TIMEOUT_MS`, 20 s per await, `spool.js` `within` on a `cx.timer`;
+  the `mv` also with exec's own `timeout`): `writeTextFile`, the temporary copy, its read-back, the
+  `mv`, `snapshot.json`, re-anchoring's turn reads, `decisions.md`, the start's reads. A save that gets
+  no answer is a fault ("store.json not written: mv: no answer in 22 s"), never a hang, and the store
+  stays whole: only the `mv` touches it, one rename, asked `ok()` right before.
+- The panel (`panel.js`): it ticks its fallback writer whenever it is there and not retired (its
+  watchdog runs while it restarts or backs off), replaces a fallback that is neither writing, starting
+  nor backing off (`writer.js` `fallbackDead`), and looks for a writer from render whenever the claim is
+  gone or has not moved (`writerWanted`, every `WRITER_CHECK_MS`, 15 s), not only when it is shown.
+- The status line (`words.js` `writerHealthWords`, `NO_WRITER`): "ledgr writer stuck 95 s in save:
+  store.json mv; restarting it", "… 3 restarts in a row did not help; it tries again in 5 min, or
+  relaunch Herdr", an event that waits and is not applied, "no progress for 3 min" from a claim's own
+  pass, "none holds the role" when there is no claim, then "restarted 2 min ago after 95 s stuck in …"
+  for ten minutes; a fault or a stall before the fallback's own note.
+- The MCP server (`ledgr_mcp.py` `writer_state`): the spool's times, `store.json`'s and the claim in
+  Herdr's `shared.json` decide ok, behind (`writer: "idle"`, not waited for) or stalled (`writer:
+  "stalled"`). An event *waits* when it is over 5 s old and `store.json` has not been written since it
+  arrived; only then does the claim count, since a claim is as old as the last beat (hours old after the
+  machine slept, while the writer works). Waiting with a writer at work (a fresh claim whose pass or
+  start is in a step for under 90 s: starting, or draining a backlog after a relaunch) is behind;
+  otherwise stalled when the event has waited over 90 s, or the claim is gone, not renewed for 3 min,
+  stuck in one step, or backing off. A `shared.json` caught mid-write counts as not known. Stalled,
+  `declare_asks` and `resolve_asks` stay `ok: true` and
+  say plainly that the items (or closures) are queued, not shown, and that the agent should tell the
+  user the writer is not applying events and list the items in its reply; `writer_status` gives the
+  numbers. The server's instructions gain one sentence for it.
+- The doctor (`setup/ledgr_setup.py` `writer_report`): the claim's step, last pass and last restart,
+  the spool's count and oldest event against `store.json`'s time, by the same rule (the claim counts
+  only when an event waits; a writer at work on a backlog is not a problem); a stall (or an event the
+  writer does not apply) is a problem with the numbers and what to do (relaunch Herdr).
+- From the review, also: `start` writes nothing to the store or the config after an await unless it is
+  still the latest, and sweeps only once it knows it still holds the claim (a copy that lost the race no
+  longer removes the holder's copy); the tick checks its generation after every await; the config and
+  identity-map watch is one per generation with limited reads, and the tick reads every map record's
+  space again once a minute; `decisions.md` and `archive/*.jsonl` are appended through
+  `spool.js` `writeAtomicWith`, which makes the text again from each read (`writeAtomic`'s retry wrote
+  the first read's text over lines that landed meanwhile), and an archived item's line is never added
+  twice. Known limit, documented (BUILD-NOTES-mod.md 18.5): a batch's branch launch, close, resume or
+  retry is not started again when its pass dies after its save.
+- Tests: `test_writer.mjs` 252 checks (+186: a pass whose mv ran and never answered, seen, restarted,
+  nothing applied twice; a given-up save whose mv runs late and lands nothing; the reader's
+  `abandon` and a role lost between unlinks; a timed-out large write; an event that waits; the
+  back-off, doubling, then a restart that works; a takeover with the old pass settling late; writer.log's
+  bound; and the review's: a sweep that cannot list fails the start and no event is lost, an old pass
+  whose copy lands after the generation changed moves nothing in, a lost start race, the config watch
+  and the map rescan, appends kept, a panel's fallback restarted by its own tick); `test_settings.mjs`
+  743 (+31: the panel ticks, replaces and looks for its fallback, its status line); `test_mcp.py` 118
+  (+20: behind, stalled, an old event while the writer moves, resolve stalled and behind, the claim
+  counted only when an event waits: after a sleep, a relaunch backlog, a half-written `shared.json`, a
+  stuck pass, a stale, missing or backing-off claim; the instruction, the constant); `setup/tests` 119
+  (+22, the same cases for the doctor). The guards were mutated one at a time and a test failed for each
+  (BUILD-NOTES-mod.md 18.6).
+
+### f45b5ed: the writer past 1 MiB
 
 - ledgr froze for every session at 15:35: Herdr's `writeTextFile` refuses a file over 1 MiB, and a
   nine-item `asks` event took `store.json` from 1,041,470 to 1,049,830 bytes. The writer caught the

@@ -3,13 +3,24 @@
 // {view: "host"}, role "host"), or any other mod that carries a copy of the engine (an overlay's
 // tab bar, role = its name). The ledgr panel runs one only as a fallback (role "panel") when no
 // host writer answers its ping.
-//   - claims shared("ledgr.writer") = {id, by, at, fault?, failed?}; whoever holds the key writes,
-//     nobody else. The holder renews it every tick (a heartbeat: an `at` older than two minutes means
-//     no writer is running) and whenever its health changes: `fault` while store.json cannot be written,
-//     `failed` = the events kept in spool/failed (the panel's status line says both, words.js).
+//   - claims shared("ledgr.writer") = {id, by, at, fault?, failed?, pass?, done?, stall?}; whoever holds
+//     the key writes, nobody else. The holder renews it every tick (a heartbeat: an `at` older than two
+//     minutes means no writer is running) and whenever its health changes: `fault` while store.json cannot
+//     be written or the writer is stuck, `failed` = the events kept in spool/failed (the panel's status
+//     line says both, words.js); `pass` = {at, step, since}, the pass (or start) running at that beat and
+//     the step it waits in, `done` = when the last pass ended, `stall` = the watchdog's last finding.
 //     Hosts elect one writer among themselves: a host that starts later takes over; a host that
 //     lost the role takes it back (re-reading store.json first) when the claim is empty or held by
 //     a panel fallback; a host that goes away releases it (release(), from the View's close);
+//   - the watchdog (2026-11-19: a pass hung after saving store.json and held the spool for hours while
+//     the tick kept the claim fresh): a pass or a start that has waited in one step longer than
+//     PASS_STUCK_MS, or a spool event older than that while no pass runs, is stuck. The holder says so in
+//     its claim and writer.log, gives the pass up (a new generation: nothing the old one awaits can apply,
+//     save or unlink anything when it settles, if ever) and starts again from store.json on disk
+//     (unstick, regain); after MAX_UNSTICKS restarts with no pass finished it backs off, keeping the claim
+//     and saying so, and tries again at growing intervals (backOff, cooling). Another host takes over a
+//     claim that has not moved for TAKEOVER_STUCK_MS (probe), and so does a shown panel (writerWanted).
+//     Every await of a save is limited (SAVE_TIMEOUT_MS, spool.js within): one with no answer is a fault;
 //   - loads store.json before reading or unlinking any spool file;
 //   - ingests ledgr-data/spool with watchFolder, writes store.json after every change and before
 //     unlinking the files it applied (past Herdr's 1 MiB text-file cap through spool.js writeLarge);
@@ -42,47 +53,120 @@ import { randomUUID } from "crypto";
 import { shared, setShared, readTextFile, writeTextFile, watchFolder, agents, terminals, panes, run, exec, hc, openOverlay, appHome, home } from "herdr";
 import { DEFAULTS, loadConfig, dataDir, spoolDir, turnPath, storePath, binDir, agentLabel, panelPlace, panelShown, showPanel, liveHome, disabledSpaces, terminalSpace, textScaleOf } from "./config.js";
 import { Store, isHuman, thresholdOf } from "./store.js";
-import { SpoolReader, readMap, writeAtomic, overCap, countFailed } from "./spool.js";
+import { SpoolReader, readMap, writeAtomic, writeAtomicWith, overCap, countFailed, listSpool, within, spanWords } from "./spool.js";
 import { maxDepthOf, hcRunArgs, claudeArgv, resumeArgs, transcriptPathOf } from "./branch.js";
 
 export const ENGINE_FILES = ["config.js", "store.js", "spool.js", "writer.js", "branch.js", "confluence.js"];
 const DAY = 86400e3;
 const squash = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
 const plain = (s) => squash(String(s ?? "").replace(/[`*_#>]+/g, ""));
+const base = (p) => String(p).split("/").pop();
+const iso = (ms) => (ms ? new Date(ms).toISOString() : "-");
+
+// A pass (or a start) that has waited in one step longer than this is stuck (2026-11-19). Each step is
+// one await that takes milliseconds when the host answers; every await of a save is limited to
+// SAVE_TIMEOUT_MS and an exec to Herdr's 30 s by default, so 90 s is three times the longest limited wait
+// and still under the two minutes after which a claim nobody renews counts as abandoned. The holder's
+// watchdog runs on its 60 s tick, so a stuck pass is seen 90 to 150 s after its step began.
+export const PASS_STUCK_MS = 90000;
+// Another host takes over a fresh claim whose pass has not moved for this long: the holder's own
+// watchdog (above) would have restarted it by 150 s, so it is not running that code, or it cannot.
+export const TAKEOVER_STUCK_MS = 240000;
+// Each await of a save that waits on the host: writeTextFile, the temporary copy, its read-back, the mv
+// (also exec's own timeout), snapshot.json; and the start's reads.
+export const SAVE_TIMEOUT_MS = 20000;
+// Restarts in a row with no pass finished between them; past this, the copy waits before the next one
+// (backOff): BACKOFF_MS after the first wait, doubling to BACKOFF_MAX_MS. It keeps the role and says so
+// in its claim meanwhile, because with one host nobody else would take it, and a stuck claim is one
+// another host or the panel takes over (claimStuck).
+export const MAX_UNSTICKS = 3;
+export const BACKOFF_MS = 300000;
+export const BACKOFF_MAX_MS = 1800000;
+// How often a shown panel looks again for a writer when the claim is gone or stuck (panel.js render).
+export const WRITER_CHECK_MS = 15000;
+// ledgr-data/log/writer.log keeps its last this many bytes.
+export const WRITER_LOG_MAX = 65536;
+// The temporary copies writeLarge makes beside store.json and snapshot.json.
+const LARGE_TMP = /^\.(store|snapshot)\.json\.large-/;
 
 // Replaces path with text past writeTextFile's 1 MiB (spool.js TEXT_FILE_MAX): fs.writeFile to a
 // dotfile beside it, read back and compared (a short write never replaces the file), then `mv -f` over
 // it (one rename, so a reader sees the old file or the new one, never half of one). The mod has no
 // rename of its own; the mv is here, in the writer, because a reading copy starts no process
 // (tests/test_no_keystrokes.py rule 13). Resolves null, or the error's text (the temporary file is
-// removed and path is left as it was).
-export async function writeLarge(path, text) {
+// removed and path is left as it was). Each step waits at most `ms` (within, with `cx`'s timer; the mv
+// also with exec's own timeout), so a host that never answers is an error, not a hang; `ok()` is asked
+// right before the mv, the one step that touches path, so a save its writer gave up never moves in;
+// `step(s)` names each wait (the writer's watchdog and writer.log).
+export async function writeLarge(path, text, { cx = null, ms = SAVE_TIMEOUT_MS, ok = null, step = null } = {}) {
   const cut = String(path).lastIndexOf("/");
   const rand = Math.floor(Math.random() * 0x100000).toString(16).padStart(5, "0");
   const tmp = `${path.slice(0, cut)}/.${path.slice(cut + 1)}.large-${Date.now()}-${rand}`;
+  const mark = (s) => { try { step?.(s); } catch { /* diagnostics only */ } };
   try {
-    await fs.writeFile(tmp, text);
-    const back = await fs.readFile(tmp, "utf8");
+    mark("temporary copy");
+    await within(cx, ms, fs.writeFile(tmp, text), "writing the temporary copy");
+    mark("read back");
+    const back = await within(cx, ms, fs.readFile(tmp, "utf8"), "reading the temporary copy back");
     if (back !== text) throw new Error(`the temporary copy read back ${back.length} of ${text.length} characters`);
-    const r = await exec("/bin/mv", ["-f", tmp, path]);
+    if (ok && !ok()) throw new Error("given up before the move (a newer writer pass owns the file)");
+    mark("mv");
+    const r = await within(cx, Math.round(ms * 1.1), exec("/bin/mv", ["-f", tmp, path], { timeout: ms }), "mv");   // exec's own limit first
     if (r?.code !== 0) throw new Error(`mv exited ${r?.code}${r?.stderr ? `: ${String(r.stderr).trim().slice(0, 160)}` : ""}`);
     return null;
   } catch (e) {
-    await fs.unlink(tmp).catch(() => {});
+    await within(cx, ms, fs.unlink(tmp), "removing the temporary copy").catch(() => {});
     return String(e?.message ?? e);
   }
 }
 
 // A file the writer derives (snapshot.json) replaced whole, whatever its size: writeAtomic under the
-// cap, else (over it, or an old copy over it that writeTextFile cannot compare) writeLarge.
-export async function writeWhole(path, text) {
-  if (!overCap(text) && (await writeAtomic(path, text))) return true;
-  return (await writeLarge(path, text)) === null;
+// cap, else (over it, or an old copy over it that writeTextFile cannot compare) writeLarge. opts as
+// writeLarge's; the compare-and-swap path is limited to opts.ms as a whole.
+export async function writeWhole(path, text, opts = {}) {
+  const ms = opts.ms ?? SAVE_TIMEOUT_MS;
+  if (!overCap(text) && (await within(opts.cx, ms, writeAtomic(path, text), `writing ${base(path)}`).catch(() => false))) return true;
+  if (opts.ok && !opts.ok()) return false;
+  return (await writeLarge(path, text, opts)) === null;
 }
 
 export function writerClaim() {
   const w = shared("ledgr.writer");
   return w && typeof w === "object" && w.id ? w : null;
+}
+
+// How long a claim's holder has not moved, as its claim says (ms; 0 when it is moving or says nothing):
+// its pass or start in one step since pass.since; or, with neither running (backing off, or a restart that
+// never began), a stall it has not come back from. A restart in progress has a pass of its own, so it is
+// moving. A claim is renewed every 60 s, so this can be up to a minute too long; TAKEOVER_STUCK_MS allows
+// for that.
+export function claimStuck(w, now = Date.now()) {
+  if (!w || typeof w !== "object") return 0;
+  const p = w.pass && Number(w.pass.since) ? now - Number(w.pass.since) : 0;
+  const st = !w.pass && w.stall && typeof w.stall === "object" && !w.stall.ok && w.stall.kind !== "spool"
+    ? now - Number(w.stall.at || now) + Number(w.stall.ms || 0) : 0;
+  return Math.max(0, p, st);
+}
+
+// The watchdog's finding as the claim's `fault` says it (words.js says it on the status line).
+export function stallText(st, now = Date.now()) {
+  if (!st) return null;
+  if (st.kind === "spool") return `${st.name ?? "a spool event"} has waited ${spanWords(st.ms)} in the spool and is not applied (log/writer.log)`;
+  if (st.retryAt) return `stuck ${spanWords(st.ms)} in ${st.step}; ${st.tries} restarts in a row finished no pass, the next in ${spanWords(Number(st.retryAt) - now)} (log/writer.log)`;
+  return `stuck ${spanWords(st.ms)} in ${st.step}; restarting the writer (log/writer.log)`;
+}
+
+// The panel's two writer questions (panel.js, 2026-11-19), pure. fallbackDead: its fallback Writer is
+// there, not retired, and neither writing, starting nor waiting out a back-off (a start that threw or
+// that its watchdog gave up while another copy held the role): checkWriter replaces it. writerWanted: no
+// claim holds the role, or its holder (not the panel's own fallback, whose watchdog the panel ticks) has
+// not moved for TAKEOVER_STUCK_MS: the panel looks for a writer (checkWriter), at most every WRITER_CHECK_MS.
+export function fallbackDead(fb, now = Date.now()) {
+  return Boolean(fb) && !fb.retired && !fb.started && !fb.starting && !(Number(fb.coolUntil) > now);
+}
+export function writerWanted(w, fb, now = Date.now()) {
+  if (fb && !fb.retired && (fb.starting || (w && w.id === fb.id))) return false;
+  return !w || claimStuck(w, now) > TAKEOVER_STUCK_MS;
 }
 
 export class Writer {
@@ -93,7 +177,8 @@ export class Writer {
     this.live = new Store(null);
     this.storeText = null;          // store.json as last read or written (writeTextFile's expected)
     this.writeChain = Promise.resolve(true);
-    this.reader = new SpoolReader((batch, cx) => this.applyBatch(batch, cx), () => this.beat());
+    this.reader = new SpoolReader((batch, cx, pass) => this.applyBatch(batch, cx, pass), () => this.beat(),
+      () => this.amWriter(), () => { if (this.claimedPass) this.beat(); });
     this.started = false;
     this.retired = false;
     this.passages = new Map();
@@ -103,13 +188,40 @@ export class Writer {
     this.note = null;               // last problem, for a host that shows one
     this.fault = null;              // store.json could not be written (published in the claim)
     this.claimAt = 0;
+    this.claimedPass = false;       // the last claim carried a pass: renew it when that pass ends
+    // The watchdog (2026-11-19). gen: the generation; a pass, a save or a loop of an older one changes
+    // nothing more (current()). starting / startAt / startStep / startSince: a start running, the step it
+    // waits in. saveStep: {step, since}, the await the save chain waits in (null when idle). stall: the last
+    // finding, {at, step, ms, n, kind: "pass" | "start" | "spool", ok, back?, name?, retryAt?, tries?}.
+    // coolUntil: backing off until then (backOff), no restart before it.
+    this.gen = 0;
+    this.coolUntil = 0;
+    this.cx = null;                 // the latest AsyncContext (start, tick, a pass): the limits' timer
+    this.starting = false;
+    this.startAt = 0;
+    this.startStep = null;
+    this.startSince = 0;
+    this.saveStep = null;
+    this.saveTimeout = SAVE_TIMEOUT_MS;
+    this.stall = null;
+    this.stalls = 0;
+    this.unstickRun = 0;            // restarts since a pass last finished
+    this.lastUnstick = 0;
+    this.waitedOn = null;           // the spool event a restart was already tried for
+    this.logChain = Promise.resolve();
   }
 
   claim() {
     this.claimAt = Date.now();
     const w = { id: this.id, by: this.role, at: this.claimAt };
-    if (this.fault) w.fault = this.fault;
+    const stuck = this.stall && !this.stall.ok ? stallText(this.stall) : null;
+    if (stuck || this.fault) w.fault = stuck ?? this.fault;
     if (this.reader?.failed > 0) w.failed = this.reader.failed;
+    const p = this.progress();
+    if (p) w.pass = p;
+    this.claimedPass = Boolean(p);
+    if (this.reader?.done) w.done = this.reader.done;
+    if (this.stall) w.stall = { ...this.stall };
     setShared("ledgr.writer", w);
   }
 
@@ -118,6 +230,7 @@ export class Writer {
 
   setFault(fault) {
     if (fault === this.fault) return;
+    if (fault || this.fault) this.log(fault ? `fault: ${fault}` : `fault cleared (was: ${this.fault})`);
     this.fault = fault;
     if (fault) this.note = fault;
     this.beat();
@@ -126,6 +239,69 @@ export class Writer {
   holds() { return !this.retired && writerClaim()?.id === this.id; }
   amWriter() { return this.started && this.holds(); }
   retire() { this.retired = true; }
+
+  // The pass, or the save of generation gen, may go on: still this copy's latest, and still the writer.
+  current(gen) { return gen === this.gen && this.amWriter(); }
+
+  // An await of the save chain or of a start, limited to saveTimeout (a timer of the latest cx).
+  bounded(p, what) { return within(this.cx, this.saveTimeout, p, what); }
+
+  // What this copy is waiting in now: the running pass, else a start. {at, step, since}, or null.
+  progress() {
+    const p = this.reader?.pass;
+    if (p) return { at: p.at, step: p.step, since: p.since };
+    if (this.starting) return { at: this.startAt, step: `start: ${this.startStep ?? "?"}`, since: this.startSince || this.startAt };
+    return null;
+  }
+
+  // A start is about to wait in step s.
+  mark(s) { this.startStep = s; this.startSince = Date.now(); }
+
+  // The save chain is about to wait in step s; a pass waiting on a save moves to the same step (a save
+  // that goes from step to step is moving).
+  saving(s) {
+    this.saveStep = { step: s, since: Date.now() };
+    const p = this.reader.pass;
+    if (p && String(p.step).startsWith("save")) this.reader.step(p, `save: ${s}`);
+    else if (!p && this.starting && String(this.startStep).startsWith("save")) this.mark(`save: ${s}`);
+  }
+
+  // A new generation: the running pass is given up (spool.js abandon), the save chain starts afresh (a
+  // save of the old one checks its generation before every write and gives up), and the spool watch is
+  // started again by whoever starts next (the old loop ends at its next wake). Returns the generation.
+  abandon() {
+    this.gen += 1;
+    this.reader.abandon();
+    this.writeChain = Promise.resolve(true);
+    this.saveStep = null;
+    this.watching = false;
+    this.watchingConfig = false;
+    return this.gen;
+  }
+
+  // One line in ledgr-data/log/writer.log, the file the next stall is read from (2026-11-19): this copy
+  // taking the role, finding itself stuck, restarting, giving the role up or taking it over, and store.json
+  // starting or stopping to be written. Kept to its last WRITER_LOG_MAX bytes (hook.log and mcp.log move to
+  // .1 past 1 MB; the mod has no append, so this one is rewritten whole and stays small). Never awaited by
+  // the writer's own work; its writes are limited, so one that hangs only delays the lines after it.
+  log(line) {
+    const at = Date.now();
+    const text = `${at} ${iso(at)} ${this.role} ${this.id.slice(0, 8)} ${squash(line).slice(0, 700)}\n`;
+    const path = `${dataDir()}/log/writer.log`;
+    const write = async () => {
+      await this.bounded(fs.mkdir(`${dataDir()}/log`, { recursive: true }), "writer.log").catch(() => {});
+      for (let i = 0; i < 2; i++) {
+        let cur;
+        try { cur = await this.bounded(readTextFile(path), "writer.log"); } catch { return; }
+        let next = (cur ?? "") + text;
+        if (next.length > WRITER_LOG_MAX) next = next.slice(next.indexOf("\n", next.length - WRITER_LOG_MAX) + 1);
+        try { await this.bounded(writeTextFile(path, next, cur ?? null), "writer.log"); return; }
+        catch { /* written meanwhile (another copy): once more */ }
+      }
+    };
+    this.logChain = this.logChain.then(write, write).catch(() => {});
+    return this.logChain;
+  }
 
   // This copy is going away (the View's close): give the role up so another host takes it at once.
   release() {
@@ -136,42 +312,118 @@ export class Writer {
 
   // Taking the role: claim, then load store.json before any spool file is read or unlinked.
   // Missing: start empty. Unreadable: keep a copy aside, start empty. Until loaded, amWriter()
-  // is false, so the reader leaves every spool file where it is.
+  // is false, so the reader leaves every spool file where it is. Every start is a new generation
+  // (abandon): a pass or a save of this copy's earlier tenure, or a stuck one, changes nothing more, and
+  // the store is the one on disk, whose `ingested` ids keep an event that pass applied from applying
+  // twice. A temporary copy an earlier save left beside store.json is removed before the read, so its mv,
+  // if it has not run, fails instead of replacing the file read here; a sweep that cannot prove none is
+  // left fails the start (sweep), and the watchdog tries again. Each step is limited and named (mark): a
+  // start that waits too long in one is the watchdog's, like a stuck pass. After each await nothing is
+  // written to this.live or this.cfg unless this start is still the latest (live()).
   async start(cx) {
     if (!this.booted && !(await liveHome())) { this.retired = true; this.note = "not in the app (herdr-app check): no writer"; return; }
     this.booted = true;
-    const before = writerClaim();
-    this.claim();
-    // Taking over from a live holder: let a store.json write it already started land first.
-    if (before && before.id !== this.id) await cx.sleep(500);
-    this.cfg = await loadConfig();
-    const text = await fs.readFile(storePath(), "utf8").catch(() => null);
-    try { this.live = Store.fromText(text); this.storeText = text; }
-    catch (e) {
-      this.live = new Store(null);
-      this.storeText = text;
-      const aside = `${dataDir()}/store.corrupt-${Date.now()}.json`;
-      await writeTextFile(aside, text, null).catch(() => {});
-      this.note = `store.json could not be read (${String(e?.message ?? e)}); kept as ${aside.split("/").pop()}, started empty.`;
+    const gen = this.abandon();
+    const live = () => gen === this.gen && !this.retired;
+    this.cx = cx;
+    this.starting = true;
+    this.startAt = Date.now();
+    this.mark("claim");
+    try {
+      const before = writerClaim();
+      const why = !before ? "no claim" : before.id === this.id ? (this.stall && !this.stall.ok ? "restart" : "again")
+        : `from ${before.by}${claimStuck(before) > PASS_STUCK_MS ? " (stuck)" : ""}`;
+      this.claim();
+      // Taking over from a live holder: let a store.json write it already started land first.
+      if (before && before.id !== this.id) await cx.sleep(500);
+      // Lost the race meanwhile: the holder's temporary copies are its own (a sweep here would fail its mv).
+      if (!live() || !this.holds()) return;
+      this.mark("temporary files");
+      await this.sweep();
+      if (!live()) return;
+      this.mark("config.json");
+      const cfg = await this.bounded(loadConfig(), "reading config.json").catch(() => this.cfg);
+      if (!live()) return;
+      this.cfg = cfg;
+      this.mark("store.json");
+      let text = null;
+      try { text = await this.bounded(fs.readFile(storePath(), "utf8"), "reading store.json"); }
+      catch (e) { if (e?.timedOut) throw e; }   // missing (or unreadable: not replaced, writeStoreText)
+      if (!live()) return;
+      try { this.live = Store.fromText(text); this.storeText = text; }
+      catch (e) {
+        this.live = new Store(null);
+        this.storeText = text;
+        const aside = `${dataDir()}/store.corrupt-${Date.now()}.json`;
+        await this.bounded(writeLarge(aside, text, { cx, ms: this.saveTimeout }), "keeping store.json aside").catch(() => {});
+        this.note = `store.json could not be read (${String(e?.message ?? e)}); kept as ${aside.split("/").pop()}, started empty.`;
+      }
+      if (!live() || !this.holds()) return;            // someone else claimed while we loaded
+      this.started = true;
+      this.applyConfig(this.cfg);
+      // A launch cut short by a restart: say so (a late branch_started still marks it running).
+      for (const b of Object.values(this.live.d.branches)) {
+        if (b.status === "launching" && Date.now() - (b.createdAt ?? 0) > 60000) this.live.branchLaunched(b.id, { error: "the writer restarted before the launch finished" });
+      }
+      this.mark("identity map");
+      const recs = await this.bounded(readMap(), "reading the identity map").catch(() => []);
+      if (!live()) return;
+      for (const rec of recs) this.live.applyMap(rec);
+      this.mark("save");
+      await this.saveStore();
+      if (!live()) return;
+      this.mark("drain");
+      const applied = this.reader.applied;
+      await this.reader.drain(cx);
+      if (!live()) return;
+      this.mark("spool/failed");
+      this.reader.failed = await this.bounded(countFailed(), "counting spool/failed").catch(() => this.reader.failed);
+      if (!live()) return;
+      // Back from a stuck pass or start: the claim says so (words.js, for STALL_SHOWN_MS), the fault goes.
+      const st = this.stall, back = Boolean(st && !st.ok && st.kind !== "spool");
+      if (back) { st.ok = true; st.back = Date.now(); }
+      this.log(`started (${why}), generation ${gen}: store.json ${text === null ? "missing" : `${text.length} characters`}, `
+        + `${this.reader.applied - applied} spool file(s) taken in${back ? `; back after ${spanWords(st.ms)} stuck in ${st.step}` : ""}`);
+      this.beat();
+      this.publish();
+      this.scheduleSnapshot(cx);
+      if (this.reader.missing) this.waitForSpool(cx); else this.watch(cx);
+      this.watchConfig(cx);
+      this.mark("housekeeping");
+      await this.housekeep().catch((e) => { this.note = `housekeeping: ${String(e?.message ?? e)}`; });
+      cx.notify();
+    } finally {
+      if (gen === this.gen) {
+        this.starting = false;               // startStep stays: the step a start that threw ended in
+        if (this.claimedPass) this.beat();   // the claim no longer says a start runs
+      }
     }
-    if (!this.holds()) return;            // someone else claimed while we loaded
-    this.started = true;
-    this.applyConfig(this.cfg);
-    // A launch cut short by a restart: say so (a late branch_started still marks it running).
-    for (const b of Object.values(this.live.d.branches)) {
-      if (b.status === "launching" && Date.now() - (b.createdAt ?? 0) > 60000) this.live.branchLaunched(b.id, { error: "the writer restarted before the launch finished" });
+  }
+
+  // The temporary copies an earlier save left beside store.json and snapshot.json (writeLarge's
+  // .<name>.large-*): removed, so a move of theirs that has not run yet finds nothing to move. It throws
+  // (the start fails, the watchdog tries again) unless it proves none is left: ledgr-data listed, each copy
+  // unlinked (an unlink that fails is fine when the copy is gone: its mv ran, and the read sees it), and
+  // ledgr-data listed again with none there. Once none is there, none can land later: a save makes its copy
+  // before it asks ok(), and ok() is false for every save but the new generation's (2026-11-19 review:
+  // a listing that got no answer had counted as "nothing to remove", and an old mv replaced a newer store).
+  async sweep() {
+    const tmps = async () => {
+      let names;
+      try { names = await this.bounded(fs.readdir(dataDir()), "listing ledgr-data"); }
+      catch (e) {
+        let gone = false;   // no ledgr-data yet (the first start): nothing to remove
+        if (!e?.timedOut) { try { gone = !(await this.bounded(fs.exists(dataDir()), "ledgr-data")); } catch { gone = false; } }
+        if (gone) return [];
+        throw e;
+      }
+      return names.map(base).filter((n) => LARGE_TMP.test(n));
+    };
+    for (const n of await tmps()) {
+      await this.bounded(fs.unlink(`${dataDir()}/${n}`), "removing a temporary copy").catch(() => {});
     }
-    for (const rec of await readMap()) this.live.applyMap(rec);
-    await this.saveStore();
-    await this.reader.drain(cx);
-    this.reader.failed = await countFailed();
-    this.beat();
-    this.publish();
-    this.scheduleSnapshot(cx);
-    if (this.reader.missing) this.waitForSpool(cx); else this.watch(cx);
-    this.watchConfig(cx);
-    await this.housekeep();
-    cx.notify();
+    const left = await tmps();
+    if (left.length) throw new Error(`a temporary copy could not be removed (${left.join(", ")}); its move might still replace store.json`);
   }
 
   // The config values the store applies itself (branch.maxDepth, extract.threshold, spaces.disabled),
@@ -195,22 +447,26 @@ export class Writer {
   // config.json edited (by hand, by the panel's menus, or by the hooks creating it): read it again and
   // republish the chips, so a new extract.threshold or spaces.disabled applies at once. An identity-map
   // record rewritten by the hooks (ledgr-data/terminals/<t>.json): its space (noteSpace). Wakes on
-  // every change under ledgr-data/ (the watch is recursive), reads only those files.
+  // every change under ledgr-data/ (the watch is recursive), reads only those files. One loop per
+  // generation, as the spool watch (abandon clears `watchingConfig`; an old loop ends at its next wake),
+  // its reads limited; the tick reads config.json and every map record again once a minute besides.
   watchConfig(cx) {
     if (this.watchingConfig) return;
     this.watchingConfig = true;
+    const gen = this.gen;
     cx.spawn(async (cx) => {
       const root = dataDir().replace(/\/+$/, "");
       const mapFile = /\/terminals\/[^/.][^/]*\.json$/;
       let quick = 0, lastAt = 0;
       try {
-        while (!this.retired) {
+        while (!this.retired && gen === this.gen) {
           const paths = await watchFolder(root);
+          if (gen !== this.gen) return;
           const now = Date.now();
           quick = now - lastAt < 50 ? quick + 1 : 0;
           lastAt = now;
           if (quick > 20) { quick = 0; await cx.sleep(1000); }
-          if (!this.amWriter()) continue;
+          if (!this.current(gen)) continue;
           const all = paths.some((p) => String(p).replace(/\/+$/, "") === root);
           const cfgHit = all || paths.some((p) => String(p).split("/").pop() === "config.json");
           const maps = all ? null : paths.map(String).filter((p) => mapFile.test(p));
@@ -218,28 +474,32 @@ export class Writer {
           let republish = false;
           if (cfgHit) {
             const before = this.chipKey();
-            this.applyConfig(await loadConfig());
+            const cfg = await this.bounded(loadConfig(), "reading config.json").catch(() => this.cfg);
+            if (!this.current(gen)) continue;
+            this.applyConfig(cfg);
             if (this.chipKey() !== before) republish = true;
           }
-          if ((all || maps.length) && (await this.refreshSpaces(maps)) && this.amWriter()) { this.commit(cx); continue; }
+          if ((all || maps.length) && (await this.refreshSpaces(maps, gen))) { this.commit(cx); continue; }
           if (republish) { this.publish(); cx.notify(); }
         }
-      } catch (e) { this.note = `config watch stopped: ${String(e?.message ?? e)}`; }
-      finally { this.watchingConfig = false; }
+      } catch (e) { if (gen === this.gen) this.note = `config watch stopped: ${String(e?.message ?? e)}`; }
+      finally { if (gen === this.gen) this.watchingConfig = false; }
     });
   }
 
-  // The space of each changed identity-map record (null: all of them). True when the store changed.
-  async refreshSpaces(paths) {
+  // The space of each changed identity-map record (null: all of them). True when the store changed (and
+  // generation gen is still the writer's; its reads are limited, nothing is noted after one for an older).
+  async refreshSpaces(paths, gen = this.gen) {
     let recs;
-    if (!paths) recs = await readMap();
+    if (!paths) recs = await this.bounded(readMap(), "reading the identity map").catch(() => []);
     else {
       recs = [];
       for (const p of paths) {
-        const text = await readTextFile(p).catch(() => null);
+        const text = await this.bounded(readTextFile(p), "reading the identity map").catch(() => null);
         try { const r = JSON.parse(text); if (r?.terminal && r?.session_id) recs.push(r); } catch { /* in progress */ }
       }
     }
+    if (!this.current(gen)) return false;
     let changed = false;
     for (const r of recs) if (this.live.noteSpace(r)) changed = true;
     return changed;
@@ -249,45 +509,69 @@ export class Writer {
   // if it still holds what this writer last read or wrote; on a mismatch the current file is
   // re-read and replaced while the role is held. Past writeTextFile's 1 MiB (the new text or the
   // file it replaces) through writeLarge. A failure is the writer's `fault` (the panel shows it)
-  // until a write succeeds. Chained, so writes never overlap.
+  // until a write succeeds. Chained, so writes never overlap. Every await is limited (saveTimeout) and
+  // named (saving), and a save of an older generation (the watchdog gave its pass up, or the role went
+  // elsewhere) writes nothing more, records nothing (storeText, fault) and resolves false.
   saveStore() {
+    const gen = this.gen;
     const go = async () => {
-      if (!this.amWriter()) return false;
+      if (!this.current(gen)) return false;
       const text = this.live.toText();
       if (text === this.storeText) return true;
-      await fs.mkdir(dataDir(), { recursive: true }).catch(() => {});
-      const r = await this.writeStoreText(text);
-      if (r === false) return false;                        // the role went elsewhere meanwhile
-      if (r !== true) { this.setFault(`store.json not written: ${r}`); return false; }
+      this.saving("ledgr-data");
+      await this.bounded(fs.mkdir(dataDir(), { recursive: true }), "making ledgr-data").catch(() => {});
+      if (!this.current(gen)) return false;
+      const r = await this.writeStoreText(text, gen);
+      if (!this.current(gen)) return false;                 // given up, or the role went elsewhere, meanwhile
+      if (r === false) return false;
+      if (r !== true) { this.saveStep = null; this.setFault(`store.json not written: ${r}`); return false; }
       this.storeText = text;
       this.setFault(null);
       // snapshot.json follows every store change (the extractor reads it at each Stop).
-      await writeWhole(`${dataDir()}/snapshot.json`, JSON.stringify(this.live.snapshot())).catch(() => false);
-      return true;
+      this.saving("snapshot.json");
+      const ok = () => this.current(gen);
+      await writeWhole(`${dataDir()}/snapshot.json`, JSON.stringify(this.live.snapshot()),
+        { cx: this.cx, ms: this.saveTimeout, ok, step: (s) => { if (ok()) this.saving(`snapshot.json ${s}`); } }).catch(() => false);
+      if (gen === this.gen) this.saveStep = null;
+      return this.current(gen);
     };
     this.writeChain = this.writeChain.then(go, go);
     return this.writeChain;
   }
 
-  // true written, false the role was lost, else the error's text.
-  async writeStoreText(text) {
+  // true written, false the role was lost (or generation gen given up), else the error's text. A
+  // writeTextFile that gets no answer is not tried again here: it may still land, and its compare-and-swap
+  // refuses it once store.json has changed; the next pass writes again.
+  async writeStoreText(text, gen = this.gen) {
+    const ok = () => this.current(gen);
     if (!overCap(text) && !overCap(this.storeText)) {
-      try { await writeTextFile(storePath(), text, this.storeText); return true; }
+      if (!ok()) return false;
+      this.saving("store.json writeTextFile");
+      try { await this.bounded(writeTextFile(storePath(), text, this.storeText), "writing store.json"); return true; }
       catch (e) {
-        const cur = await fs.readFile(storePath(), "utf8").catch(() => null);
-        if (!this.amWriter()) return false;
+        if (e?.timedOut) return String(e.message);
+        this.saving("store.json read again");
+        const cur = await this.bounded(fs.readFile(storePath(), "utf8"), "reading store.json again").catch(() => null);
+        if (!ok()) return false;
         if (!overCap(cur)) {
-          try { await writeTextFile(storePath(), text, cur); return true; }
+          this.saving("store.json writeTextFile again");
+          try { await this.bounded(writeTextFile(storePath(), text, cur), "writing store.json"); return true; }
           catch (e2) { return String(e2?.message ?? e2 ?? e?.message ?? e); }
         }
       }
     }
-    if (!this.amWriter()) return false;
+    if (!ok()) return false;
     // Never over a store.json this writer could not read (writeTextFile's expected null refuses that too).
-    if (this.storeText === null && (await fs.readdir(dataDir()).catch(() => [])).map((n) => String(n).split("/").pop()).includes("store.json")) {
-      return "store.json is there but was not read when the writer started; not replaced";
+    if (this.storeText === null) {
+      this.saving("store.json listing");
+      let names;
+      try { names = await this.bounded(fs.readdir(dataDir()), "listing ledgr-data"); }
+      catch (e) { if (e?.timedOut) return `${e.message}; store.json not replaced`; names = []; }
+      if (names.map(base).includes("store.json")) return "store.json is there but was not read when the writer started; not replaced";
+      if (!ok()) return false;
     }
-    return (await writeLarge(storePath(), text)) ?? true;
+    return (await writeLarge(storePath(), text, { cx: this.cx, ms: this.saveTimeout, ok,
+      step: (s) => { if (ok()) this.saving(`store.json ${s}`); } })) ?? true;
   }
 
   commit(cx) {
@@ -297,31 +581,36 @@ export class Writer {
     cx.notify();
   }
 
+  // The spool watch of this generation: a loop that waited on a pass the watchdog gave up ends at its
+  // next wake, and the next start begins a new one (abandon clears `watching`).
   watch(cx) {
     if (this.watching) return;
     this.watching = true;
+    const gen = this.gen;
     cx.spawn(async (cx) => {
       let quick = 0, lastAt = 0;
       try {
-        while (!this.retired) {
+        while (!this.retired && gen === this.gen) {
           await watchFolder(spoolDir());
+          if (gen !== this.gen) return;
           const now = Date.now();
           quick = now - lastAt < 50 ? quick + 1 : 0;
           lastAt = now;
           if (quick > 20) { quick = 0; await cx.sleep(1000); }   // a watch that never blocks
           if (this.amWriter()) await this.reader.drain(cx);
         }
-      } catch (e) { this.note = `spool watch stopped: ${String(e?.message ?? e)}`; }
-      finally { this.watching = false; }
+      } catch (e) { if (gen === this.gen) this.note = `spool watch stopped: ${String(e?.message ?? e)}`; }
+      finally { if (gen === this.gen) this.watching = false; }
     });
   }
 
   // Until the hooks (or a capture) create ledgr-data/spool, look for it every 5 s.
-  waitForSpool(cx) {
+  waitForSpool(cx, gen = this.gen) {
     cx.timer.after(5000, async (cx) => {
-      if (!this.amWriter()) return;
+      if (gen !== this.gen || !this.amWriter()) return;
       await this.reader.drain(cx);
-      if (this.reader.missing) this.waitForSpool(cx);
+      if (gen !== this.gen) return;
+      if (this.reader.missing) this.waitForSpool(cx, gen);
       else { this.watch(cx); cx.notify(); }
     });
   }
@@ -329,16 +618,25 @@ export class Writer {
   // Applies a batch of spool events (SpoolReader). An event whose apply throws is left out whole:
   // the store goes back to what it was before the batch and the batch is applied again without it
   // (an event is never half applied), and the reader moves it to spool/failed. Returns false (not
-  // the writer, or store.json not written: every file stays), true, or {failed}.
-  async applyBatch(batch, cx) {
-    if (!this.amWriter()) return false;
+  // the writer, or store.json not written: every file stays), true, or {failed}. Each await is a step
+  // of `pass`, and after each one a pass the watchdog gave up (or a lost role) returns false at once:
+  // what it applied lives only in a Store the next start no longer uses.
+  async applyBatch(batch, cx, pass = null) {
+    const gen = this.gen;
+    const live = () => this.current(gen);
+    if (!live()) return false;
+    if (cx) this.cx = cx;
+    const step = (s) => this.reader.step(pass, s);
     const settles = [], retries = [], launches = [], decisions = [], closes = [], resumes = [];
     let newAsks = false, pending = false;
     // branch.maxDepth is read again when a branch is asked for (watchConfig also follows the file).
     if (batch.some(({ ev }) => ev?.type === "branch")) {
-      this.applyConfig(await loadConfig());
-      if (!this.amWriter()) return false;
+      step("apply: config.json");
+      const cfg = await this.bounded(loadConfig(), "reading config.json").catch(() => this.cfg);
+      if (!live()) return false;
+      this.applyConfig(cfg);
     }
+    step("apply");
     const failed = [], before = this.live.toText();
     let done;
     for (;;) {
@@ -367,12 +665,21 @@ export class Writer {
       if (ev?.type === "asks" && Array.isArray(ev.asks) && ev.asks.length && !this.offEvent(ev)) newAsks = true;
       if (ev?.type === "pending") pending = true;
     }
-    for (const s of settles) await this.reanchor(s);
+    for (const s of settles) {
+      step("apply: re-anchor");
+      await this.reanchor(s, live, () => step("apply: re-anchor"));
+      if (!live()) return false;
+    }
     // decisions.md before store.json: a batch that fails to save is applied again later, and the
     // append skips a branch whose line is already there.
-    for (const d of decisions) await this.appendDecision(d);
+    for (const d of decisions) {
+      step("apply: decisions.md");
+      await this.bounded(this.appendDecision(d), "writing decisions.md").catch(() => { this.note = `decisions.md not written for ${String(d.sid).slice(0, 8)}`; });
+      if (!live()) return false;
+    }
     // store.json first: the reader unlinks these files only when this resolves true.
-    if (!(await this.saveStore())) return false;
+    step("save");
+    if (!(await this.saveStore()) || !live()) return false;
     this.publish();
     if (pending) cx.timer.after(30500, (cx) => { this.publish(); cx.notify(); });   // pending times out
     this.scheduleSnapshot(cx);
@@ -398,7 +705,9 @@ export class Writer {
   // message, the saved turns are searched backward (spec 5.3). Pins (docs/design/Pins.md 2.4): a pin
   // found on the screen (verified "screen") settled at turn N is looked for the same way; found at n,
   // its anchor moves there (approx false); not found, it stays at N, approx. Either way, once.
-  async reanchor({ sid, turn, textPath }) {
+  // Each turn read is limited (an unanswered one counts as not found, and is not cached); live() false
+  // (the pass was given up) stops at the next read; moved() at each read keeps the pass's step fresh.
+  async reanchor({ sid, turn, textPath }, live = () => true, moved = () => {}) {
     const items = this.live.itemsOf(sid).filter((it) => isHuman(it) && it.anchor?.quote && it.anchor.turn === turn && !it.anchor.reanchored);
     const pins = this.live.pinsOfSession(sid).filter((p) => p.anchor?.verified === "screen" && p.anchor.turn === turn && !p.anchor.reanchored);
     if (!items.length && !pins.length) return;
@@ -406,7 +715,10 @@ export class Writer {
       const k = `${sid}:${n}`;
       if (this.passages.has(k)) return this.passages.get(k);
       const p = n === turn && textPath ? (textPath.startsWith("/") ? textPath : `${dataDir()}/${textPath}`) : turnPath(sid, n);
-      const txt = await readTextFile(p).catch(() => null);
+      moved();
+      let txt;
+      try { txt = await this.bounded(readTextFile(p), `reading turn ${n}`); }
+      catch (e) { return e?.timedOut ? null : (this.passages.set(k, null), null); }
       this.passages.set(k, txt);
       if (this.passages.size > 120) this.passages.delete(this.passages.keys().next().value);
       return txt;
@@ -415,6 +727,7 @@ export class Writer {
       const q = plain(it.anchor.quote);
       for (let n = turn; n >= Math.max(0, turn - 50); n--) {
         const txt = await read(n);
+        if (!live()) return;
         if (txt && plain(txt).includes(q)) { if (n !== turn) { it.anchor.turn = n; it.anchor.reanchoredFrom = turn; } break; }
       }
       it.anchor.reanchored = true;
@@ -424,6 +737,7 @@ export class Writer {
       let found = null;
       for (let n = turn; q && n >= Math.max(0, turn - 50); n--) {
         const txt = await read(n);
+        if (!live()) return;
         if (txt && plain(txt).includes(q)) { found = n; break; }
       }
       if (found === null) p.anchor.approx = true;
@@ -523,9 +837,9 @@ export class Writer {
     if (!this.amWriter() || !sid || /[/\\]|\.\./.test(sid)) return false;
     const dir = `${dataDir()}/sessions/${sid}`, path = `${dir}/decisions.md`;
     await fs.mkdir(dir, { recursive: true }).catch(() => {});
-    const cur = (await readTextFile(path).catch(() => null)) ?? "";
-    if (key && cur.includes(key)) return true;
-    const ok = await writeAtomic(path, `${cur || header || ""}${line}\n`);
+    if (!this.amWriter()) return false;
+    // Made again from the file at each try (writeAtomicWith), so a line that landed meanwhile is kept.
+    const ok = await writeAtomicWith(path, (cur) => (key && cur.includes(key) ? null : `${cur || header || ""}${line}\n`));
     if (!ok) this.note = `decisions.md not written for ${String(sid).slice(0, 8)}`;
     return ok;
   }
@@ -625,9 +939,11 @@ export class Writer {
   scheduleSnapshot(cx) {
     if (this.snapDone) return;
     this.snapDone = true;
+    const gen = this.gen;
     cx.spawn(async () => {
-      if (!this.amWriter() || !(await fs.exists(dataDir()).catch(() => false))) return;
-      await writeWhole(`${dataDir()}/snapshot.json`, JSON.stringify(this.live.snapshot()));
+      if (!this.current(gen) || !(await this.bounded(fs.exists(dataDir()), "ledgr-data").catch(() => false))) return;
+      const ok = () => this.current(gen);
+      await writeWhole(`${dataDir()}/snapshot.json`, JSON.stringify(this.live.snapshot()), { cx: this.cx, ms: this.saveTimeout, ok });
     });
   }
 
@@ -635,7 +951,8 @@ export class Writer {
   async housekeep() {
     const now = Date.now();
     const last = Number(this.live.d.houseAt) || 0;
-    if (now - last < DAY || !this.amWriter() || !(await fs.exists(dataDir()).catch(() => false))) return;
+    if (now - last < DAY || !this.amWriter() || !(await this.bounded(fs.exists(dataDir()), "ledgr-data").catch(() => false))) return;
+    const gen = this.gen;
     this.live.d.houseAt = now;
     const old = this.live.archivable(Number(this.cfg.retention_days) || 14, now);
     const byMonth = new Map();
@@ -644,33 +961,165 @@ export class Writer {
       const k = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
       byMonth.set(k, [...(byMonth.get(k) ?? []), it]);
     }
-    if (old.length) await fs.mkdir(`${dataDir()}/archive`, { recursive: true }).catch(() => {});
+    if (old.length) await this.bounded(fs.mkdir(`${dataDir()}/archive`, { recursive: true }), "making archive/").catch(() => {});
     for (const [k, list] of byMonth) {
+      if (!this.current(gen)) return;
       const path = `${dataDir()}/archive/${k}.jsonl`;
-      const cur = (await readTextFile(path).catch(() => null)) ?? "";
-      if (await writeAtomic(path, cur + list.map((it) => JSON.stringify(it)).join("\n") + "\n")) this.live.removeItems(list);
+      // An item's line once: one already there (an earlier write that got no answer and landed) is not
+      // added again; made again from the file at each try (writeAtomicWith).
+      const lines = list.map((it) => JSON.stringify(it));
+      const add = (cur) => {
+        const have = new Set(cur.split("\n"));
+        const fresh = lines.filter((l) => !have.has(l));
+        return fresh.length ? `${cur}${cur && !cur.endsWith("\n") ? "\n" : ""}${fresh.join("\n")}\n` : null;
+      };
+      if (await this.bounded(writeAtomicWith(path, add), `writing archive/${k}.jsonl`).catch(() => false)
+        && this.current(gen)) this.live.removeItems(list);
     }
     await this.saveStore();
   }
 
-  // The host's 60 s timer: safety rescan, the heartbeat (the claim renewed with the writer's
-  // health), deferred items waking, housekeeping. A host that does not hold the role checks instead
-  // that the holder is alive (probe).
+  // The host's 60 s timer: a back-off first (cooling), then the watchdog (a pass or a start stuck in one
+  // step: restarted, nothing else this tick), then the safety rescan, the waiting check, the heartbeat (the
+  // claim renewed with the writer's health and its pass), deferred items waking, config.json and every
+  // identity-map record read again (the safety net for watchConfig), housekeeping. After each await nothing
+  // more unless this tick's generation is still the writer's. A host that does not hold the role checks
+  // instead that the holder is alive (probe).
   tick(cx) {
+    this.cx = cx;
+    if (this.cooling(cx)) return;
+    if (this.watchdog(cx)) return;
     if (!this.amWriter()) { this.probe(cx); return; }
+    const gen = this.gen;
     cx.spawn(async (cx) => {
       await this.reader.drain(cx);
-      this.reader.failed = await countFailed();
+      if (!this.current(gen)) return;
+      const failed = await this.bounded(countFailed(), "counting spool/failed").catch(() => this.reader.failed);
+      if (!this.current(gen)) return;
+      this.reader.failed = failed;
+      if ((await this.checkWaiting(cx, gen)) || !this.current(gen)) return;
       this.beat();
       if (!this.watching && this.reader.missing === false) this.watch(cx);
+      if (!this.watchingConfig) this.watchConfig(cx);
       const changed = this.live.wake();
-      // The safety net for watchConfig (a watch that stopped): config.json once a minute.
       const before = this.chipKey();
-      this.applyConfig(await loadConfig());
+      const cfg = await this.bounded(loadConfig(), "reading config.json").catch(() => this.cfg);
+      if (!this.current(gen)) return;
+      this.applyConfig(cfg);
       if (this.chipKey() !== before) this.publish();
-      await this.housekeep();
-      if (changed) this.commit(cx); else this.publish();
+      const spaces = await this.refreshSpaces(null, gen);
+      if (!this.current(gen)) return;
+      await this.housekeep().catch((e) => { this.note = `housekeeping: ${String(e?.message ?? e)}`; });
+      if (!this.current(gen)) return;
+      if (changed || spaces) this.commit(cx); else this.publish();
     });
+  }
+
+  // Backing off (backOff): no restart before coolUntil. Meanwhile a copy that still holds the claim renews
+  // it each tick with the finding and when it tries again, so the panel, the doctor and the MCP server say
+  // so, and another host or the panel takes a claim that does not move (claimStuck). At coolUntil it starts
+  // again if nobody holds the role, it still does, a panel's fallback does (a host takes the role back, as
+  // in respond), or the holder has not moved. True while backing off or just done (nothing else this tick).
+  cooling(cx) {
+    if (!this.coolUntil) return false;
+    if (this.retired) return true;
+    if (Date.now() < this.coolUntil) { if (this.holds()) this.claim(); return true; }
+    this.coolUntil = 0;
+    const w = writerClaim();
+    if (!w || w.id === this.id || (w.by === "panel" && this.role !== "panel") || claimStuck(w) > TAKEOVER_STUCK_MS) {
+      this.log(`back-off over: starting again (${!w ? "no claim" : w.id === this.id ? "the role is still this copy's" : `from ${w.by}`})`);
+      this.regain(cx);
+    }
+    return true;
+  }
+
+  // The watchdog, from tick (sync: it runs even while every await of the writer waits). Stuck: this
+  // copy's pass, or its start, has waited in one step longer than PASS_STUCK_MS (progress()); or a start
+  // ended without starting while this copy holds the claim (it threw: a read that got no answer). Then
+  // unstick. A start of a copy that does not hold the claim is given up too, without taking the role.
+  watchdog(cx) {
+    if (this.retired || !this.booted) return false;
+    const now = Date.now(), p = this.progress();
+    let f = null;
+    if (p && now - p.since > PASS_STUCK_MS && (this.starting || this.amWriter())) {
+      f = { step: p.step, ms: now - p.since, kind: this.reader.pass ? "pass" : "start" };
+    } else if (!this.starting && !this.started && this.holds() && this.startAt) {
+      f = { step: `start: ${this.startStep ?? "?"} (it ended without starting)`, ms: now - this.startAt, kind: "start" };
+    }
+    if (!f) return false;
+    this.unstick(cx, f);
+    return true;
+  }
+
+  // Stuck (watchdog, checkWaiting): the finding goes in the claim (`stall`, and `fault` until it comes
+  // back) and writer.log with what the save chain waits in; the pass is given up (a new generation) and,
+  // while this copy holds the claim, it starts again from store.json (regain). The run of restarts with
+  // no pass finished between them is counted; past MAX_UNSTICKS this copy backs off before the next.
+  unstick(cx, { step, ms, kind, name = null }) {
+    const now = Date.now(), p = this.reader.pass;
+    if (this.reader.done > this.lastUnstick) this.unstickRun = 0;
+    this.unstickRun += 1;
+    this.lastUnstick = now;
+    this.stalls += 1;
+    this.stall = { at: now, step, ms, n: this.stalls, kind, ok: false, ...(name ? { name } : {}) };
+    this.log(`stuck ${spanWords(ms)} in ${step} (${kind}; pass started ${iso(p?.at)}; save chain `
+      + `${this.saveStep ? `in ${this.saveStep.step} since ${iso(this.saveStep.since)}` : "idle"}; last pass ended ${iso(this.reader.done)}; `
+      + `generation ${this.gen}; restart ${this.unstickRun} of ${MAX_UNSTICKS})`);
+    const held = this.holds();
+    this.abandon();
+    this.starting = false;
+    this.started = false;
+    if (this.unstickRun > MAX_UNSTICKS) { this.backOff(held); return; }
+    if (held) this.regain(cx);
+  }
+
+  // MAX_UNSTICKS restarts in a row finished no pass: restarting at once does not help. The copy waits
+  // BACKOFF_MS before the next, then twice that each time, up to BACKOFF_MAX_MS (cooling), and keeps
+  // trying for as long as Herdr runs: with one host (the public install, or an overlay's tab bar) and the
+  // panel hidden, nobody else would take the role, and the cause may pass (2026-11-19 review: giving the
+  // role up left the chips frozen and the status line silent until a relaunch). It keeps the claim, which
+  // says it is stuck and when it tries again (stallText): the status line, the doctor and the MCP server say
+  // so, and another host's probe or the panel's check takes over a claim that has not moved. The events
+  // wait in the spool meanwhile, nothing lost; relaunching Herdr starts the copy afresh at once.
+  backOff(held) {
+    const wait = Math.min(BACKOFF_MAX_MS, BACKOFF_MS * 2 ** Math.max(0, this.unstickRun - MAX_UNSTICKS - 1));
+    this.coolUntil = Date.now() + wait;
+    Object.assign(this.stall, { retryAt: this.coolUntil, tries: this.unstickRun - 1 });
+    this.log(`${this.unstickRun - 1} restarts in a row finished no pass; the next in ${spanWords(wait)}. The claim stays and says so; `
+      + "another host or the panel takes over a claim that does not move, and relaunching Herdr starts this copy afresh");
+    this.note = `the writer is stuck (log/writer.log); it tries again in ${spanWords(wait)}, or relaunch Herdr`;
+    if (held) this.claim();
+  }
+
+  // The second criterion (2026-11-19): the spool's oldest event (its name starts with the time it was
+  // written) older than PASS_STUCK_MS while no pass runs means the passes do not apply it. A save fault is
+  // on the status line already and keeps every file waiting, so it is left to that. The first time for a
+  // file: unstick (true: restarted). The same file still waiting at a later tick: said in the claim (kind
+  // "spool"), not restarted again; gone, or no longer old: the finding comes back (ok).
+  async checkWaiting(cx, gen) {
+    if (this.fault || this.reader.running) return false;
+    const names = await this.bounded(listSpool(), "listing the spool").catch(() => null);
+    if (!this.current(gen) || this.reader.running || !names) return false;
+    const oldest = names[0] ?? null, now = Date.now();
+    const age = oldest ? now - Number(oldest.split("-")[0]) : NaN;
+    const st = this.stall;
+    if (!(age > PASS_STUCK_MS)) {
+      if (st && !st.ok && st.kind === "spool") { st.ok = true; st.back = now; this.log(`${st.name} no longer waits in the spool`); }
+      this.waitedOn = null;
+      return false;
+    }
+    if (this.waitedOn !== oldest) {
+      this.waitedOn = oldest;
+      this.unstick(cx, { step: `the spool (${oldest} waits)`, ms: age, kind: "spool", name: oldest });
+      return true;
+    }
+    if (st && !st.ok && st.kind === "spool" && st.name === oldest) st.ms = age;
+    else {
+      this.stalls += 1;
+      this.stall = { at: now, step: `the spool (${oldest} waits)`, ms: age, n: this.stalls, kind: "spool", ok: false, name: oldest };
+      this.log(`${oldest} still waits in the spool after a restart (${spanWords(age)}); not restarted again`);
+    }
+    return false;
   }
 
   // From the host's render (it re-renders when agents change). Working -> idle with no stop
@@ -710,7 +1159,7 @@ export class Writer {
   // role takes it when nobody does or a panel fallback does, re-reading store.json first (another
   // writer changed it meanwhile). Without a cx (an older host), it only answers pings.
   respond(cx) {
-    if (this.retired || this.role === "panel" || this.starting) return;
+    if (this.retired || this.role === "panel" || this.starting || this.coolUntil) return;   // backing off: cooling decides
     const w = writerClaim(), ping = shared("ledgr.ping");
     if (this.started && this.holds()) {
       if (ping && Number(ping.at) > this.claimAt) this.claim();
@@ -722,12 +1171,21 @@ export class Writer {
 
   // A holder that went away without releasing (a crash, a forced quit) leaves a claim nobody
   // answers. A host that does not hold the role pings, at most every 2 minutes after the claim was
-  // last refreshed, and takes the role when the claim is not renewed within 4 s.
+  // last refreshed, and takes the role when the claim is not renewed within 4 s. A fresh claim whose
+  // pass has not moved for TAKEOVER_STUCK_MS (claimStuck: its holder is alive but not applying, and its
+  // own watchdog did not restart it) is taken at once.
   probe(cx) {
-    if (this.retired || this.role === "panel" || !this.booted || this.starting || !cx) return;
+    if (this.retired || this.role === "panel" || !this.booted || this.starting || this.coolUntil || !cx) return;
     const w = writerClaim();
     if (!w || w.by === "panel") { this.regain(cx); return; }
-    if (w.id === this.id || Date.now() - Number(w.at || 0) < 120000 || this.probing) return;
+    if (w.id === this.id) return;
+    const stuck = claimStuck(w);
+    if (stuck > TAKEOVER_STUCK_MS) {
+      this.log(`taking the role from ${w.by}: its claim is fresh but it has not moved for ${spanWords(stuck)} (${w.pass?.step ?? w.stall?.step ?? "?"})`);
+      this.regain(cx);
+      return;
+    }
+    if (Date.now() - Number(w.at || 0) < 120000 || this.probing) return;
     const at = Date.now();
     this.probing = true;
     setShared("ledgr.ping", { at, id: this.id });
@@ -738,11 +1196,16 @@ export class Writer {
     });
   }
 
+  // Take the role (again): start, which makes a new generation and reads store.json from disk; it
+  // clears `starting` when it ends (a start that hangs is the watchdog's).
   regain(cx) {
     this.starting = true;
     this.started = false;
+    this.startAt = this.startSince = Date.now();
+    this.startStep = "queued";
     cx.spawn(async (cx) => {
-      try { await this.start(cx); } finally { this.starting = false; }
+      try { await this.start(cx); }
+      catch (e) { this.note = `writer start: ${String(e?.message ?? e)}`; this.log(`start failed: ${String(e?.message ?? e)}`); }
       cx.notify();
     });
   }

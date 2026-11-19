@@ -271,6 +271,9 @@ def main():
           "user personally must do, decide, provide or review" in r.get("instructions", "")
           and "your own subagents" in r.get("instructions", "") and "\"I need\"" in r.get("instructions", ""),
           r.get("instructions"))
+    check("instructions: a writer that is not applying events: say so and list the items in the reply",
+          "When a ledgr tool says its writer is not applying events, the user cannot see these items in ledgr yet: "
+          "say so and list them in your reply as well." in r.get("instructions", ""), r.get("instructions"))
     check("notifications/initialized: no response", c.silent())
     r = c.req("initialize", {"protocolVersion": "1999-01-01", "capabilities": {}, "clientInfo": {"name": "x"}})["result"]
     check("initialize: an unknown version is answered with the newest legacy one (2025-11-25)", r.get("protocolVersion") == "2025-11-25", r)
@@ -575,6 +578,152 @@ def main():
     fw.stop = True
     fw.join(2)
     check("server 2 exits 0", c.close() == 0)
+    take_events()
+
+    print("== the writer not applying events (2026-11-19)")
+    # The writer held a fresh claim and applied nothing for hours, and declare_asks still said the items
+    # would appear in the panel. writer_state reads the spool's times, store.json's, and the claim Herdr
+    # saved in shared.json (LEDGR_DATA's parent here, as Herdr's home is ledgr-data's).
+    spool, store, shared = os.path.join(DATA, "spool"), os.path.join(DATA, "store.json"), os.path.join(ROOT, "shared.json")
+    os.makedirs(spool, exist_ok=True)
+    wjson(store, {"v": 1})
+    src = open(SERVER, encoding="utf-8").read()
+    wjs = open(os.path.join(os.path.dirname(BIN), "writer.js"), encoding="utf-8").read()
+    m1, m2 = re.search(r"^WRITER_STALL_S = (\d+)$", src, re.M), re.search(r"^export const PASS_STUCK_MS = (\d+);$", wjs, re.M)
+    check("WRITER_STALL_S is writer.js PASS_STUCK_MS", m1 and m2 and int(m1.group(1)) * 1000 == int(m2.group(1)), [m1 and m1.group(0), m2 and m2.group(0)])
+
+    def queued(age):
+        t = time.time() - age
+        p = os.path.join(spool, f"{int(t * 1000)}-prompt-1-{os.urandom(3).hex()}.json")
+        wjson(p, {"v": 1, "id": os.urandom(4).hex(), "type": "prompt"})
+        os.utime(p, (t, t))
+
+    def store_age(age):
+        t = time.time() - age
+        os.utime(store, (t, t))
+
+    c = Client(wait_ms=2000)
+    c.init()
+    set_map("t99", SID, 9)
+    ask9 = [{"level": "blocking", "kind": "decide", "text": "Pick the cache size"}]
+    queued(20)
+    store_age(60)
+    t0 = time.monotonic()
+    r = c.call("declare_asks", {"items": ask9})
+    dt, sc, tx = time.monotonic() - t0, r.get("structuredContent") or {}, text(r)
+    check("behind (an event 20 s old, nothing written since): not waited for, said as behind, no word of a stall",
+          sc.get("writer") == "idle" and (sc.get("writer_status") or {}).get("state") == "behind" and dt < 1.5
+          and "Handles are pending: ledgr's writer is behind (the oldest queued event is 20 s old)" in tx and "not applying" not in tx
+          and sc.get("ok") is True and not r.get("isError") and tx.splitlines()[-1] == sc.get("pointer"), [sc, tx, dt])
+    take_events()
+    queued(300)
+    queued(200)
+    store_age(400)
+    t0 = time.monotonic()
+    r = c.call("declare_asks", {"items": ask9})
+    dt, sc, tx = time.monotonic() - t0, r.get("structuredContent") or {}, text(r)
+    ws = sc.get("writer_status") or {}
+    check("stalled (events 5 min old, store.json older): ok and not an error (a retry changes nothing), handles null, not waited for",
+          sc.get("ok") is True and not r.get("isError") and sc.get("writer") == "stalled" and sc.get("handles") == [None] and dt < 1.5
+          and sc.get("pointer") == "ledgr: 1 item for you, 1 blocking" and len(spool_files()) == 3, [sc, dt])
+    check("stalled: writer_status has the numbers (3 queued, ours included; the oldest 300 s; store.json 400 s) and why",
+          ws.get("state") == "stalled" and ws.get("queued") == 3 and 299 < (ws.get("oldest_s") or 0) < 330
+          and (ws.get("store_s") or 0) > 399 and "the oldest for 5 min" in (ws.get("why") or ""), ws)
+    check("stalled: the text says the writer is not applying, the items are queued and not shown, and to tell the user and list them",
+          "ledgr's writer is not applying events (3 events queued, the oldest for 5 min, and store.json last written 7 min ago)." in tx
+          and "These items are queued, not shown to the user: the panel does not have them." in tx
+          and "Tell the user in your reply that ledgr's writer is not applying events (relaunching Herdr restarts it; nothing queued is lost)" in tx
+          and "list these items in your reply this time" in tx and "Handles are pending" not in tx and "do not list these items in prose" not in tx
+          and tx.splitlines()[-2:] == ["Then end your reply with this line:", "ledgr: 1 item for you, 1 blocking"], tx)
+    take_events()
+    queued(300)
+    store_age(10)
+    r = c.call("declare_asks", {"items": ask9})
+    sc, tx = r.get("structuredContent") or {}, text(r)
+    check("an old event, but store.json written since it arrived (the writer moves): waited for as usual, not stalled",
+          sc.get("writer") == "timeout" and (sc.get("writer_status") or {}).get("state") == "ok" and "not applying" not in tx
+          and "Handles are pending: ledgr's writer has not applied the event yet" in tx, [sc, tx])
+    take_events()
+    snap_path = os.path.join(DATA, "snapshot.json")
+    snap = rjson(snap_path, {"v": 1, "items": []})
+    snap["items"].append({"id": "rq_a30", "handle": "A30", "direction": "agent_to_human", "text": "Pick the port", "level": "blocking",
+                          "kind": "decide", "status": "open", "origin": "tool", "anchor": {"sessionId": SID, "turn": 9}})
+    wjson(snap_path, snap)
+    queued(300)
+    store_age(400)
+    r = c.call("resolve_asks", {"handles": ["A30"]})
+    sc, tx = r.get("structuredContent") or {}, text(r)
+    check("resolve_asks, stalled: closed as asked (its event queued), the text says so and to tell the user; ok, not an error",
+          sc.get("resolved") == ["A30"] and sc.get("writer") == "stalled" and (sc.get("writer_status") or {}).get("state") == "stalled"
+          and "ledgr's writer is not applying events (2 events queued, the oldest for 5 min" in tx
+          and "These closures are queued: the panel still shows the asks open." in tx
+          and "Tell the user in your reply that ledgr's writer is not applying events" in tx and "has not applied this yet" not in tx
+          and sc.get("ok") is True and not r.get("isError"), [sc, tx])
+    take_events()
+    queued(20)
+    store_age(60)
+    r = c.call("resolve_asks", {"handles": ["A30"]})
+    sc, tx = r.get("structuredContent") or {}, text(r)
+    check("resolve_asks, behind: said as behind, no word of a stall",
+          sc.get("writer") == "idle" and "ledgr's writer is behind (the oldest queued event is 20 s old); the panel shows them closed once it applies them." in tx
+          and "not applying" not in tx, [sc, tx])
+    # The claim counts only when an event waits (over 5 s old, store.json not written since it arrived):
+    # a claim is as old as the writer's last beat, hours old after the machine slept while the writer works
+    # (2026-11-19 review: a claim 2 h old over an empty spool read as stalled).
+    def claim_case(claim, ages=(30,), store=60, raw=None):
+        take_events()
+        for a in ages:
+            queued(a)
+        store_age(store)
+        if raw is not None:
+            open(shared, "w").write(raw)
+        elif claim is None:
+            wjson(shared, {"layout": "custom"})
+        else:
+            wjson(shared, {"layout": "custom", "ledgr.writer": claim})
+        r = c.call("declare_asks", {"items": ask9})
+        return r.get("structuredContent") or {}, text(r)
+
+    now_ms = int(time.time() * 1000)
+    sc, tx = claim_case({"id": "w1", "by": "my-tabs", "at": now_ms - 7200000, "done": now_ms - 3000}, ages=(), store=3)
+    check("after a sleep: a claim 2 h old, nothing waiting, store.json written 3 s ago: waited for as usual, not stalled",
+          sc.get("writer") == "timeout" and (sc.get("writer_status") or {}).get("state") == "ok" and "not applying" not in tx, [sc, tx])
+    sc, tx = claim_case({"id": "w1", "by": "my-tabs", "at": now_ms - 7200000}, ages=(1,), store=3)
+    check("...and with an event 1 s old: still not stalled", sc.get("writer") != "stalled" and "not applying" not in tx, [sc, tx])
+    sc, tx = claim_case({"id": "w2", "by": "my-tabs", "at": now_ms, "pass": {"at": now_ms - 2000, "step": "start: store.json", "since": now_ms - 2000}},
+                        ages=(600, 600, 600), store=86400)
+    check("just relaunched with a backlog (events 10 min old, store.json a day old, the writer starting 2 s): behind, not stalled",
+          sc.get("writer") == "idle" and (sc.get("writer_status") or {}).get("state") == "behind" and "writer is behind" in tx
+          and "not applying" not in tx, [sc, tx])
+    sc, tx = claim_case(None, raw='{"ledgr.writer": {"id": "w", "by": "my-t')
+    check("shared.json caught mid-write, an event waiting 30 s: behind (the claim is not known), not \"no writer\"",
+          sc.get("writer") == "idle" and "no writer holds the role" not in tx, [sc, tx])
+    sc, tx = claim_case({"id": "w1", "by": "my-tabs", "at": now_ms, "pass": {"at": now_ms - 200000, "step": "save: store.json mv", "since": now_ms - 200000}})
+    cl = (sc.get("writer_status") or {}).get("claim") or {}
+    check("a fresh claim whose pass has waited 200 s in one step, an event waiting 30 s: stalled, with the step",
+          sc.get("writer") == "stalled" and "ledgr's writer is not applying events (its writer (my-tabs) has waited 3 min in save: store.json mv)" in tx
+          and cl.get("by") == "my-tabs" and cl.get("step") == "save: store.json mv" and 199 < (cl.get("step_s") or 0) < 230, [sc, tx])
+    sc, tx = claim_case({"id": "w1", "by": "my-tabs", "at": now_ms - 400000})
+    check("a claim nobody renewed for 7 min, an event waiting 30 s: stalled", sc.get("writer") == "stalled"
+          and "its writer (my-tabs) has not renewed its claim for 7 min" in tx, tx)
+    sc, tx = claim_case(None)
+    check("Herdr's shared state holds no claim, an event waiting 30 s: stalled, no writer", sc.get("writer") == "stalled"
+          and "no writer holds the role" in tx, tx)
+    sc, tx = claim_case({"id": "w1", "by": "my-tabs", "at": now_ms, "fault": "stuck …",
+                         "stall": {"at": now_ms - 300000, "step": "save: store.json mv", "ms": 95000, "ok": False, "kind": "pass", "retryAt": now_ms + 60000, "tries": 3}})
+    check("a writer backing off (its claim fresh, no pass), an event waiting 30 s: stalled", sc.get("writer") == "stalled"
+          and "its writer (my-tabs) is stuck in save: store.json mv and waits before it tries again" in tx, tx)
+    sc, tx = claim_case({"id": "w1", "by": "my-tabs", "at": now_ms - 400000}, ages=())
+    check("the same stale claim with nothing waiting: not stalled", sc.get("writer") == "timeout" and "not applying" not in tx, [sc, tx])
+    sc, tx = claim_case({"id": "w1", "by": "my-tabs", "at": now_ms, "done": now_ms - 1000,
+                         "stall": {"at": now_ms - 300000, "step": "save: store.json mv", "ms": 95000, "ok": True, "kind": "pass"}}, ages=(), store=60)
+    check("a fresh, moving claim (a stall it came back from): waited for as usual, not stalled",
+          sc.get("writer") == "timeout" and "not applying" not in tx, [sc, tx])
+    os.unlink(shared)
+    snap["items"] = [it for it in snap["items"] if it.get("handle") != "A30"]
+    wjson(snap_path, snap)
+    os.unlink(store)
+    check("server 3 exits 0", c.close() == 0)
     take_events()
 
     print("== identity")

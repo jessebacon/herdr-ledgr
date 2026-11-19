@@ -107,8 +107,13 @@ nothing: no spool event, no `mcp/<session>/<turn>.json`. `declare_asks` returns 
 need from the user in your reply`; `resolve_asks` closes nothing (`resolved`, `unknown`,
 `already_closed` empty); `open_asks` and `parked_questions` list nothing. Each such call logs one
 `off <tool> <sid> turn=… space=… by=ledgr_off|spaces.disabled` line. The tools stay listed (a space can
-be switched on mid-session), and the server's `instructions` end with: when a ledgr tool answers
-`off: true`, list what you need from the user in your reply instead.
+be switched on mid-session), and the server's `instructions` say: when a ledgr tool answers
+`off: true`, list what you need from the user in your reply instead. Their last sentence (2026-11-19)
+covers a writer that is not applying events: "When a ledgr tool says its writer is not applying events,
+the user cannot see these items in ledgr yet: say so and list them in your reply as well." It is in the
+server's instructions only, not in `lib/asks-instruction-*.txt`: only a tool result can say the writer
+is stalled, and it says what to do itself; the sentence keeps the instructions' "instead of a closing
+list" from contradicting that result.
 
 ## declare_asks
 
@@ -136,9 +141,35 @@ provide, review. `repeat_of` takes a handle from `open_asks`. There are at most 
 - Handles are assigned by the writer, not here. After emitting, the server waits up to
   `LEDGR_MCP_WAIT_MS` (default 2500) for its spool file to disappear. The writer unlinks a file only
   after saving `store.json` and `snapshot.json`. The server then reads the handles from
-  `snapshot.json` by normalised text, preferring this turn's anchor. If the writer is not running
-  (any spool file older than 5 s), the server does not wait, and the handles come back null and are
-  reported as pending.
+  `snapshot.json` by normalised text, preferring this turn's anchor. Before it waits, `writer_state`
+  reads what the spool's file times, `store.json`'s time and the writer's claim (as Herdr keeps it in
+  `shared.json`, in Herdr's home beside `ledgr-data`) say (2026-11-19, when a writer held a fresh claim
+  and applied nothing for hours):
+  An event *waits* when it is over 5 s old (not counting this call's own file) and `store.json` has not
+  been written since it arrived. Only then does the claim count: a claim is as old as the writer's last
+  beat, so after the machine slept it is hours old while the writer works (2026-11-19 review: a claim
+  2 h old over an empty spool read as stalled). A `shared.json` that does not parse (caught mid-write)
+  counts as not known.
+  - `ok`: no event waits. The server waits; `writer` is `applied` or `timeout` ("Handles are pending:
+    ledgr's writer has not applied the event yet; they appear in the panel.").
+  - `behind`: an event waits, and either the claim shows a writer at work (fresh, its pass or start in
+    a step for under 90 s: starting, or draining a backlog after a relaunch) or nothing says more yet.
+    No wait; `writer: "idle"`; "Handles are pending: ledgr's writer is behind (the oldest queued event
+    is 20 s old); they appear in the panel once it applies them."
+  - `stalled`: an event waits and no writer is at work: it has waited over `WRITER_STALL_S` (90 s, the
+    writer's `PASS_STUCK_MS`); or `shared.json` holds no claim, or one nobody renewed for 3 minutes, or
+    one whose pass has waited 90 s in one step, or one that says the writer is stuck with nothing
+    running (backing off). After a wait that timed out, the same test with this call's own event. No wait;
+    `writer: "stalled"`. The result stays `ok: true` (a retry changes nothing; the event waits in the
+    spool and is applied once a writer runs) and says it plainly: "ledgr's writer is not applying
+    events (3 events queued, the oldest for 5 min, and store.json last written 7 min ago). These items
+    are queued, not shown to the user: the panel does not have them." and "Tell the user in your reply
+    that ledgr's writer is not applying events (relaunching Herdr restarts it; nothing queued is lost),
+    and list these items in your reply this time.", then "Then end your reply with this line:" and the
+    pointer line.
+  Unless `writer` is `applied`, the result carries `writer_status`: `{state, queued, oldest_s, store_s,
+  why?, claim?: {by, age_s, step?, step_s?, fault?}}`. The server's instructions say what to do with a
+  stalled writer in one sentence: say so and list the items in the reply as well.
 - The turn's declaration is kept in `ledgr-data/mcp/<session>/<turn>.json` (the last 50 turns per
   session): `{v, session_id, terminal, turn, calls, event_ids, synthetic, pointer, asks, handles}`.
   `asks` holds the asks exactly as the last event sent them, every field included: `text`, `kind`,
@@ -188,14 +219,15 @@ once, and at most 30 are read. A single string, or the array sent as JSON text, 
   is not a string, or the identity check refuses the call.
 - `note` is squashed to one line and cut at 200 characters. It goes on each event only when given.
 - The server then waits for the writer the way `declare_asks` does (`LEDGR_MCP_WAIT_MS`, no wait when
-  the spool holds a file older than 5 s) and says `writer`: `applied`, `timeout` or `idle` (null when
-  nothing was sent). Unless it is `applied`, the text says the panel shows the asks closed once the
-  writer applies them.
+  `writer_state` says behind or stalled) and says `writer`: `applied`, `timeout`, `idle` (behind) or
+  `stalled` (null when nothing was sent), with `writer_status` unless applied. Timeout or behind, the
+  text says the panel shows the asks closed once the writer applies them; stalled, that the closures are
+  queued, the panel still shows the asks open, and to tell the user the writer is not applying events.
 - One `mcp.log` line per call: `resolve <sid> turn=… resolved=[…] already_closed=[…] unknown=[…]
   note=yes|no events=N writer=…`.
 
 The result: `{ok, session_id, turn, synthetic, resolved: ["A4"], unknown: ["A99"], already_closed:
-["A3"], event_ids, writer, [notes], [note]}`, and a text such as `ledgr closed A4 as resolved by the
+["A3"], event_ids, writer, [writer_status], [notes], [note]}`, and a text such as `ledgr closed A4 as resolved by the
 agent (turn 12); the user can reopen any of them in the panel.`
 
 The event, one per closed ask (`turn` is null on a synthetic session the store does not have yet):
@@ -313,7 +345,7 @@ runtime first probes stdio servers for revision 2026-07-28, and the v1 runtime (
 
 ## Tests
 
-`tests/test_mcp.py` (96 checks, in `tests/run-all.sh`) spawns the server over real stdio with a
+`tests/test_mcp.py` (118 checks, in `tests/run-all.sh`) spawns the server over real stdio with a
 scratch `LEDGR_DATA` and covers the following:
 
 - both handshakes, `tools/list`, the error codes, a batch;
@@ -327,6 +359,14 @@ scratch `LEDGR_DATA` and covers the following:
   reported as already closed, unknown handles (another session's, a question) reported, bad input,
   and through the fake writer `resolvedBy: "agent"` and a second call finding it closed;
 - handles through a fake writer, including `replaces_turn` keeping a handle;
+- the writer not applying events (2026-11-19): behind (not waited for, said as behind), stalled by the
+  spool (ok, not an error, `writer: "stalled"`, `writer_status` with the numbers, the text that says the
+  items are queued and to tell the user and list them), an old event while `store.json` moves on (waited
+  for as usual), `resolve_asks` stalled and behind, and by the claim in a scratch `shared.json`, counted
+  only when an event waits (after a sleep: a claim 2 h old over nothing waiting, or a 1 s old event; a
+  relaunch backlog with the writer starting; a half-written `shared.json`; a pass stuck in one step, a
+  claim nobody renewed, no claim, a writer backing off, each with an event waiting 30 s; a moving claim);
+  `WRITER_STALL_S` agrees with `writer.js` `PASS_STUCK_MS`; the instructions' sentence;
 - the no-map fallback, and the map appearing later;
 - a live other owner, a child agent, a dead owner, another config folder;
 - `LEDGR_INNER`, no terminal id, `LEDGR_TERMINAL`;

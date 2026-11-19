@@ -502,6 +502,71 @@ try {
     panel.setThreshold("optional", cx); await drain(cx);
     A.ok(panel.flash.includes(R.CONFIG_STALE), "a stale write from the panel says so too"); A.equal(cfgFile().extract?.threshold, undefined, "nothing written over it"); }
 
+  // ── the panel's fallback writer (2026-11-19 review) ─────────────────────
+  // The panel ticks its fallback whenever it is there and not retired (its watchdog runs while it restarts
+  // or backs off), replaces one that is neither writing, starting nor backing off, says so when no claim
+  // holds the role, and looks for a writer from render when the claim is gone or stuck (not only when shown).
+  reset({ files: {} });
+  { const P = await import(`${dir}/panel.js`), WRm = await import(`${dir}/writer.js`);
+    H().props = { view: "panel" };
+    const cx = mkcx(), panel = new P.Panel({}, cx);
+    await drain(cx);
+    panel.inApp = true;                                   // as in the app (startReading found Herdr's home)
+    let reads = 0; panel.tickRead = () => { reads++; };
+    const fake = (o = {}) => ({ id: "fb-" + Math.random(), role: "panel", retired: false, started: false, starting: false, coolUntil: 0, ticks: 0, writing: false, note: null,
+      tick() { this.ticks++; }, amWriter() { return this.writing; }, holds() { return false; }, retire() { this.retired = true; }, track() {}, release() {}, ...o });
+    const fb = fake({ starting: true });
+    panel.writer = fb;
+    panel.tick(cx);
+    A.equal(fb.ticks, 1, "a restarting fallback is ticked (its watchdog runs)"); A.equal(reads, 1, "...and the panel reads, since it is not the writer");
+    fb.writing = true; panel.tick(cx);
+    A.equal(fb.ticks, 2, "a writing fallback is ticked"); A.equal(reads, 1, "...and the panel does not read besides");
+    fb.writing = false; fb.retired = true; panel.tick(cx);
+    A.equal(fb.ticks, 2, "a retired fallback is not ticked"); A.equal(reads, 2);
+    // checkWriter: a dead fallback replaced; one starting or backing off kept.
+    const dead = fake();
+    A.equal(WRm.fallbackDead(dead), true); A.equal(WRm.fallbackDead(fake({ starting: true })), false); A.equal(WRm.fallbackDead(fake({ started: true })), false);
+    A.equal(WRm.fallbackDead(fake({ coolUntil: Date.now() + 60000 })), false); A.equal(WRm.fallbackDead(fake({ retired: true })), false); A.equal(WRm.fallbackDead(null), false);
+    panel.writer = dead; H().shared["ledgr.writer"] = null;
+    panel.checkWriter(cx);
+    A.ok(H().shared["ledgr.ping"]?.at, "checkWriter pings");
+    await drain(cx, 5000);
+    A.equal(dead.retired, true, "a fallback neither writing, starting nor backing off is retired");
+    A.ok(panel.writer instanceof WRm.Writer && panel.writer.role === "panel" && panel.writer !== dead, "...and replaced by a new fallback writer");
+    for (const keep of [fake({ starting: true }), fake({ coolUntil: Date.now() + 60000 })]) {
+      panel.writer = keep; panel.checkWriter(cx); await drain(cx, 5000);
+      A.equal(panel.writer, keep, `a fallback ${keep.starting ? "starting" : "backing off"} is kept`); A.equal(keep.retired, false);
+    }
+    // render: a fresh claim, nothing; no claim, the status line says so and the panel looks for a writer.
+    panel.writer = null;
+    const fresh = { id: "h1", by: "host", at: Date.now() };
+    H().shared["ledgr.writer"] = fresh; panel.checkedAt = Date.now();
+    draw(panel, cx); cx.timers = []; cx.tasks = [];
+    let r = draw(panel, cx);
+    A.equal(cx.timers.length, 0, "a fresh claim: no writer check"); A.ok(!r.all.includes(W.NO_WRITER));
+    H().shared["ledgr.writer"] = null; panel.checkedAt = 0;
+    r = draw(panel, cx);
+    A.ok(r.all.includes(W.NO_WRITER), "no claim holds the role: the status line says so");
+    A.equal(cx.timers.length, 1, "...and the panel looks for a writer, though it was not just shown");
+    draw(panel, cx); A.equal(cx.timers.length, 1, `not again within WRITER_CHECK_MS (${WRm.WRITER_CHECK_MS} ms)`);
+    // A claim that has not moved past TAKEOVER_STUCK_MS: a check, and its words before the fallback's note.
+    cx.timers = []; panel.checkedAt = 0; panel.writerNote = "No host writer answered: this panel is ingesting (fallback writer).";
+    const t0 = Date.now();
+    H().shared["ledgr.writer"] = { id: "h1", by: "host", at: t0, pass: { at: t0 - 300000, step: "save: store.json mv", since: t0 - 300000 } };
+    r = draw(panel, cx);
+    A.equal(cx.timers.length, 1, "a claim stuck past TAKEOVER_STUCK_MS: the panel looks for a writer");
+    A.ok(r.all.includes("ledgr writer: no progress for 5 min (in save: store.json mv)") && !r.all.includes("No host writer answered"), "...its words shown before the fallback's note");
+    // The panel's own fallback, stuck: its watchdog's (ticked), no check of the panel's.
+    cx.timers = []; panel.checkedAt = 0; panel.writerNote = null;
+    const own = fake({ id: "fb-own", coolUntil: Date.now() + 60000 });
+    panel.writer = own;
+    H().shared["ledgr.writer"] = { id: "fb-own", by: "panel", at: t0, stall: { at: t0 - 600000, step: "save: store.json mv", ms: 95000, ok: false, kind: "pass", retryAt: t0 + 60000, tries: 3 } };
+    r = draw(panel, cx);
+    A.equal(cx.timers.length, 0, "its own fallback's claim: left to that fallback's watchdog");
+    A.ok(r.all.includes("ledgr writer stuck in save: store.json mv: 3 restarts in a row did not help; it tries again in 60 s"), "...and the status line says it backs off");
+    A.equal(WRm.writerWanted(null, null), true); A.equal(WRm.writerWanted(fresh, null), false);
+    A.equal(WRm.writerWanted(null, fake({ starting: true })), false, "a fallback starting: wait for it"); }
+
   // ── ledgr.settings with the panel hidden (2026-11-10) ───────────────────
   // A ledgr command reaches shown copies only: the host block (the public install) opens the dialog when it
   // holds the writer and the panel is hidden; an overlay host with an engine copy (my-tabs) does it on its

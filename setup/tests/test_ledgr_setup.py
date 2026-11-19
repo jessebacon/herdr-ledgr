@@ -8,6 +8,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import ledgr_setup as L  # noqa: E402
@@ -488,9 +489,117 @@ def test_recipe():
         shutil.rmtree(root)
 
 
+def test_writer_report():
+    """--check's writer report (2026-11-19): a fresh claim is no proof the writer applies events."""
+    root, ctx, _ = scratch()
+    try:
+        spool = os.path.join(ctx.data, "spool")
+        os.makedirs(spool)
+        store = os.path.join(ctx.data, "store.json")
+        write(store, "{}")
+        now = time.time()            # ago() reads the clock itself
+
+        def at(path, t):
+            os.utime(path, (t, t))
+
+        def queue(n, oldest, step=1.0):
+            for i in range(n):
+                p = os.path.join(spool, f"{int((oldest + i * step) * 1000)}-asks-1-{i:06x}.json")
+                write(p, "{}")
+                at(p, oldest + i * step)
+
+        def clear():
+            for n in os.listdir(spool):
+                os.unlink(os.path.join(spool, n))
+
+        def report(shared, running=True):
+            return L.writer_report(ctx, {"shared": shared, "running": running}, now=now)
+
+        claim = {"ledgr.writer": {"id": "w1", "by": "my-tabs", "at": (now - 20) * 1000, "done": (now - 30) * 1000}}
+        ok(L.stall_bound_s() == 90.0, "the stall bound is writer.js PASS_STUCK_MS (90 s)")
+        at(store, now - 30)
+        lines, probs = report(claim)
+        ok(probs == [] and any("held by my-tabs (claimed 20 s ago); last pass ended 30 s ago" in x for x in lines)
+           and any("0 events waiting; store.json written 30 s ago" in x for x in lines), f"healthy: {lines} {probs}")
+        queue(1, now - 20)
+        at(store, now - 60)
+        ok(report(claim)[1] == [], "an event 20 s old: behind, not a problem")
+        clear()
+        # The incident: the claim renewed 20 s ago, 103 events waiting for 3 h, store.json not written since.
+        queue(103, now - 3 * 3600, step=60)
+        at(store, now - 3 * 3600 - 5)
+        lines, probs = report(claim)
+        ok(any("held by my-tabs (claimed 20 s ago)" in x for x in lines) and any("103 events waiting, the oldest from 3 h ago; store.json written 3 h ago" in x for x in lines),
+           f"the incident: the claim and the numbers: {lines}")
+        ok(len(probs) == 1 and probs[0].startswith("the writer is not applying events: 103 events waiting, the oldest for 3 h 0 min, and store.json last written 3 h 0 min ago.")
+           and "Relaunch Herdr" in probs[0] and "nothing waiting is lost" in probs[0] and "writer.log" in probs[0], f"the incident is a problem, with what to do: {probs}")
+        lines, probs = report(claim, running=False)
+        ok(probs == [] and any("Herdr is not running: they wait for its writer" in x for x in lines), f"Herdr not running: they wait, no problem: {lines} {probs}")
+        lines, probs = report({}, running=False)
+        ok(probs == [] and any("no claim yet (Herdr is not running)" in x for x in lines), "no claim, Herdr not running: no problem")
+        clear()
+        # An event that waits while the writer moves on: named.
+        queue(1, now - 600)
+        at(store, now - 30)
+        probs = report(claim)[1]
+        ok(len(probs) == 1 and "has waited 10 min while the writer applies the rest" in probs[0] and "-asks-1-000000.json" in probs[0],
+           f"an event the writer does not apply is named: {probs}")
+        clear()
+        # The claim itself counts only when an event waits (over 5 s, store.json not written since it
+        # arrived): a claim is as old as the writer's last beat, hours old after the machine slept while the
+        # writer works (2026-11-19 review). Each case once with nothing waiting (no problem), once with an
+        # event 30 s old and store.json older (a problem).
+        def waiting(on):
+            clear()
+            if on:
+                queue(1, now - 30)
+                at(store, now - 60)
+            else:
+                at(store, now - 3)
+        stuck = {"ledgr.writer": {"id": "w1", "by": "my-tabs", "at": (now - 20) * 1000,
+                                  "pass": {"at": (now - 200) * 1000, "step": "save: store.json mv", "since": (now - 200) * 1000},
+                                  "fault": "stuck 95 s in save: store.json mv; restarting the writer (log/writer.log)"}}
+        restarting = {"ledgr.writer": {"id": "w1", "by": "my-tabs", "at": (now - 5) * 1000,
+                                       "stall": {"at": (now - 5) * 1000, "step": "start: store.json", "ms": 95000, "ok": False, "kind": "start"}}}
+        backing = {"ledgr.writer": {"id": "w1", "by": "my-tabs", "at": (now - 5) * 1000,
+                                    "stall": {"at": (now - 400) * 1000, "step": "save: store.json mv", "ms": 95000, "ok": False, "kind": "pass",
+                                              "retryAt": (now + 200) * 1000, "tries": 3}}}
+        old = {"ledgr.writer": {"id": "w1", "by": "my-tabs", "at": (now - 600) * 1000}}
+        slept = {"ledgr.writer": {"id": "w1", "by": "my-tabs", "at": (now - 7200) * 1000, "done": (now - 7200) * 1000}}
+        for name, claim, want in (("a pass stuck in one step", stuck, "my-tabs has waited 3 min in save: store.json mv"),
+                                  ("a stall not come back from", restarting, "my-tabs is stuck in start: store.json"),
+                                  ("a writer backing off", backing, "my-tabs is stuck in save: store.json mv and waits before it tries again"),
+                                  ("a claim nobody renewed", old, "my-tabs's claim has not been renewed for 10 min"),
+                                  ("a claim 2 h old (the machine slept)", slept, "my-tabs's claim has not been renewed for 2 h 0 min")):
+            waiting(False)
+            lines, probs = report(claim)
+            ok(probs == [], f"{name}, nothing waiting: no problem (the claim alone proves nothing): {probs}")
+            waiting(True)
+            lines, probs = report(claim)
+            ok(len(probs) == 1 and want in probs[0] and "Relaunch Herdr" in probs[0], f"{name}, an event waiting 30 s: a problem: {probs}")
+        waiting(False)
+        lines, _ = report(stuck)
+        ok(any("in save: store.json mv for 3 min" in x for x in lines) and any("! writer fault  stuck 95 s" in x for x in lines), f"the claim's step and fault are shown: {lines}")
+        # Just relaunched with a backlog: events 10 min old, store.json a day old, the writer starting 2 s ago.
+        clear()
+        queue(3, now - 600)
+        at(store, now - 86400)
+        starting = {"ledgr.writer": {"id": "w2", "by": "my-tabs", "at": now * 1000, "pass": {"at": (now - 2) * 1000, "step": "start: store.json", "since": (now - 2) * 1000}}}
+        lines, probs = report(starting)
+        ok(probs == [] and any("at work (start: store.json): 3 events to apply" in x for x in lines), f"a writer at work on a backlog: behind, no problem: {lines} {probs}")
+        clear()
+        back = {"ledgr.writer": {"id": "w1", "by": "my-tabs", "at": (now - 5) * 1000,
+                                 "stall": {"at": (now - 300) * 1000, "back": (now - 299) * 1000, "step": "save: store.json mv", "ms": 95000, "ok": True, "kind": "pass"}}}
+        lines, probs = report(back)
+        ok(probs == [] and any("restarted 4 min ago after 95 s in save: store.json mv" in x for x in lines), f"a stall it came back from: said, no problem: {lines} {probs}")
+        ok(report({})[1] == ["no writer holds the role"], "no claim while Herdr runs: a problem, as before")
+    finally:
+        shutil.rmtree(root)
+
+
 if __name__ == "__main__":
     for t in (test_dump, test_settings_write, test_mend_newline, test_restore_original, test_retire, test_settings_list, test_handoff,
-              test_keep_config_edits, test_mcp, test_recipe):
+              test_keep_config_edits, test_mcp, test_recipe, test_writer_report):
         t()
     print(f"setup: {PASS} passed, {FAIL} failed" + ("" if FAIL else "  OK"))
     sys.exit(1 if FAIL else 0)

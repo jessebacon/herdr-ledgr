@@ -59,11 +59,11 @@ import * as fs from "fs/promises";
 import { randomUUID } from "crypto";
 import { FORCE_DEMO, LIMITS, loadConfig, dataDir, agentLabel, panelPlace, panelShown, handoffOf, HANDOFF_WORDS, spaceOff, withSpaceOff, terminalSpace, textScaleOf, withScale } from "./config.js";
 import { Store, isAgentAsk, isHuman, isClosed, isSuggestion, isBlocking, thresholdOf, LEVELS, groupOpen } from "./store.js";
-import { Writer, writerClaim, engineDrift } from "./writer.js";
+import { Writer, writerClaim, claimStuck, engineDrift, fallbackDead, writerWanted, TAKEOVER_STUCK_MS, PASS_STUCK_MS, WRITER_CHECK_MS } from "./writer.js";
 import { isLive } from "./nav.js";
 import { demoData, DEMO_SESSION } from "./fixtures.js";
 import { THRESHOLD_WORDS, itemWords as H, paneWords as P, sessionWords, stageLabels, clearLabel, clearConfirm, clearedWords, OFF_HERE, spaceToggleWords, handleWords,
-  pinsWords, PINS_EMPTY, pinsSearchEmpty, pinsSelectedWords, askAboutPinsWords, pinNameWords, pinLabel, writerHealthWords } from "./words.js";
+  pinsWords, PINS_EMPTY, pinsSearchEmpty, pinsSelectedWords, askAboutPinsWords, pinNameWords, pinLabel, writerHealthWords, NO_WRITER } from "./words.js";
 import { loadAdapters, adapterOf, asksMode } from "./adapters.js";
 import { thenRequest, thenStale } from "./pinning.js";
 import { Reader } from "./reader.js";
@@ -217,7 +217,13 @@ export class Panel extends Reader {
     this.obsVer = undefined;
   }
 
-  // Ask whether a host writer is alive (it re-claims on a newer ping); none in 4 s: fallback.
+  // Ask whether a host writer is alive (it re-claims on a newer ping); none in 4 s: fallback. A host
+  // that answers but whose claim has not moved for TAKEOVER_STUCK_MS (writer.js claimStuck: alive, not
+  // applying, and its own watchdog did not restart it) counts as none. A fallback of this panel's that is
+  // neither writing, starting nor backing off (writer.js fallbackDead: its start threw, or its watchdog gave
+  // a start up while another copy held the role) is retired and replaced; a live one is kept. Run at the
+  // panel's start, when it is shown again, and from render whenever the claim is gone or stuck
+  // (writerWanted, at most every WRITER_CHECK_MS).
   checkWriter(cx) {
     if (FORCE_DEMO || this.fallback() || !this.inApp) return;
     const at = Date.now();
@@ -225,17 +231,23 @@ export class Panel extends Reader {
     setShared("ledgr.ping", { at, id: this.panelId });
     cx.timer.after(4000, (cx) => {
       const w = writerClaim();
-      if (w && w.by !== "panel" && Number(w.at) >= at) { this.writerNote = null; cx.notify(); return; }
-      if (this.writer && !this.writer.retired) return;
+      if (w && w.by !== "panel" && Number(w.at) >= at && claimStuck(w) <= TAKEOVER_STUCK_MS) { this.writerNote = null; cx.notify(); return; }
+      if (this.writer && !this.writer.retired && !fallbackDead(this.writer)) return;
+      this.writer?.retire();
       this.writer = new Writer("panel");
       this.writerNote = "No host writer answered: this panel is ingesting (fallback writer). Add the ledgr host block to the layout for live chips.";
       cx.spawn(async (cx) => { await this.writer.start(cx); cx.notify(); });
     });
   }
 
+  // The fallback writer's tick whenever it is there and not retired, not only while it writes: its
+  // watchdog must run while it restarts or backs off (2026-11-19 review). Not the writer: this copy reads.
   tick(cx) {
     if (FORCE_DEMO) return;
-    if (this.writer?.amWriter()) { this.writer.tick(cx); return; }
+    if (this.writer && !this.writer.retired) {
+      this.writer.tick(cx);
+      if (this.writer.amWriter()) return;
+    }
     this.tickRead(cx);
   }
 
@@ -639,6 +651,13 @@ export class Panel extends Reader {
     // Shown again after a while: make sure a writer is alive (at most once a minute).
     if (shown && !this.wasShown && !this.demo && !FORCE_DEMO && Date.now() - this.checkedAt > 60000) cx.timer.after(0, (cx) => this.checkWriter(cx));
     this.wasShown = shown;
+    // No claim holds the role, or its holder has not moved: look for a writer (its fallback at worst), at
+    // most every WRITER_CHECK_MS, whether or not the panel was just shown.
+    const claim = writerClaim(), now = Date.now();
+    if (this.inApp && !this.demo && !FORCE_DEMO && writerWanted(claim, this.writer, now) && now - this.checkedAt > WRITER_CHECK_MS) {
+      this.checkedAt = now;
+      cx.timer.after(0, (cx) => this.checkWriter(cx));
+    }
     const st = this.viewStore();
     st.threshold = thresholdOf(this.cfg);   // the writer applies the same value to the chips
     // Motion starts only here, and only when the store changed since the last look.
@@ -663,8 +682,11 @@ export class Panel extends Reader {
     const list = off ? [this.offView(t, off)] : s ? this.body(t, st, s)
       : [this.away && st.sessionsList().length ? this.awayState(t, this.away) : this.emptyState(t)];
     this.settleCursor(cx);
-    // The writer's health (its claim: store.json not written, events kept in spool/failed) before its last note.
-    const note = this.flash || this.writerNote || writerHealthWords(writerClaim()) || (this.fallback() ? this.writer.note : null);
+    // The writer's health (its claim: store.json not written, stuck, events kept in spool/failed), or that no
+    // claim holds the role: a fault or a stall before the fallback's note, the rest after it.
+    const health = claim ? writerHealthWords(claim, now) : this.inApp && !this.demo && !FORCE_DEMO ? NO_WRITER : null;
+    const urgent = !claim || Boolean(claim.fault) || (claim.stall && !claim.stall.ok) || claimStuck(claim, now) > PASS_STUCK_MS;
+    const note = this.flash || (urgent ? health : null) || this.writerNote || health || (this.fallback() ? this.writer.note : null);
     return v_flex().id("ledgr").track_focus(this.keys).on_key_down((e, cx) => this.onKey(e, cx))
       .size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border)
       .text_color(t.foreground).text_size(t.ts(12.5))

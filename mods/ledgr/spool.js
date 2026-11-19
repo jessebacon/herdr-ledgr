@@ -4,6 +4,9 @@
 // in progress; `bad-*` files are events that never parsed; spool/failed/ holds the events whose
 // apply threw (quarantine, 2026-11-12), each with its error beside it. Also reads the identity map
 // (ledgr-data/terminals/<t>.json, spec 2.5, 2.8).
+// A drain is one pass (2026-11-19): `pass` names the step it is in and since when, which the writer's
+// watchdog reads (writer.js PASS_STUCK_MS); abandon() gives a pass up, and an abandoned pass changes
+// nothing more, whenever its await settles, if ever.
 import * as fs from "fs/promises";
 import { randomUUID } from "crypto";
 import { readTextFile, writeTextFile } from "herdr";
@@ -11,6 +14,35 @@ import { LIMITS, spoolDir, terminalsDir, terminalFile } from "./config.js";
 
 const base = (p) => String(p).split("/").pop();
 const isEvent = (n) => n.endsWith(".json") && !n.startsWith(".") && !n.startsWith("bad-");
+
+// "20 s", "0.5 s", "4 min", "3 h 12 min": a wait as the status line and writer.log say it.
+export function spanWords(ms) {
+  const s = Math.max(0, Number(ms) || 0) / 1000;
+  if (s < 10) return `${Math.round(s * 10) / 10} s`;
+  if (s < 120) return `${Math.round(s)} s`;
+  const m = Math.round(s / 60);
+  return m < 120 ? `${m} min` : `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}`;
+}
+
+// Resolves or rejects as p does, or rejects first once ms pass (an Error with timedOut: true, "<what>: no
+// answer in 20 s"). For the awaits that wait on the host with no limit of their own: Herdr leaves a
+// cancelled task's promise pending for ever (gpui-kit.d.ts Task), and on 2026-11-19 one await of the
+// writer's never settled. The guarded await may still settle later; each caller makes what it would do
+// then harmless (a unique temporary file, a compare-and-swap write, the writer's generation). The limit is
+// a cx.timer task, cancelled once p settles; without a timer (cx null, or one that gives no task), p alone.
+export function within(cx, ms, p, what) {
+  let task = null, fire = null;
+  const limit = new Promise((_, reject) => { fire = reject; });
+  try {
+    task = cx?.timer?.after?.(ms, () => {
+      const e = new Error(`${what}: no answer in ${spanWords(ms)}`);
+      e.timedOut = true;
+      fire(e);
+    }) ?? null;
+  } catch { task = null; }   // a cx whose build was reloaded throws: no limit, the watchdog is the backstop
+  if (!task) return Promise.resolve(p);
+  return Promise.race([Promise.resolve(p), limit]).finally(() => { try { task.cancel?.(); } catch { /* done */ } });
+}
 
 // Herdr's readTextFile and writeTextFile refuse a file over 1 MiB ("Text file exceeds 1 MiB"; probed
 // 2026-11-12: 1,048,576 bytes written, 1,048,577 refused). store.json passed it on 2026-11-12 (nine asks
@@ -67,12 +99,16 @@ export async function listSpool() {
 }
 
 export class SpoolReader {
-  // apply(batch: {name, ev, text}[], cx) -> Promise of false (not the writer: leave every file),
+  // apply(batch: {name, ev, text}[], cx, pass) -> Promise of false (not the writer: leave every file),
   // true (all applied), or {failed: [{name, error, stack}]} (those threw and were left out; the rest
   // applied). Called with parsed events in name order. onFailed(): an event was moved to spool/failed.
-  constructor(apply, onFailed = null) {
+  // ok(): may this copy still unlink (the writer's amWriter); checked before every unlink. onDone(): a
+  // pass ended (not an abandoned one).
+  constructor(apply, onFailed = null, ok = () => true, onDone = null) {
     this.apply = apply;
     this.onFailed = onFailed;
+    this.ok = ok;
+    this.onDone = onDone;
     this.retries = new Map();
     this.running = false;
     this.again = false;
@@ -82,26 +118,56 @@ export class SpoolReader {
     this.failed = 0;       // events in spool/failed (countFailed at start and every tick, +1 per quarantine)
     this.skip = new Set(); // failed events that could not be copied to spool/failed: left in place, not read again
     this.errors = [];
+    this.epoch = 0;        // abandon() moves it on: a pass of an older epoch changes nothing more
+    this.pass = null;      // the running pass: {epoch, at (its start), step, since (the step's start)}
+    this.done = 0;         // when the last pass ended (ms): the writer's progress
+    this.abandoned = 0;    // passes given up since start
+  }
+
+  // The running pass is about to wait in step s (one await, or one short loop of them).
+  step(pass, s) {
+    if (pass && pass === this.pass) { pass.step = s; pass.since = Date.now(); }
+  }
+
+  // The writer's watchdog gave up on the running pass (writer.js unstick, or a new start): whatever it
+  // waits on may never settle, or may settle later; either way it reads, applies, saves and unlinks
+  // nothing more (every step checks its epoch), and the next drain starts a fresh pass at once.
+  abandon() {
+    const p = this.pass;
+    this.epoch += 1;
+    this.running = false;
+    this.again = false;
+    this.pass = null;
+    if (p) this.abandoned += 1;
+    return p;
   }
 
   // Reads every event file, applies the parsed ones, unlinks them. Re-entrant calls while
   // a pass runs ask for one more pass. A file that does not parse is retried up to 5 times,
   // 300 ms apart, then kept aside as spool/bad-<name>. An event whose apply threw goes to
-  // spool/failed (quarantine) and the files after it apply as usual.
+  // spool/failed (quarantine) and the files after it apply as usual. Each await is a step of
+  // `pass`; after each one an abandoned pass returns at once, leaving `running` to the pass after it.
   async drain(cx) {
     if (this.running) { this.again = true; return; }
     this.running = true;
+    const now = Date.now();
+    const pass = this.pass = { epoch: this.epoch, at: now, step: "list", since: now };
+    const mine = () => pass.epoch === this.epoch;
     let retryLater = false;
     try {
       do {
         this.again = false;
+        this.step(pass, "list");
         const names = await listSpool();
+        if (!mine()) return;
         this.missing = names === null;
         if (!names) break;
         const batch = [];
+        this.step(pass, "read");
         for (const name of names.filter((n) => !this.skip.has(n)).slice(0, 500)) {
           const path = `${spoolDir()}/${name}`;
           const text = await readTextFile(path).catch(() => null);
+          if (!mine()) return;
           if (text === null) continue;
           let ev;
           try { ev = JSON.parse(text); }
@@ -111,6 +177,7 @@ export class SpoolReader {
             if (n > LIMITS.parseRetries) {
               this.retries.delete(name);
               await writeTextFile(`${spoolDir()}/bad-${name}`, text, null).catch(() => {});
+              if (!mine()) return;
               await fs.unlink(path).catch(() => {});
               this.errors.push(`unparseable spool file kept as bad-${name}`);
             } else retryLater = true;
@@ -121,42 +188,58 @@ export class SpoolReader {
         }
         if (batch.length) {
           // false: this copy is not the writer, or store.json was not written; leave the files.
-          const r = await this.apply(batch, cx);
+          this.step(pass, "apply");
+          const r = await this.apply(batch, cx, pass);
+          if (!mine()) return;
           if (r === false) break;
           const failed = new Map((Array.isArray(r?.failed) ? r.failed : []).map((f) => [f.name, f]));
+          this.step(pass, "unlink");
+          let gone = 0, lost = false;
           for (const b of batch) {
-            if (failed.has(b.name)) await this.quarantine(b, failed.get(b.name));
-            else await fs.unlink(`${spoolDir()}/${b.name}`).catch(() => {});
+            // The role went elsewhere: the files left are the next writer's (its store.json holds them).
+            if (!this.ok()) { lost = true; break; }
+            if (failed.has(b.name)) await this.quarantine(b, failed.get(b.name), mine);
+            else { await fs.unlink(`${spoolDir()}/${b.name}`).catch(() => {}); gone++; }
+            if (!mine()) return;
           }
-          this.applied += batch.length - failed.size;
+          this.applied += gone;
+          if (lost) break;
         }
         if (names.length > 500) this.again = true;
       } while (this.again);
     } catch (e) {
-      this.errors.push(String(e?.message ?? e));
+      if (mine()) this.errors.push(String(e?.message ?? e));
     } finally {
-      this.running = false;
-      this.lastRun = Date.now();
-      if (this.errors.length > 20) this.errors.splice(0, this.errors.length - 20);
+      if (mine()) {
+        this.running = false;
+        this.pass = null;
+        this.done = this.lastRun = Date.now();
+        if (this.errors.length > 20) this.errors.splice(0, this.errors.length - 20);
+        try { this.onDone?.(); } catch { /* health only */ }
+      }
     }
-    if (retryLater) cx.timer.after(300, (cx) => this.drain(cx));
+    if (retryLater && mine()) cx.timer.after(300, (cx) => this.drain(cx));
   }
 
   // An event whose apply threw: copied to spool/failed/<name> with the error and stack in
   // <name without .json>.error.txt, and only then unlinked (the writer never loses an event). A copy
   // that cannot be made leaves the file where it is, skipped by this copy until it restarts.
-  async quarantine(b, f) {
+  // mine(): false once the pass was abandoned (nothing more is written or unlinked).
+  async quarantine(b, f, mine = () => true) {
     const dir = failedDir(), path = `${dir}/${b.name}`;
     await fs.mkdir(dir, { recursive: true }).catch(() => {});
+    if (!mine()) return false;
     let kept;
     try { await writeTextFile(path, b.text, null); kept = true; }
     catch { kept = (await readTextFile(path).catch(() => null)) === b.text; }   // there already, the same
+    if (!mine()) return false;
     if (!kept) {
       this.skip.add(b.name);
       this.errors.push(`spool event ${b.name} failed (${f.error}) and could not be kept in spool/failed: left in the spool, not applied`);
       return false;
     }
     await writeAtomic(`${dir}/${b.name.replace(/\.json$/, "")}.error.txt`, failedText(b, f));
+    if (!mine()) return false;
     await fs.unlink(`${spoolDir()}/${b.name}`).catch(() => {});
     this.failed += 1;
     this.errors.push(`spool event ${b.name} failed (${f.error}); kept as spool/failed/${b.name}`);
@@ -197,11 +280,26 @@ export async function writeEvent(type, payload) {
   return { name, ev };
 }
 
-// Replaces a file atomically with writeTextFile's compare-and-swap (one retry on a race).
+// Replaces a file atomically with writeTextFile's compare-and-swap (one retry on a race). For a text
+// that does not depend on what the file holds (a whole snapshot); an append uses writeAtomicWith.
 export async function writeAtomic(path, text) {
   for (let i = 0; i < 2; i++) {
     const cur = await readTextFile(path).catch(() => null);
     try { await writeTextFile(path, text, cur); return true; } catch { /* changed under us: retry */ }
+  }
+  return false;
+}
+
+// The same for a text made from what the file holds (an append): next(cur) is asked again after every
+// read, so a retry never writes over lines that landed meanwhile (2026-11-19: writeAtomic's retry wrote the
+// text made from the first read). next returns null for nothing to write (the line is there already).
+// Resolves true (written, or nothing to write) or false.
+export async function writeAtomicWith(path, next) {
+  for (let i = 0; i < 2; i++) {
+    const cur = await readTextFile(path).catch(() => null);
+    const text = next(cur ?? "");
+    if (text === null) return true;
+    try { await writeTextFile(path, text, cur); return true; } catch { /* changed under us: read again */ }
   }
   return false;
 }

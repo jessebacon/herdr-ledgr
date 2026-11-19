@@ -764,4 +764,165 @@ docstring (`bin/lib/ledgr_spool.py`) lists the new mod-written event.
   text with or without its trailing breaks.
 - `test_no_keystrokes.py` 313, unchanged. `herdr-app check mods/ledgr` passes.
 
+## 18. A writer that holds its claim but does not move (2026-11-19)
+
+The incident: one drain applied its events, saved `store.json` (1.63 MB, through `writeLarge`) and
+never returned. Its `finally` never ran, so `SpoolReader.running` stayed true and every later drain
+returned at its first line; the 60 s tick still called `beat()`, so the claim stayed fresh, no host's
+`probe()` (which only took a claim older than two minutes) and no panel fallback took over. 103 events
+queued for hours, none lost. Which await hung is unknown. Herdr leaves a cancelled task's promise
+pending for ever (`gpui-kit.d.ts` Task), and `writeLarge`'s `fs.writeFile`, read-back and `mv` had no
+limit of their own. The rule since then: liveness is progress, not a timer.
+
+### 18.1 What the claim carries
+
+`shared("ledgr.writer") = {id, by, at, fault?, failed?, pass?, done?, stall?}` (`writer.js` `claim`):
+
+| Field | Meaning |
+|---|---|
+| `at` | the beat, as before: every tick, on a health change, on a ping |
+| `fault` | `store.json` cannot be written (as before), or, while the watchdog's finding has not come back, `stallText(stall)` |
+| `pass` | `{at, step, since}`: the pass running at that beat (its start, the step it waits in, since when), else a start's (`start: <step>`); absent when idle. A claim that carried one is renewed when that pass or start ends (`claimedPass`), so it never goes stale by a minute |
+| `done` | when the last pass ended (`SpoolReader.done`) |
+| `stall` | the last finding: `{at, step, ms, n, kind: pass, start or spool, ok, back?, name?, retryAt?, tries?}` (`retryAt`, `tries`: backing off) |
+
+Steps (`SpoolReader.step`, `Writer.saving`, `Writer.mark`): a pass is `list`, `read`, `apply`, `apply:
+config.json`, `apply: re-anchor`, `apply: decisions.md`, `save`, then the save's own (`save: store.json
+writeTextFile`, `… read again`, `… listing`, `… temporary copy`, `… read back`, `… mv`, `save:
+snapshot.json`), `unlink`; a start is `start: claim`, `temporary files`, `config.json`, `store.json`,
+`identity map`, `save[: …]`, `drain`, `spool/failed`, `housekeeping`. A save step a pass waits on moves
+the pass's `since`, so only one await that lasts too long is stuck, never a slow series.
+
+### 18.2 Constants (`writer.js`)
+
+| Constant | Value | Why |
+|---|---|---|
+| `PASS_STUCK_MS` | 90 000 | Every step is one await of milliseconds when the host answers; the limited ones stop at `SAVE_TIMEOUT_MS` (20 s) or exec's 30 s default, so 90 s is three times the longest and under the two minutes after which a claim nobody renews counts as abandoned. On the 60 s tick a stuck step is seen 90 to 150 s after it began. `words.js` `WRITER_STUCK_MS` and `ledgr_mcp.py` `WRITER_STALL_S` mirror it (tests check) |
+| `TAKEOVER_STUCK_MS` | 240 000 | another host takes a fresh claim whose pass has not moved this long: the holder's own watchdog would have restarted it by 150 s, and a claim can be a minute old |
+| `SAVE_TIMEOUT_MS` | 20 000 | each await of a save and of a start (`Writer.bounded`, `spool.js` `within`); the `mv` gets exec's `timeout` of the same and a limit 10 % longer so exec answers first |
+| `MAX_UNSTICKS` | 3 | restarts in a row with no pass finished; the fourth finding backs off |
+| `BACKOFF_MS`, `BACKOFF_MAX_MS` | 300 000, 1 800 000 | the first wait before the next restart, doubling each time up to the second |
+| `WRITER_CHECK_MS` | 15 000 | how often a shown panel looks for a writer while the claim is gone or stuck |
+| `WRITER_LOG_MAX` | 65 536 | bytes `ledgr-data/log/writer.log` keeps |
+
+### 18.3 The watchdog and the recovery
+
+- `watchdog(cx)`, first in `tick` and synchronous (it runs while every await waits): this copy's pass or
+  start (`progress()`) in one step longer than `PASS_STUCK_MS`, or a start that ended without starting
+  while this copy holds the claim (it threw: a read that got no answer). Then `unstick`.
+- `checkWaiting`, in the tick after its drain: the spool's oldest event (its name begins with the time it
+  was written) older than `PASS_STUCK_MS` while no pass runs and no save fault stands (that fault keeps
+  every file waiting and is said already). The first time for a file: `unstick` (kind `spool`). Still
+  there at a later tick: the finding stays (`fault` names the file), no second restart; gone: `ok`.
+- `unstick`: the finding into `stall` (and `fault`), one `writer.log` line (the step, the pass's start,
+  what the save chain waits in and since when, the last pass, the generation, the restart count),
+  `abandon()`, and `regain()` while this copy holds the claim (a stuck start of a copy that does not:
+  given up, the role left to `respond`/`probe`). `unstickRun` counts restarts since a pass last ended;
+  past `MAX_UNSTICKS`, `backOff()`: `coolUntil` = now + `BACKOFF_MS`, doubling at each further finding up
+  to `BACKOFF_MAX_MS`; the claim stays, renewed each tick (`cooling`), with `stall.retryAt` and `tries`
+  and a fault that says when it tries again; no restart meanwhile (`respond` and `probe` wait too); at
+  `coolUntil` it starts again if nobody holds the role, it still does, a panel's fallback does, or the
+  holder has not moved. Why not give the role up (the first build did): with one host and the panel
+  hidden or already shown, nobody takes it, the chips freeze until a relaunch and the status line says
+  nothing (`writerHealthWords(null)`); a back-off keeps it visible, lets another host or the panel take a
+  claim that does not move (`claimStuck` counts a stall with nothing running), and recovers by itself if
+  the cause passes. Relaunching Herdr starts the copy afresh at once.
+- `abandon()` is a new generation: `gen += 1`, `SpoolReader.abandon()` (`epoch += 1`, `running` and the
+  pass cleared), a fresh `writeChain`, `watching` and `watchingConfig` cleared. Every `start()` calls it.
+- `start()` checks it still holds the claim after its 500 ms wait before it sweeps (a copy that lost the
+  race would fail the holder's `mv`), and writes `this.cfg` and the identity map to `this.live` only after
+  checking it is still the latest. `sweep()` lists `ledgr-data`, unlinks each copy, and lists again; a
+  listing that fails or a copy still there throws, so the start fails and the watchdog starts again. Once
+  a listing shows none, none can land later: a save makes its copy before it asks `ok()`, and `ok()` is
+  false for every save but the new generation's. (The review's case: a listing with no answer had
+  counted as "nothing to remove", the restart applied and unlinked an event, and the old `mv` then put
+  the old store back.)
+- Why a given-up pass can do no harm, whenever its await settles: the reader returns after every await
+  of a pass whose epoch is old (no unlink, no quarantine, no `running = false` for the pass after it);
+  `applyBatch` returns false after every await when `current(gen)` is false (`gen` the latest and still
+  `amWriter()`), so it applies nothing to the new store; a save of an old generation writes nothing more,
+  sets no `storeText` and no fault (`saveStore`'s `go` and `writeStoreText` check `current(gen)` around
+  every await; `writeLarge` asks `ok()` right before the `mv`, the only step that touches the file); a
+  `writeTextFile` that lands late is refused by its own compare-and-swap once the file moved on; a late
+  `mv` finds nothing, because `start()` removes `.store.json.large-*` and `.snapshot.json.large-*`
+  (`sweep`) before it reads `store.json`. The unlink loop also checks `amWriter()` before each file: a
+  role lost mid-loop leaves the rest to the next writer, whose store holds them (they were saved before
+  the loop began).
+- Why nothing applies twice and nothing is lost: the restart reads `store.json` from disk; an event the
+  given-up pass saved is in its `ingested` ids and is skipped and unlinked; one it did not save is still
+  in the spool and applied. A file is unlinked only after a save of the current generation resolved true.
+- Takeover: `probe()` takes a fresh claim whose `claimStuck(w)` (a pass's `since`; or, with no pass
+  running, an unrecovered stall: a restart in progress has a pass of its own) exceeds
+  `TAKEOVER_STUCK_MS` at once (logged); the panel's `checkWriter` counts such a claim as no answer and
+  starts its fallback. The new holder's `start()` (500 ms wait, sweep, read) is the same path as any
+  takeover.
+- The panel (`panel.js`): `tick` ticks its fallback whenever it is there and not retired, so its
+  watchdog runs while it restarts or backs off (it read only while `amWriter()` before, and a fallback
+  whose restart threw was never watched again); `checkWriter` retires and replaces a fallback that is
+  neither writing, starting nor backing off (`writer.js` `fallbackDead`); `render` calls `checkWriter`
+  whenever `writerWanted(claim, fallback)` (no claim, or a holder other than its own fallback stuck past
+  `TAKEOVER_STUCK_MS`), at most every `WRITER_CHECK_MS`, not only when the panel is shown again. The
+  status line says `words.js` `NO_WRITER` when there is no claim, and a fault or a stall before the
+  fallback's own note.
+
+### 18.4 Diagnostics
+
+`ledgr-data/log/writer.log`: `<ms> <ISO> <role> <id8> <line>`, written by `Writer.log` (read, append,
+compare-and-swap write; the mod has no append), never awaited by the writer's own work, each write
+limited; kept to its last `WRITER_LOG_MAX` bytes on a line boundary. Lines: a start (why: no claim,
+again, restart, from `<by>` (stuck); generation; store.json size; spool files taken in; back after …),
+a stuck finding, a file still waiting after a restart, a takeover, a back-off and its end, a start that
+failed, a save fault set or cleared. Nothing per event.
+
+### 18.5 Also
+
+- The corrupt-store copy at start (`store.corrupt-<ms>.json`) goes through `writeLarge`, so a store over
+  1 MiB is kept too (`writeTextFile` refused it).
+- `housekeep`, `scheduleSnapshot`, `watchConfig`'s reads (`loadConfig`, `refreshSpaces`) and the tick's
+  reads are limited too; a housekeeping failure no longer ends a start. The config and identity-map watch
+  is one loop per generation, and the tick reads every map record's space again once a minute
+  (`refreshSpaces(null)`), so a watch that stopped loses nothing for long. The tick checks its generation
+  after every await before it writes.
+- Appends (`decisions.md`, `archive/<month>.jsonl`) go through `spool.js` `writeAtomicWith(path,
+  next)`, which makes the text again from each read: `writeAtomic`'s retry wrote the text made from the
+  first read, over a line that landed meanwhile. An archived item whose line is already in the month's
+  file is not added again (a write that got no answer and landed late), and `decisions.md` skips a branch
+  whose key is there, at each try. `writeAtomic` stays for whole files (`snapshot.json`), where its
+  compare-and-swap refuses a late write once a newer one landed.
+- Known limit: a batch's side effects (a branch launch, close or resume, an extractor retry: `launch`,
+  `close`, `resume`, `retry` in `applyBatch`) are started after its save. If the pass dies after the save
+  and before them, the restart skips the event as already ingested, so they are not started again; the
+  start's fix-up then marks a branch still `launching` after 60 s as failed ("the writer restarted
+  before the launch finished"). Starting them again could launch a second Claude session for one
+  branch, so they are not; a branch that did launch sends its own `branch_started`, which marks it
+  running again, and Retry, Close branch and Resume can be pressed again.
+- Outside the mod: `ledgr_mcp.py` `writer_state` and `setup/ledgr_setup.py` `writer_report` read the same
+  signals (spool times, `store.json`'s time, the claim Herdr keeps in `shared.json`), see
+  `bin/mcp/README.md` and CLAUDE.md's decision log.
+
+### 18.6 Tests
+
+`test_writer.mjs` (252 checks; the herdr stub's hooks get the real function as their last argument,
+and Node's `fs/promises` is patched through `syncBuiltinESMExports` where an await of the writer's own
+fs must hang): `within` and the words; the reader alone (`abandon` with a late apply, a role lost
+between unlinks); the incident's shape (the `mv` ran, its answer never came: the claim names the step,
+the status line says no progress, the watchdog restarts from `store.json`, the event applied once, the
+status line and `writer.log` say so); a given-up save whose `mv` runs late (nothing lands, nothing
+recorded); a timed-out large write (`writeLarge` directly, and through a drain: a fault, the store
+whole, the event applied once the host answers); an unreadable event that waits (one restart, then
+named); restarts that never finish a pass (the back-off, the claim kept and said, doubling, then a
+restart that works); a takeover by a second host with the old holder's `mv` settling late; `writer.log`'s
+bound; the review's cases (12-17 in the file): a sweep that cannot list fails the start and a writer
+starting from disk afterwards has every event; an old pass whose copy lands after the generation
+changed moves nothing in (with an event applied after the restart, so the texts differ); a lost start
+race; the config watch per generation and the map rescan; `writeAtomicWith` and `decisions.md`; a
+panel-role fallback whose start hangs, restarted by its own tick. `test_settings.mjs` (743) drives a real
+`Panel` with fake fallbacks: ticked while restarting, a dead one replaced, a starting or backing-off one
+kept, `NO_WRITER` and a check from render, the stuck claim's words before the fallback's note.
+Mutations checked by hand, a test failing for each: without the sweep, a lenient sweep, the epoch check,
+the save's generation check, the unlink guard, `ok()` before the `mv` (section 13 alone), the claim check
+before the sweep, `watchingConfig` in `abandon`, the tick's map rescan, `writeAtomicWith`'s re-made text,
+the back-off; in the panel, ticking only a writing fallback, keeping a dead one, no check from render, no
+`NO_WRITER`.
+
 Pins (2026-11-07: the PINS lane, search, Ask here, the hold control, the box's ⌘S): `BUILD-NOTES-pins.md`.

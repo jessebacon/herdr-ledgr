@@ -34,10 +34,14 @@ Tools: declare_asks(items), resolve_asks(handles, note?), open_asks(), parked_qu
 declare_asks writes ledgr-data/mcp/<session>/<turn>.json (the turn's declaration: call count, event
 ids, asks, handles); a second call in the same turn sets `replaces_turn: true` on its event. After
 emitting it waits up to LEDGR_MCP_WAIT_MS (default 2500) for the writer to ingest the event and reads
-the handles from snapshot.json; when the writer is not running (spool files older than 5 s) it does
-not wait. resolve_asks maps each handle to this session's agent ask in snapshot.json (the items
-open_asks lists) and drops one `act` event per ask still open, deferred or answered (action
-"resolve", actor "agent", the handle, the turn); it waits for the writer the same way.
+the handles from snapshot.json; when an event waits (over 5 s with store.json not written since) it
+does not wait: the writer is behind (its claim in Herdr's shared.json shows it at work, or nothing says
+more yet) or stalled (over WRITER_STALL_S, or the claim is gone, stale, stuck or backing off), and a
+stalled writer is said plainly: the items are queued, not shown, and the agent tells the user and lists
+them in its reply (writer_state, 2026-11-19). resolve_asks maps each
+handle to this session's agent ask in snapshot.json (the items open_asks lists) and drops one `act`
+event per ask still open, deferred or answered (action "resolve", actor "agent", the handle, the turn);
+it waits for the writer the same way.
 
 Disabled spaces: a session is off when its record (sessions/<sid>.json) has `ledgr_off: true` (the
 hooks set it at the prompt that finds its Herdr space disabled, so a turn that began off stays off) or
@@ -76,6 +80,11 @@ LOG = "mcp.log"
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "-sh", "-bash", "-zsh", "nohup", "env"}
 KEEP_TURNS = 50
 WRITER_STALE_S = 5
+# A writer that has written nothing since the oldest waiting spool event arrived, that long ago, is not
+# applying events (2026-11-19): mods/ledgr/writer.js PASS_STUCK_MS (test_mcp.py checks they agree).
+WRITER_STALL_S = 90
+# A claim Herdr saved that no writer renewed for this long: its holder stopped (it beats every 60 s).
+CLAIM_STALE_S = 180
 
 
 def _version():
@@ -94,7 +103,8 @@ INSTRUCTIONS = (
     "write \"I need\": say it in prose and declare nothing. open_asks shows what is already recorded, with "
     "handles such as A7; when the user's message answers or drops one of them, call resolve_asks with its "
     "handle before declaring anything new. When a ledgr tool answers off: true, ledgr is off in this space: "
-    "list what you need from the user in your reply instead.")
+    "list what you need from the user in your reply instead. When a ledgr tool says its writer is not "
+    "applying events, the user cannot see these items in ledgr yet: say so and list them in your reply as well.")
 
 # A session where ledgr is off (spaces.disabled): (the result's note, its text) per tool.
 OFF_WORDS = {
@@ -321,6 +331,33 @@ def snapshot_items():
     if isinstance(items, dict):
         items = list(items.values())
     return [it for it in items if isinstance(it, dict)] if isinstance(items, list) else []
+
+
+def writer_claim():
+    """The writer's claim as Herdr last saved it (shared.json in Herdr's home, beside ledgr-data; key
+    ledgr.writer): {id, by, at, fault?, pass?, done?, stall?}, else None. Herdr saves shared state as it
+    changes, so it is as fresh as the writer's last beat (and, after the machine slept, hours old while
+    the writer works: writer_state reads it only when an event waits). False when shared.json cannot be
+    read (none, or caught mid-write)."""
+    p = os.path.join(os.path.dirname(C.DATA.rstrip("/")), "shared.json")
+    try:
+        with open(p, encoding="utf-8") as f:
+            s = json.load(f)
+    except (OSError, ValueError):
+        return False                       # none, or caught mid-write by Herdr: not known
+    if not isinstance(s, dict):
+        return False
+    w = s.get("ledgr.writer")
+    return w if isinstance(w, dict) and w.get("id") else None
+
+
+def span_words(s):
+    """"20 s", "4 min", "3 h 12 min" (the mod's spool.js spanWords)."""
+    s = max(0.0, float(s or 0))
+    if s < 120:
+        return f"{int(round(s))} s"
+    m = int(round(s / 60))
+    return f"{m} min" if m < 120 else f"{m // 60} h" + (f" {m % 60} min" if m % 60 else "")
 
 
 def session_of(it):
@@ -700,9 +737,9 @@ class Server:
                 self.prune(os.path.dirname(state_path))
             else:
                 calls -= 1                         # nothing written: the turn's call count stands
-        handles, applied = [None] * len(asks), None
+        handles, applied, wstat = [None] * len(asks), None, None
         if ev_id and asks:
-            handles, applied = self.wait_handles(sid, turn, asks)
+            handles, applied, wstat = self.wait_handles(sid, turn, asks)
             if any(handles):
                 st = C.read_json(state_path)
                 if isinstance(st, dict) and ev_id in (st.get("event_ids") or []):
@@ -726,8 +763,11 @@ class Server:
                             for r in rows if r.get("repeat_of")],
                 "rejected": rejected, "notes": notes, "pointer": pointer, "handoff": mode,
                 "writer": applied}
+        if wstat:
+            data["writer_status"] = wstat
         if ctx.get("note"):
             data["note"] = ctx["note"]
+        stalled = applied == "stalled"
 
         lines = []
         if items and not asks:
@@ -756,12 +796,23 @@ class Server:
         if ctx.get("note"):
             lines.append(f"Note: {ctx['note']}, so these went to the terminal's synthetic session {sid} "
                          "(no turn text there, so quotes cannot be checked).")
-        if asks and not any(handles):
-            lines.append("Handles are pending: ledgr's writer has not applied the event yet; they appear in the panel.")
+        if stalled:
+            # 2026-11-19: the writer held its claim and applied nothing for hours, and this result still said
+            # the items would appear in the panel. Not an error (a retry changes nothing): the event waits in
+            # the spool and is applied once a writer runs; the agent tells the user and lists the items.
+            lines.append(f"ledgr's writer is not applying events ({wstat['why']}). These items are queued, not shown "
+                         "to the user: the panel does not have them.")
+            lines.append("Tell the user in your reply that ledgr's writer is not applying events (relaunching Herdr "
+                         "restarts it; nothing queued is lost), and list these items in your reply this time.")
+        elif asks and not any(handles):
+            lines.append(f"Handles are pending: ledgr's writer is behind (the oldest queued event is {span_words(wstat['oldest_s'])} "
+                         "old); they appear in the panel once it applies them." if applied == "idle" and wstat and wstat.get("oldest_s") else
+                         "Handles are pending: ledgr's writer has not applied the event yet; they appear in the panel.")
         if any(a["quote"] for a in asks):
             lines.append("Quotes are checked against your reply when the turn ends, so keep them verbatim.")
         if pointer:
-            lines.append("List them in your reply as usual and end it with this line:" if mode == "both" else
+            lines.append("Then end your reply with this line:" if stalled else
+                         "List them in your reply as usual and end it with this line:" if mode == "both" else
                          "End your reply with this line; do not list these items in prose or in a ledgr-asks block:")
             lines.append(pointer)
         elif asks:
@@ -769,10 +820,13 @@ class Server:
         return text_result("\n".join(lines), data, error=bool(items) and not asks)
 
     def wait_handles(self, sid, turn, asks):
-        """(handles, how) once the writer has ingested our spool file(s); how is applied, timeout or idle."""
+        """(handles, how, status) once the writer has ingested our spool file(s); how is applied, timeout,
+        idle (the writer is behind: not waited for) or stalled (not applying: not waited for); status is
+        writer_state's, None when applied."""
         spool, mine = C.path("spool"), f"-asks-{os.getpid()}-"
-        if self.writer_idle(spool):
-            return [None] * len(asks), "idle"
+        ws = self.writer_state(spool, mine)
+        if ws["state"] != "ok":
+            return [None] * len(asks), ("stalled" if ws["state"] == "stalled" else "idle"), ws
         deadline = time.monotonic() + self.wait_ms / 1000.0
         while True:
             try:
@@ -782,17 +836,19 @@ class Server:
             if not pending:
                 hs = self.match_handles(sid, turn, asks)
                 if all(hs) or time.monotonic() >= deadline:
-                    return hs, "applied"
+                    return hs, "applied", None
             elif time.monotonic() >= deadline:
-                return [None] * len(asks), "timeout"
+                ws = self.writer_state(spool, mine, with_mine=True)
+                return [None] * len(asks), ("stalled" if ws["state"] == "stalled" else "timeout"), ws
             time.sleep(0.05)
 
     def wait_applied(self, kind):
-        """applied once the writer has ingested this process's `kind` spool files; timeout after
-        LEDGR_MCP_WAIT_MS; idle when no writer is ingesting (writer_idle), without waiting."""
+        """(how, status) once the writer has ingested this process's `kind` spool files: applied, timeout
+        after LEDGR_MCP_WAIT_MS, or without waiting idle (behind) or stalled (writer_state)."""
         spool, mine = C.path("spool"), f"-{kind}-{os.getpid()}-"
-        if self.writer_idle(spool):
-            return "idle"
+        ws = self.writer_state(spool, mine)
+        if ws["state"] != "ok":
+            return ("stalled" if ws["state"] == "stalled" else "idle"), ws
         deadline = time.monotonic() + self.wait_ms / 1000.0
         while True:
             try:
@@ -800,25 +856,83 @@ class Server:
             except OSError:
                 pending = False
             if not pending:
-                return "applied"
+                return "applied", None
             if time.monotonic() >= deadline:
-                return "timeout"
+                ws = self.writer_state(spool, mine, with_mine=True)
+                return ("stalled" if ws["state"] == "stalled" else "timeout"), ws
             time.sleep(0.05)
 
-    def writer_idle(self, spool):
-        """True when the spool holds an event older than WRITER_STALE_S: no writer is ingesting."""
-        cut = time.time() - WRITER_STALE_S
+    def writer_state(self, spool, mine=None, with_mine=False):
+        """What the spool, store.json and the writer's saved claim say about the writer (2026-11-19: it held
+        a fresh claim and applied nothing for hours, while this server answered as usual). Read-only, one
+        listing and two small reads. {state, queued, oldest_s, store_s, [why], [claim]}. An event *waits*
+        when it is older than WRITER_STALE_S and store.json has not been written since it arrived; only then
+        does the claim count, because a claim is as old as the writer's last beat: after the machine slept it
+        is hours old while the writer works (2026-11-19 review).
+          ok       no event waits (none older than WRITER_STALE_S, or store.json written since the oldest
+                   arrived: the writer moves, and that event is its own problem);
+          behind   an event waits, and either the claim shows a writer at work (fresh, its pass or start in a
+                   step for under WRITER_STALL_S: starting, or draining a backlog), or nothing says more yet;
+          stalled  an event waits and no writer is at work: it has waited over WRITER_STALL_S, or Herdr's
+                   shared.json holds no claim, or the claim was not renewed for CLAIM_STALE_S, or its pass has
+                   waited WRITER_STALL_S in one step, or it says the writer is stuck with nothing running.
+        `mine` (this process's spool name part) is left out of the waiting times unless with_mine (after a
+        wait that timed out), never out of `queued`."""
+        now = time.time()
+        oldest, queued = None, 0
         try:
             for n in os.listdir(spool):
-                if n.endswith(".json") and not n.startswith("."):
-                    try:
-                        if os.path.getmtime(os.path.join(spool, n)) < cut:
-                            return True
-                    except OSError:
-                        pass
+                if not n.endswith(".json") or n.startswith(".") or n.startswith("bad-"):
+                    continue
+                try:
+                    m = os.path.getmtime(os.path.join(spool, n))
+                except OSError:
+                    continue
+                queued += 1
+                if with_mine or not (mine and mine in n):
+                    oldest = m if oldest is None else min(oldest, m)
         except OSError:
             pass
-        return False
+        try:
+            store_m = os.path.getmtime(C.path("store.json"))
+        except OSError:
+            store_m = None
+        ws = {"state": "ok", "queued": queued, "oldest_s": None if oldest is None else round(now - oldest, 1),
+              "store_s": None if store_m is None else round(now - store_m, 1)}
+        waited = 0.0 if oldest is None else now - oldest
+        moved = oldest is not None and store_m is not None and store_m >= oldest
+        w = writer_claim()
+        ps, st, at = {}, {}, 0.0
+        if w:
+            at = (w.get("at") or 0) / 1000.0
+            ps = w.get("pass") if isinstance(w.get("pass"), dict) else {}
+            st = w.get("stall") if isinstance(w.get("stall"), dict) else {}
+            ws["claim"] = {k: v for k, v in (("by", w.get("by")), ("age_s", round(now - at, 1)), ("step", ps.get("step")),
+                                             ("step_s", round(now - ps["since"] / 1000.0, 1) if ps.get("since") else None),
+                                             ("fault", w.get("fault"))) if v is not None}
+        if waited <= WRITER_STALE_S or moved:
+            return ws
+        step_s = now - ps["since"] / 1000.0 if ps.get("since") else None
+        at_work = bool(w) and now - at <= CLAIM_STALE_S and step_s is not None and step_s <= WRITER_STALL_S
+        why = None
+        if at_work:
+            pass
+        elif waited > WRITER_STALL_S:
+            why = (f"{queued} event{'' if queued == 1 else 's'} queued, the oldest for {span_words(waited)}, and store.json "
+                   + ("not written since" if store_m is None else f"last written {span_words(now - store_m)} ago"))
+        elif w is None:
+            why = "no writer holds the role (show the ledgr panel, or relaunch Herdr)"
+        elif w and now - at > CLAIM_STALE_S:
+            why = f"its writer ({w.get('by')}) has not renewed its claim for {span_words(now - at)}"
+        elif w and step_s is not None and step_s > WRITER_STALL_S:
+            why = f"its writer ({w.get('by')}) has waited {span_words(step_s)} in {ps.get('step')}"
+        elif w and not ps and st and st.get("ok") is False and st.get("kind") != "spool":
+            why = f"its writer ({w.get('by')}) is stuck in {st.get('step')}" + (" and waits before it tries again" if st.get("retryAt") else "")
+        if why:
+            ws.update(state="stalled", why=why)
+        else:
+            ws["state"] = "behind"
+        return ws
 
     def match_handles(self, sid, turn, asks):
         items = [it for it in snapshot_items() if session_of(it) == sid and it.get("direction") == "agent_to_human"
@@ -889,7 +1003,7 @@ class Server:
                 ev_ids.append(S.act(t, sid, item=live[0]["id"], action="resolve", actor="agent", handle=h,
                                     turn=turn, note=note))
                 resolved.append(h)
-        how = self.wait_applied("act") if ev_ids else None
+        how, wstat = self.wait_applied("act") if ev_ids else (None, None)
         log(f"resolve {sid} turn={turn} resolved={resolved} already_closed={already} unknown={unknown} "
             f"note={'yes' if note else 'no'} events={len(ev_ids)} writer={how}")
 
@@ -901,12 +1015,22 @@ class Server:
         if unknown:
             lines.append(f"Not an ask of this session: {', '.join(unknown)} (open_asks lists the handles).")
         lines += [f"Note: {x}." for x in notes]
-        if resolved and how != "applied":
+        if resolved and how == "stalled":
+            lines.append(f"ledgr's writer is not applying events ({wstat['why']}). These closures are queued: the "
+                         "panel still shows the asks open.")
+            lines.append("Tell the user in your reply that ledgr's writer is not applying events (relaunching Herdr "
+                         "restarts it; nothing queued is lost).")
+        elif resolved and how == "idle" and wstat and wstat.get("oldest_s"):
+            lines.append(f"ledgr's writer is behind (the oldest queued event is {span_words(wstat['oldest_s'])} old); "
+                         "the panel shows them closed once it applies them.")
+        elif resolved and how != "applied":
             lines.append("ledgr's writer has not applied this yet; the panel shows them closed once it does.")
         if ctx.get("note"):
             lines.append(f"Note: {ctx['note']}; this is the terminal's synthetic session {sid}.")
         data = {"ok": True, "session_id": sid, "turn": turn, "synthetic": ctx["synthetic"], "resolved": resolved,
                 "unknown": unknown, "already_closed": already, "event_ids": ev_ids, "writer": how}
+        if wstat:
+            data["writer_status"] = wstat
         if notes:
             data["notes"] = notes
         if ctx.get("note"):

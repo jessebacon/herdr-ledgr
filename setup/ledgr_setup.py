@@ -1976,6 +1976,105 @@ def public_answers(ans):
 
 
 # ── doctor ────────────────────────────────────────────────────────────────────────────────────
+def stall_bound_s():
+    """Seconds after which a writer that has not moved is stuck: mods/ledgr/writer.js PASS_STUCK_MS
+    (read from the repo's copy), else 90."""
+    try:
+        m = re.search(r"^export const PASS_STUCK_MS = (\d+);$", open(os.path.join(REPO, "mods", MOD, "writer.js"), encoding="utf-8").read(), re.M)
+        return int(m.group(1)) / 1000.0 if m else 90.0
+    except OSError:
+        return 90.0
+
+
+def span(s):
+    s = max(0, s)
+    return f"{int(s)} s" if s < 120 else f"{int(s // 60)} min" if s < 7200 else f"{int(s // 3600)} h {int(s % 3600 // 60)} min"
+
+
+def writer_report(ctx, f, now=None):
+    """--check's writer lines and its problems ([] when it applies events). Read-only: the claim Herdr saved
+    in shared.json (f["shared"]), the spool's event files and store.json's time. 2026-11-19: the writer held
+    a claim renewed every minute and applied nothing for hours, and --check said "healthy", so the claim's
+    freshness alone proves nothing, and neither does its age. An event waits when it is older than 5 s and
+    store.json was not written since it arrived. Then the writer is stalled unless its claim shows it at work
+    (fresh, a pass or start in one step for under stall_bound_s(): starting, or draining a backlog): the event
+    has waited past the bound, or the claim is stale, or its step is that old, or it is stuck with nothing
+    running. An event older than the bound while store.json moves on is one the writer does not apply."""
+    now = now or time.time()
+    lines, problems = [], []
+    w = f["shared"].get("ledgr.writer")
+    w = w if isinstance(w, dict) and w.get("id") else None
+    bound = stall_bound_s()
+    spool = os.path.join(ctx.data, "spool")
+    waiting = []
+    try:
+        for n in sorted(os.listdir(spool)):
+            if n.endswith(".json") and not n.startswith(".") and not n.startswith("bad-"):
+                try:
+                    waiting.append((os.path.getmtime(os.path.join(spool, n)), n))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    try:
+        store_m = os.path.getmtime(os.path.join(ctx.data, "store.json"))
+    except OSError:
+        store_m = None
+    oldest_m, oldest_n = min(waiting) if waiting else (None, None)
+    ps = w.get("pass") if w and isinstance(w.get("pass"), dict) else {}
+    st = w.get("stall") if w and isinstance(w.get("stall"), dict) else {}
+    if w:
+        at = (w.get("at") or 0) / 1000
+        extra = []
+        if ps.get("step"):
+            extra.append(f"in {ps['step']} for {span(now - (ps.get('since') or 0) / 1000)}")
+        if w.get("done"):
+            extra.append(f"last pass ended {ago(w['done'] / 1000)}")
+        if st:
+            extra.append(("restarted" if st.get("ok") else "STUCK") + f" {ago((st.get('back') or st.get('at') or 0) / 1000)} after {span((st.get('ms') or 0) / 1000)} in {st.get('step')}")
+        lines.append(f"  writer          held by {w.get('by')} (claimed {ago(at)})" + (f"; {'; '.join(extra)}" if extra else ""))
+        if w.get("fault"):
+            lines.append(f"  ! writer fault  {w['fault']}")
+    else:
+        lines.append("  writer          no claim yet" + (" (Herdr is not running)" if not f["running"] else " (show the panel, or add the host block)"))
+        if f["running"]:
+            problems.append("no writer holds the role")
+    lines.append(f"  spool           {len(waiting)} event{'' if len(waiting) == 1 else 's'} waiting"
+                 + (f", the oldest from {ago(oldest_m)}" if waiting else "") + f"; store.json written {ago(store_m)}"
+                 + ("" if f["running"] else " (Herdr is not running: they wait for its writer)"))
+    if not f["running"]:
+        return lines, problems
+    waited = now - oldest_m if oldest_m else 0
+    moved = oldest_m is not None and store_m is not None and store_m >= oldest_m
+    # An event waits when it is older than 5 s and store.json was not written since it arrived; only then
+    # does the claim count (2026-11-19 review: a claim is as old as the writer's last beat, hours old after
+    # the machine slept while the writer works). A fresh claim whose pass or start is in a step for under
+    # the bound is a writer at work (starting, or draining a backlog): behind, not stalled.
+    why = None
+    if waited > 5 and not moved:
+        at = (w.get("at") or 0) / 1000 if w else 0
+        step_s = now - ps["since"] / 1000 if ps.get("since") else None
+        if w and now - at <= 180 and step_s is not None and step_s <= bound:
+            lines.append(f"  writer          at work ({ps.get('step')}): {len(waiting)} event{'' if len(waiting) == 1 else 's'} to apply")
+        elif waited > bound:
+            why = (f"{len(waiting)} event{'' if len(waiting) == 1 else 's'} waiting, the oldest for {span(waited)}, and store.json "
+                   + ("missing" if store_m is None else f"last written {span(now - store_m)} ago"))
+        elif w and now - at > 180:
+            why = f"{w.get('by')}'s claim has not been renewed for {span(now - at)}"
+        elif step_s is not None and step_s > bound:
+            why = f"{w.get('by')} has waited {span(step_s)} in {ps.get('step')}"
+        elif w and not ps and st and st.get("ok") is False and st.get("kind") != "spool":
+            why = f"{w.get('by')} is stuck in {st.get('step')}" + (" and waits before it tries again" if st.get("retryAt") else "")
+    if why:
+        problems.append(f"the writer is not applying events: {why}. Relaunch Herdr (quit it and open it again): the writer "
+                        "starts again from store.json and applies the queue; nothing waiting is lost. ledgr-data/log/writer.log "
+                        "names the step it waited in")
+    elif waited > bound and moved:
+        problems.append(f"ledgr-data/spool/{oldest_n} has waited {span(waited)} while the writer applies the rest: it is not "
+                        "applied (unreadable, or over 1 MiB?). Move it out of the spool and look at it; ledgr-data/log/writer.log")
+    return lines, problems
+
+
 def cmd_check(ctx, args):
     st = State(ctx)
     f = preflight(ctx)
@@ -2054,13 +2153,10 @@ def cmd_check(ctx, args):
         n = lambda k: srcs.count(k)  # noqa: E731
         say(f"  extraction      last {len(srcs)} turns: {n('block') + n('tool')} declared by the agent (block {n('block')}, tool {n('tool')}), "
             f"{n('model')} extracted by the model, {n('skip')} skipped, {n('error')} failed")
-    w = f["shared"].get("ledgr.writer")
-    if isinstance(w, dict) and w.get("id"):
-        say(f"  writer          held by {w.get('by')} (claimed {ago((w.get('at') or 0) / 1000)})")
-    else:
-        say("  writer          no claim yet" + (" (Herdr is not running)" if not f["running"] else " (show the panel, or add the host block)"))
-        if f["running"]:
-            bad.append("no writer holds the role")
+    wlines, wproblems = writer_report(ctx, f)
+    for ln in wlines:
+        say(ln)
+    bad += wproblems
     if prov in ("anthropic", "openai-compatible"):
         okk = f["security"] and kc_exists(ctx, prov)
         say(f"  Keychain        service ledgr, account {prov}: {'resolves' if okk else 'MISSING'}")

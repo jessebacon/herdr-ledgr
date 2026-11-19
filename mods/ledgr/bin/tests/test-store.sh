@@ -120,8 +120,9 @@ assert merged["spaces"]["disabled"] == ["spA"], merged["spaces"]
 PY
 fi
 # The writer (tests/test_writer.mjs): the 2026-11-12 stall (store.json past Herdr's 1 MiB text-file cap),
-# a save fault on the status line, an event that throws moved to spool/failed, the heartbeat. Its own
-# scratch folder and a herdr stub with Herdr's 1 MiB cap.
+# a save fault on the status line, an event that throws moved to spool/failed, the heartbeat; the
+# 2026-11-19 stall (a pass that never returns: the watchdog, a restart from store.json, a late settle that
+# lands nothing, limits on the save, a takeover). Its own scratch folder and a herdr stub with Herdr's 1 MiB cap.
 WOUT=""
 if [ "$rc" = 0 ]; then
   WTMP=$(mktemp -d "${TMPDIR:-/tmp}/ledgr-writer.XXXXXX")

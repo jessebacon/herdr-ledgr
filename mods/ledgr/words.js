@@ -57,12 +57,40 @@ export const OFF_HERE = "ledgr is off in this space";
 
 // The writer's health on the panel's status line, from its claim (writer.js claim: `fault` while
 // store.json cannot be written, `failed` = the events it moved to ledgr-data/spool/failed because
-// their apply threw).
+// their apply threw; since 2026-11-19 `stall`, the watchdog's last finding, and `pass`, the step the
+// writer waited in at its last beat). In order: stuck now (restarting, or an event the passes do not
+// apply), a save fault, no progress by the claim's own pass (an engine copy without the watchdog), a
+// restart in the last STALL_SHOWN_MS; then the failed events.
+export const WRITER_STUCK_MS = 90000;      // writer.js PASS_STUCK_MS (test_writer.mjs checks they agree)
+// No claim holds the role (the panel's status line, 2026-11-19 review): the panel looks for a writer itself.
+export const NO_WRITER = "ledgr writer: none holds the role, so new events wait in the spool; this panel takes it over in a few seconds";
+export const STALL_SHOWN_MS = 600000;      // a restart the writer came back from stays said this long
 export const failedEventsWords = (n) => `${n} event${n === 1 ? "" : "s"} failed, see spool/failed`;
-export function writerHealthWords(w) {
+// "20 s", "4 min", "3 h 12 min": how long something waited (writer.js says it the same way, spool.js spanWords).
+export function waitWords(ms) {
+  const s = Math.max(0, Number(ms) || 0) / 1000;
+  if (s < 10) return `${Math.round(s * 10) / 10} s`;
+  if (s < 120) return `${Math.round(s)} s`;
+  const m = Math.round(s / 60);
+  return m < 120 ? `${m} min` : `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}`;
+}
+export function writerHealthWords(w, now = Date.now()) {
   if (!w || typeof w !== "object") return null;
   const out = [];
-  if (w.fault) out.push(`ledgr writer: ${String(w.fault).slice(0, 200)}; new events wait in the spool`);
+  const st = w.stall && typeof w.stall === "object" ? w.stall : null;
+  const step = (s) => String(s ?? "?").slice(0, 120);
+  const sinceStep = w.pass && Number(w.pass.since) ? now - Number(w.pass.since) : 0;
+  if (st && !st.ok) {
+    out.push(st.kind === "spool"
+      ? `ledgr writer: ${step(st.name ?? "a spool event")} has waited ${waitWords(st.ms)} in the spool and is not applied (log/writer.log)`
+      : st.retryAt
+        ? `ledgr writer stuck in ${step(st.step)}: ${st.tries} restarts in a row did not help; it tries again in ${waitWords(Number(st.retryAt) - now)}, or relaunch Herdr (log/writer.log); new events wait in the spool`
+        : `ledgr writer stuck ${waitWords(st.ms)} in ${step(st.step)}; restarting it (log/writer.log); new events wait in the spool`);
+  } else if (w.fault) out.push(`ledgr writer: ${String(w.fault).slice(0, 200)}; new events wait in the spool`);
+  else if (sinceStep > WRITER_STUCK_MS) out.push(`ledgr writer: no progress for ${waitWords(sinceStep)} (in ${step(w.pass.step)}); new events wait in the spool`);
+  else if (st?.ok && now - Number(st.back ?? st.at) < STALL_SHOWN_MS) {
+    out.push(`ledgr writer restarted ${agoWords(st.back ?? st.at, now)} after ${waitWords(st.ms)} stuck in ${step(st.step)} (log/writer.log)`);
+  }
   const n = Math.max(0, Math.floor(Number(w.failed) || 0));
   if (n) out.push(failedEventsWords(n));
   return out.length ? out.join(" · ") : null;
