@@ -67,8 +67,21 @@
 // `textPath`, null fields), as new ones do from now on. `restore` (the dialog's Reopen on an archived row)
 // puts an archived item back under its own id and handle (restoreItem). Pins never leave the store; open
 // items are never touched; handles are never reused (nextHandle is not derived from items).
+//
+// Cold sessions (2026-11-19, retention Phase 2): a session nobody touched for `retention.coldDays` (config.js
+// coldDaysOf, default 7, 0 = never) moves its items and turn records into ledgr-data/cold/<safe sid>.<ms>-
+// <rand6>.json; its session record stays here as the stub (`s.cold = {file, at, n, fault?}`, with its counts by
+// level in `n`), so the menu, the chips (countsOf), Forget, resume and the pins read it as before. Pins,
+// branches, terminals and nextHandle never leave. All pure here, as for Phase 1: planFreeze() / commitFreeze()
+// (the writer writes and confirms the file between them; commit checks the session again against the plan),
+// thaw() (back in, the store's copy winning), coldNeeded() (which cold sessions a batch needs warm: the writer
+// thaws them first, and apply() throws ColdError rather than apply an event to a cold session), coldFault()
+// (a file the writer could not read), on_cold_reset (use the session without it: `coldLost`), coldGarbage()
+// and coldUnproven() / coldLacks() (the files the sweep may delete: by name only a thawed or a forgotten
+// session's; any other only after a read proves store.json holds all of it), mergeCold() (a reading copy's view with the file's items added; what it
+// adds never reaches toText() or snapshot()).
 import { createHash, randomUUID } from "crypto";
-import { LIMITS, DEFAULTS, agentLabel, turnPath, retentionDays, ARCHIVE_LEGACY } from "./config.js";
+import { LIMITS, DEFAULTS, agentLabel, turnPath, retentionDays, ARCHIVE_LEGACY, safeName, COLD_NAME } from "./config.js";
 import { DEFAULT_MAX_DEPTH, manifest, preamble, branchName, branchLabel, depthOf } from "./branch.js";
 import { conclusionHead, decisionLine, decisionsHeader, pinText } from "./confluence.js";
 // A session id as a folder name (archive/<sid>/, mcp/<sid>/): config.js's one mapping, for the store's readers.
@@ -81,7 +94,29 @@ const ASK_KINDS = new Set(["decide", "confirm", "do", "provide", "review"]);
 const Q_KINDS = new Set(["question", "note", "bookmark"]);
 // The panel's own pin events: applied by pin id (a pin outlives its session), never creating one.
 const PIN_OPS = new Set(["pin_note", "pin_archive", "pin_restore", "pin_delete"]);
-const OWN_EVENTS = new Set(["act", "retry", "branch", "forget", "conclude", "close_branch", "resume", "clear_questions", "restore", ...PIN_OPS]);
+const OWN_EVENTS = new Set(["act", "retry", "branch", "forget", "conclude", "close_branch", "resume", "clear_questions", "restore",
+  "cold_retry", "cold_reset", ...PIN_OPS]);
+// Cold sessions (Phase 2): the events that never need a cold session warm. The pin ops go by pin id (pins
+// stay); Forget removes the stub (and its descendants) and never reads a file; cold_reset is the way out of a
+// file that cannot be read. Every other event needs its own session warm (coldNeeded).
+export const COLD_FREE = new Set([...PIN_OPS, "forget", "cold_reset"]);
+export const COLD_FORMAT = "ledgr-cold";
+// apply() was handed an event for a session still cold (a coldNeeded gap): thrown rather than applied, so the
+// writer's quarantine keeps the event in spool/failed. `.cold`: the sessions it needs.
+export class ColdError extends Error {
+  constructor(sids) {
+    const list = [...(sids ?? [])].map(String);
+    super(`the event needs ${list.length === 1 ? "a cold session" : "cold sessions"} brought back first (${list.map((x) => x.slice(0, 8)).join(", ")})`);
+    this.name = "ColdError";
+    this.cold = list;
+  }
+}
+// A branch in one of these states keeps both its parent and its child session warm (a launch, a run or a
+// confluence waiting to land).
+const BRANCH_ACTIVE = new Set(["launching", "launched", "running", "concluded"]);
+// The files a session record lists as thawed (`coldThawed`, the sweep's proof that a file is redundant): the
+// newest this many; the sweep also trims an entry once its file is gone or a day old (trimThawed).
+export const COLD_THAWED_MAX = 8;
 export const PIN_ID = /^pn_[A-Za-z0-9-]{8,64}$/;
 // An item id as the store makes them (newId("rq"); the demo's rq_demo_N): what a restored record must carry.
 const ITEM_ID = /^rq_[A-Za-z0-9_-]{1,80}$/;
@@ -123,6 +158,29 @@ function leanTurn(sid, turn, rec) {
   dropNulls(rec);
   for (const k of ["asks", "retry"]) if (rec[k] && typeof rec[k] === "object" && !Array.isArray(rec[k])) dropNulls(rec[k]);
   return rec;
+}
+
+// ── cold files (Phase 2) ──────────────────────────────────────────────────
+const isObj = (o) => Boolean(o) && typeof o === "object" && !Array.isArray(o);
+// What is wrong with a cold file's record for session sid (its parsed JSON), or null: the format, the version,
+// the session, and every item an object of that session with an id, every turn record an object. One check
+// for thaw(), mergeCold() and the reading copies (reader.js validates a loaded file with it): a record that
+// fails it is never partly used. `__proto__` is refused as an id or a turn key (it would reach the prototype).
+export function coldRecordError(record, sid) {
+  if (!isObj(record)) return "not a cold file (no JSON object)";
+  if (record.ledgr !== COLD_FORMAT) return `not a cold file (ledgr ${JSON.stringify(record.ledgr ?? null).slice(0, 40)})`;
+  if (record.v !== 1) return `cold file version ${JSON.stringify(record.v ?? null).slice(0, 20)}, not 1`;
+  if (typeof sid !== "string" || !sid || record.sessionId !== sid) return `the file is session ${String(record.sessionId ?? "?").slice(0, 40)}'s, not ${String(sid).slice(0, 40)}`;
+  if (!Array.isArray(record.items)) return "the file holds no item list";
+  if (record.turns !== undefined && record.turns !== null && !isObj(record.turns)) return "the file's turn records are not a map";
+  for (const [i, it] of record.items.entries()) {
+    if (!isObj(it) || typeof it.id !== "string" || !it.id || it.id === "__proto__") return `item ${i + 1} of the file has no id`;
+    if (it.anchor?.sessionId !== sid) return `item ${it.id.slice(0, 40)} in the file is another session's`;
+  }
+  for (const [k, r] of Object.entries(record.turns ?? {})) {
+    if (k === "__proto__" || !isObj(r)) return `turn record ${k.slice(0, 20)} of the file is not a record`;
+  }
+  return null;
 }
 
 export const isAgentAsk = (it) => it?.direction === AGENT;
@@ -223,6 +281,9 @@ export class Store {
     this.threshold = DEFAULT_THRESHOLD;
     // config.json spaces.disabled (config.js disabledSpaces); the writer sets it, chips() reads it.
     this.spacesOff = new Set();
+    // Cold sessions a reading copy merged (mergeCold): sid -> {file, items: Set<id>, turns: Set<key>}, what the
+    // merge added. On the instance, never in `d`: toText() and snapshot() leave it out.
+    this.merged = new Map();
   }
 
   // An open item that counts: on the chip, for "surfaced", in the lanes' "N open" (not a suggestion).
@@ -238,7 +299,9 @@ export class Store {
 
   get empty() { return !Object.keys(this.d.items).length && !Object.keys(this.d.sessions).length; }
 
-  toText() { return JSON.stringify(this.d); }
+  // store.json's text. What a reading copy merged from cold files is left out (unmerged), so a merged store
+  // written by mistake still names its cold sessions' files and holds none of their items.
+  toText() { return JSON.stringify(this.merged.size ? this.unmerged() : this.d); }
 
   // ── lookups ──────────────────────────────────────────────────────────
   items() { return Object.values(this.d.items); }
@@ -406,10 +469,18 @@ export class Store {
   // re-run, launch the branches to start, decisions the lines to append to a trunk's decisions.md,
   // close the branch terminals to end (all async, done by the writer). A `restore` event also returns
   // `restore: {item, ok, error?}`, whatever became of it, so the writer can say so (on_restore).
+  // Cold sessions (Phase 2): an event that needs a cold session warm (coldNeeded) throws ColdError and changes
+  // nothing; the writer thaws first. A cold_retry is the exception: it changes nothing, so one whose read failed
+  // (the session still cold) is recorded and dropped. Every event of a warm session but the pin ops moves its
+  // `touchedAt` (the idle clock) to the event's time.
   apply(ev) {
     const out = { applied: false, settle: [], retry: [], launch: [], decisions: [], close: [], resume: [] };
     if (!ev || typeof ev !== "object" || !ev.type) return out;
     if (ev.id && this.d.ingested.includes(ev.id)) return out;
+    if (!COLD_FREE.has(ev.type) && ev.type !== "cold_retry") {
+      const c = this.coldOf(ev);
+      if (c.length) throw new ColdError(c);
+    }
     const sid = str(ev.session_id) ?? str(ev.session) ?? str(ev.request?.anchor?.sessionId);
     const at = num(ev.at, Date.now());
     // The panel's own events (act, retry, branch, forget, conclude, close_branch, restore) never create a session.
@@ -441,6 +512,14 @@ export class Store {
       s.updatedAt = Math.max(num(s.updatedAt), at);
       const fn = this[`on_${ev.type}`];
       if (typeof fn === "function") fn.call(this, ev, s, at, out);
+    }
+    // The idle clock (touchedAt): the session still recorded and warm (Forget removed it; a cold_retry whose
+    // read failed leaves the stub as it was; cold_reset sets it itself), pin ops aside, and an act "seen" aside:
+    // a session that is only looked at is not in use (the panel posts one whenever it shows a surfaced session).
+    if (sid && !PIN_OPS.has(ev.type) && !(ev.type === "act" && ev.action === "seen")
+      && Object.prototype.hasOwnProperty.call(this.d.sessions, sid) && !this.d.sessions[sid].cold && !this.isForgotten(sid)) {
+      const s = this.d.sessions[sid];
+      if (!(num(s.touchedAt) >= at)) s.touchedAt = at;
     }
     if (ev.id) {
       this.d.ingested.push(ev.id);
@@ -847,6 +926,9 @@ export class Store {
   // terminal mapping and branches, and its branch sessions with theirs (recursively). Its id is
   // remembered (200 most recent) so a late hook event or the identity map does not bring it back.
   // Its pins stay (each keeps its `source`, and its usedIn/answeredIn keep handle and head).
+  // A cold session (Phase 2) goes the same way, its stub and those of its descendants (found through the
+  // stubs' parentSessionId and the branch records): no file is read, so a lost one cannot stop it; the sweep
+  // deletes the files a day later (coldGarbage: a forgotten session's).
   on_forget(_ev, s, at) {
     const gone = new Set([s.sessionId]);
     for (let grew = true; grew;) {
@@ -855,7 +937,7 @@ export class Store {
       for (const x of Object.values(this.d.sessions)) if (x.parentSessionId && gone.has(x.parentSessionId)) add(x.sessionId);
       for (const b of Object.values(this.d.branches)) if (gone.has(b.parentSessionId)) add(b.sessionId);
     }
-    for (const sid of gone) { delete this.d.sessions[sid]; delete this.d.turns[sid]; this.d.forgotten[sid] = at; }
+    for (const sid of gone) { delete this.d.sessions[sid]; delete this.d.turns[sid]; this.d.forgotten[sid] = at; this.merged.delete(sid); }
     for (const [id, it] of Object.entries(this.d.items)) if (gone.has(it.anchor?.sessionId)) delete this.d.items[id];
     for (const [id, b] of Object.entries(this.d.branches)) if (gone.has(b.parentSessionId) || gone.has(b.sessionId)) delete this.d.branches[id];
     for (const [t, m] of Object.entries(this.d.terminals)) if (gone.has(m.sessionId)) delete this.d.terminals[t];
@@ -1241,7 +1323,8 @@ export class Store {
   // counted asks arrived when they all arrived one way ("tool": declare_asks, "extract_block",
   // "extract_model"), for the chip's tooltip. A terminal in a space where ledgr is off (spaces.disabled)
   // has no chip; `live(t)` names a terminal's space when the hooks recorded none (the writer passes
-  // config.js terminalSpace).
+  // config.js terminalSpace). A cold session's chip (Phase 2) counts from its stub (countsOf, `n.qNew` for
+  // "collecting") and has no `o`: the same chip as before the freeze otherwise.
   chips(now = Date.now(), live = null) {
     const out = {};
     for (const [t, m] of Object.entries(this.d.terminals)) {
@@ -1249,13 +1332,16 @@ export class Store {
       if (!s || s.state === "ended") continue;
       if (this.isOff(t, s, live)) continue;
       const mine = this.itemsOf(s.sessionId).filter((it) => this.counts(it));
-      const q = mine.filter(isHuman).length, a = mine.filter(isAgentAsk).length, b = mine.filter(isBlocking).length;
+      const cold = Boolean(s.cold) && !this.isMerged(s.sessionId);
+      const newQ = (list) => list.filter((it) => isHuman(it) && num(it.createdAt) >= num(s.promptAt)).length;
+      let q = mine.filter(isHuman).length, a = mine.filter(isAgentAsk).length, b = mine.filter(isBlocking).length;
+      if (cold) ({ q, a, b } = this.countsOf(s.sessionId));
       const p = this.pendingTurn(s.sessionId, now);
       if (!q && !a && p === null) continue;
-      const parked = mine.filter((it) => isHuman(it) && num(it.createdAt) >= num(s.promptAt)).length;
+      const parked = cold ? tally(s.cold.n?.qNew) + newQ(mine) : newQ(mine);
       const working = s.state === "working";
       const st = b ? "blocking" : working && parked ? "collecting" : s.surfaced ? "surfaced" : "seen";
-      const via = [...new Set(mine.filter(isAgentAsk).map((it) => it.origin).filter(Boolean))];
+      const via = cold ? [] : [...new Set(mine.filter(isAgentAsk).map((it) => it.origin).filter(Boolean))];
       out[t] = { s: s.sessionId, q, a, st, t: s.turn, ag: agentLabel(m.agent ?? s.agent), ...(b ? { b } : {}), ...(p !== null ? { p } : {}),
         ...(via.length === 1 ? { o: via[0] } : {}), ...(working ? { w: 1 } : {}) };
     }
@@ -1367,6 +1453,9 @@ export class Store {
     if (typeof id !== "string" || !ITEM_ID.test(id) || typeof sid !== "string" || !sid) return null;
     if (own(this.d.items, id)) return this.d.items[id];
     if (this.isForgotten(sid)) return null;
+    // A cold session's items live in its file (Phase 2): never one beside its stub. apply() thaws the
+    // session before a restore reaches here; this is the defensive half.
+    if (own(this.d.sessions, sid) && this.d.sessions[sid].cold) return null;
     const it = copy(record);
     delete it.archiveFile;   // a reading copy's note of where it read the record, never the item's
     const s = own(this.d.sessions, sid) ? this.d.sessions[sid] : null;
@@ -1417,15 +1506,548 @@ export class Store {
   // items dismissed in the last 7 days (so the model can mark a re-raise with repeat_of);
   // quotes over 200 characters dropped. Pins never reach it (they are not items), nor do a
   // question's pin ids: the extractor and the MCP server see no pin this round.
+  // Cold sessions (Phase 2): `cold` names each one's file and the writer's fault (its error, or null), and
+  // their items are not here (the readers read the file: bin/lib ledgr_extract.session_items, with this
+  // filter); what a reading copy merged is left out too.
   snapshot(now = Date.now()) {
     const recent = (it) => it.status === "dismissed" && num(it.resolvedAt ?? it.updatedAt) >= now - 7 * 86400e3;
-    const items = this.items().filter((it) => OPEN_STATES.has(it.status) || recent(it)).map((it) => {
+    const merged = this.mergedIds();
+    const items = this.items().filter((it) => !merged.has(it.id) && (OPEN_STATES.has(it.status) || recent(it))).map((it) => {
       const c = { ...it, sessionId: it.anchor?.sessionId ?? null, anchor: { ...it.anchor } };
       if (c.anchor.quote && c.anchor.quote.length > 200) delete c.anchor.quote;
       delete c.draft;
       delete c.pins;
       return c;
     });
-    return { v: 1, updatedAt: now, items };
+    const cold = {};
+    for (const [sid, s] of Object.entries(this.d.sessions)) {
+      if (!s?.cold) continue;
+      const f = s.cold.fault;
+      cold[sid] = { file: str(s.cold.file), fault: f ? str(f.error) ?? "the file cannot be read" : null };
+    }
+    return { v: 1, updatedAt: now, items, cold };
+  }
+
+  // ── cold sessions (retention Phase 2, 2026-11-19) ────────────────────
+  // Lookups. A session is cold while its record carries `cold`; merged while a reading copy holds its file's
+  // items beside the stub (mergeCold); mixed when it is cold yet the store holds items or turn records of it
+  // (an older build added them beside the stub, or a merge reached the writer): the writer thaws those.
+  isCold(sid) { return own(this.d.sessions, sid) && Boolean(this.d.sessions[sid]?.cold); }
+  isMerged(sid) { return this.merged.has(sid) && this.isCold(sid) && this.merged.get(sid).file === this.d.sessions[sid].cold.file; }
+  coldSessions() { return Object.keys(this.d.sessions).filter((sid) => this.isCold(sid)); }
+  coldFaults() {
+    return this.coldSessions().filter((sid) => isObj(this.d.sessions[sid].cold.fault)).map((sid) => {
+      const c = this.d.sessions[sid].cold, f = c.fault;
+      return { sid, file: str(c.file), at: num(f.at), error: str(f.error) ?? "the file cannot be read", tries: tally(f.tries), held: tally(f.held) };
+    });
+  }
+  mixedCold() {
+    const has = new Set(this.items().map((it) => it.anchor?.sessionId));
+    return this.coldSessions().filter((sid) => has.has(sid) || (isObj(this.d.turns[sid]) && Object.keys(this.d.turns[sid]).length > 0));
+  }
+  // The ids a merge added (every merged session's), for toText() and snapshot().
+  mergedIds() {
+    const out = new Set();
+    for (const m of this.merged.values()) for (const id of m.items) out.add(id);
+    return out;
+  }
+  // `d` without what mergeCold added: a shallow copy, its keys in their order; a turn map the merge alone
+  // made is left out whole.
+  unmerged() {
+    const ids = this.mergedIds();
+    const items = {};
+    for (const [id, it] of Object.entries(this.d.items)) if (!ids.has(id)) items[id] = it;
+    const turns = { ...this.d.turns };
+    for (const [sid, m] of this.merged) {
+      if (!isObj(turns[sid]) || !m.turns.size) continue;
+      const all = {};
+      for (const [k, r] of Object.entries(turns[sid])) if (!m.turns.has(k)) all[k] = r;
+      if (Object.keys(all).length || !m.madeTurns) turns[sid] = all; else delete turns[sid];
+    }
+    return { ...this.d, items, turns };
+  }
+
+  // The idle clock: the latest time anything happened to the session. The record's own times (touchedAt,
+  // updatedAt, thawedAt, promptAt, lastStopAt, resume.at and resumedAt, lastClear.at), every item's
+  // updatedAt and every turn record's stopAt, asks.at and retry.at (Phase 1's slimming keeps all three). The
+  // panel's own events set no updatedAt on the record; they reach the items and records, or touchedAt. Not
+  // seenAt: a session only looked at is not in use (the contract listed it; a cold session's menu row then
+  // said "idle 1 min" after a look, and a session shown every day never went cold). A stub carries the clock
+  // it had at the freeze in its touchedAt (commitFreeze), since its items and turn records are in the file.
+  touchedAt(sid) {
+    let t = 0;
+    const see = (v) => { const x = Number(v); if (Number.isFinite(x) && x > t) t = x; };
+    const s = own(this.d.sessions, sid) ? this.d.sessions[sid] : null;
+    if (s) for (const v of [s.touchedAt, s.updatedAt, s.thawedAt, s.promptAt, s.lastStopAt, s.resume?.at, s.resume?.resumedAt, s.lastClear?.at]) see(v);
+    for (const it of this.itemsOf(sid)) see(it.updatedAt);
+    const all = own(this.d.turns, sid) ? this.d.turns[sid] : null;
+    if (isObj(all)) for (const r of Object.values(all)) { see(r?.stopAt); see(r?.asks?.at); see(r?.retry?.at); }
+    return t;
+  }
+
+  // The counts a stub carries (`s.cold.n`), from the session's items and turn records now: q open parked
+  // questions, qNew those created at or after the last prompt (the chip's "collecting"), blocking the open
+  // blocking asks (promoted or not), needed and optional the open asks of those levels not promoted, promoted
+  // the open promoted asks below blocking, answered, closed (resolved or dismissed), and the totals in the
+  // file, items and turns. By level, so any threshold can be counted from them (countsOf).
+  coldCounts(sid) {
+    const n = { q: 0, qNew: 0, blocking: 0, needed: 0, optional: 0, promoted: 0, answered: 0, closed: 0, items: 0, turns: 0 };
+    const s = own(this.d.sessions, sid) ? this.d.sessions[sid] : null;
+    for (const it of this.itemsOf(sid)) {
+      n.items++;
+      if (it.status === "answered") n.answered++;
+      else if (isClosed(it)) n.closed++;
+      if (it.status !== "open") continue;
+      if (isHuman(it)) { n.q++; if (num(it.createdAt) >= num(s?.promptAt)) n.qNew++; }
+      else if (isAgentAsk(it)) {
+        const lv = levelOf(it);
+        if (lv === "blocking") n.blocking++;
+        else if (it.promoted === true) n.promoted++;
+        else n[lv]++;
+      }
+    }
+    const all = own(this.d.turns, sid) ? this.d.turns[sid] : null;
+    n.turns = isObj(all) ? Object.keys(all).length : 0;
+    return n;
+  }
+
+  // A session's counts at `this.threshold`: q (open parked questions), a (open asks that count), b (the open
+  // blocking ones), below (open asks below the threshold, not promoted), answered, closed, open (q + a); a
+  // and b are what the chip shows, open what the session menu says. A cold session that is not merged counts
+  // from its stub's `n` (plus anything an older build added beside it); any other from its items.
+  countsOf(sid) {
+    const th = LEVELS.includes(this.threshold) ? this.threshold : DEFAULT_THRESHOLD;
+    const out = { q: 0, a: 0, b: 0, below: 0, answered: 0, closed: 0, open: 0 };
+    const s = own(this.d.sessions, sid) ? this.d.sessions[sid] : null;
+    if (s?.cold && !this.isMerged(sid)) {
+      const n = isObj(s.cold.n) ? s.cold.n : {}, c = (k) => tally(n[k]);
+      out.q = c("q"); out.b = c("blocking"); out.answered = c("answered"); out.closed = c("closed");
+      out.a = out.b + c("promoted") + (th !== "blocking" ? c("needed") : 0) + (th === "optional" ? c("optional") : 0);
+      out.below = (th === "blocking" ? c("needed") : 0) + (th !== "optional" ? c("optional") : 0);
+    }
+    for (const it of this.itemsOf(sid)) {
+      if (it.status === "answered") out.answered++;
+      else if (isClosed(it)) out.closed++;
+      else if (it.status === "open") {
+        if (isHuman(it)) out.q++;
+        else if (isAgentAsk(it)) {
+          if (isSuggestion(it, th)) out.below++;
+          else { out.a++; if (isBlocking(it)) out.b++; }
+        }
+      }
+    }
+    out.open = out.q + out.a;
+    return out;
+  }
+
+  // ── freeze ──
+  // Why the session cannot go cold whatever its clock says (the store's rules), or null: it is not recorded,
+  // forgotten or already cold; its id makes no file name of its own (empty, beginning with ".", or a safe name another
+  // recorded or forgotten session shares: its file and held/ folder would be ambiguous); it holds a deferred
+  // item (next_session wakes by folder across every session, a time by wake()'s scan of items()), a
+  // confluence waiting to land (rejoin_pending, `rejoin`), a branch launching, launched, running or concluded
+  // on either side, a resume launching or launched, or a turn whose extraction re-run is requested or running.
+  // `safe` (optional): safeName -> how many sessions use it, computed once per plan.
+  freezeBlocker(sid, safe = null) {
+    if (!own(this.d.sessions, sid)) return "not recorded";
+    const s = this.d.sessions[sid];
+    if (this.isForgotten(sid)) return "forgotten";
+    if (s.cold) return "already cold";
+    const nm = safeName(sid);
+    // A leading "." (a hidden name) is refused too (integration, 2026-11-19): the readers take such a name only
+    // as that session's own, and a listing that skips hidden entries would lose its held folder.
+    if (!nm || nm.startsWith(".") || !COLD_NAME.test(`${nm}.1000000000000-aaaaaa.json`)) return "its id makes no file name";
+    if ((safe ?? this.safeNames()).get(nm) > 1) return "another session has the same file name";
+    for (const it of this.itemsOf(sid)) {
+      if (it.status === "deferred") return `${it.handle ?? it.id} is deferred`;
+      if (it.status === "rejoin_pending" || it.rejoin) return `${it.handle ?? it.id} waits for its confluence`;
+    }
+    for (const b of Object.values(this.d.branches)) {
+      if ((b?.parentSessionId === sid || b?.sessionId === sid) && BRANCH_ACTIVE.has(b.status)) return `branch ${b.name ?? b.id} is ${b.status}`;
+    }
+    if (s.resume && (s.resume.state === "launching" || s.resume.state === "launched")) return `a resume is ${s.resume.state}`;
+    const all = own(this.d.turns, sid) ? this.d.turns[sid] : null;
+    if (isObj(all)) for (const [k, r] of Object.entries(all)) {
+      if (r?.retry?.state === "requested" || r?.retry?.state === "running") return `turn ${k}'s extraction is ${r.retry.state}`;
+    }
+    return null;
+  }
+  // safeName -> how many recorded or forgotten sessions it names.
+  safeNames() {
+    const m = new Map();
+    for (const sid of new Set([...Object.keys(this.d.sessions), ...Object.keys(this.d.forgotten)])) { const k = safeName(sid); m.set(k, (m.get(k) ?? 0) + 1); }
+    return m;
+  }
+  // The session's items and turn records as one text: what a plan's `sig` is and commitFreeze compares.
+  coldSig(sid) { return JSON.stringify({ items: this.itemsOf(sid), turns: own(this.d.turns, sid) ? this.d.turns[sid] ?? null : null }); }
+
+  // The sessions a freeze run would move, planned and not applied: every session idle more than `days` days
+  // (touchedAt), that holds items or turn records, that freezeBlocker() lets go and canFreeze(sid) (the
+  // writer's: no live terminal, not in the open dialog, not in the running pass) allows; oldest idle first, at
+  // most `max`. Nothing before Phase 1's first run has finished (`d.retention.v` 1), nothing at days 0. Each
+  // entry: {sid, record (the cold file's object, `at` now, made of copies), sig}. Mutates nothing.
+  planFreeze(days, now = Date.now(), { canFreeze = () => true, max = Infinity } = {}) {
+    const dd = nonNeg(days, 0);
+    if (!(dd > 0) || this.d.retention?.v !== 1) return [];
+    const at = Math.floor(num(now, Date.now()));
+    const safe = this.safeNames();
+    const due = [];
+    for (const sid of Object.keys(this.d.sessions)) {
+      if (this.isCold(sid)) continue;
+      const items = this.itemsOf(sid), all = own(this.d.turns, sid) ? this.d.turns[sid] : null;
+      if (!items.length && !(isObj(all) && Object.keys(all).length)) continue;
+      const t = this.touchedAt(sid);
+      if (!(at - t > dd * DAY_MS)) continue;
+      if (this.freezeBlocker(sid, safe)) continue;
+      due.push({ sid, t });
+    }
+    due.sort((x, y) => x.t - y.t || (x.sid < y.sid ? -1 : 1));
+    const out = [], cap = Math.max(0, num(max, Infinity));
+    for (const { sid } of due) {
+      if (out.length >= cap) break;
+      let ok = false;
+      try { ok = canFreeze(sid) === true; } catch { ok = false; }
+      if (!ok) continue;
+      const s = this.d.sessions[sid];
+      const turns = own(this.d.turns, sid) && isObj(this.d.turns[sid]) ? this.d.turns[sid] : {};
+      const record = { ledgr: COLD_FORMAT, v: 1, sessionId: sid, at, session: copy(s), items: copy(this.itemsOf(sid)), turns: copy(turns), n: this.coldCounts(sid) };
+      out.push({ sid, record, sig: this.coldSig(sid) });
+    }
+    return out;
+  }
+
+  // A plan's files written and confirmed: done = [{sid, record, sig, file}]. Each session goes cold only if
+  // nothing changed since its plan: it is recorded and warm, freezeBlocker() and canFreeze still let it go,
+  // its record is as planned (no event, map record, seen or space reached it), its items and turn records are
+  // the plan's `sig` and the record's (so the file holds exactly what leaves), and `file` is its name with the
+  // record's `at`. Then, in one step: the record keeps the idle clock it has now (`touchedAt`: the items and
+  // turn records it is read from leave), its items and turn records leave the store and the record names the
+  // file (`cold: {file, at, n}`). Returns the sessions frozen, in the order given; the writer unlinks the other
+  // files. The same list again freezes nothing; neither does a store without Phase 1's mark. `now` is not
+  // read (the idle clock cannot have moved back: the record and the items are as planned).
+  commitFreeze(done, now = Date.now(), { canFreeze = () => true } = {}) {
+    const out = [], safe = this.safeNames();
+    if (this.d.retention?.v !== 1) return out;
+    for (const x of Array.isArray(done) ? done : []) {
+      const sid = x?.sid, rec = x?.record, file = x?.file;
+      if (typeof sid !== "string" || !isObj(rec) || typeof file !== "string" || !own(this.d.sessions, sid)) continue;
+      const s = this.d.sessions[sid];
+      if (s.cold || this.freezeBlocker(sid, safe)) continue;
+      const m = COLD_NAME.exec(file);
+      if (!m || m[1] !== safeName(sid) || Number(m[2]) !== rec.at || rec.sessionId !== sid || rec.ledgr !== COLD_FORMAT || rec.v !== 1) continue;
+      if (x.sig !== this.coldSig(sid)) continue;
+      const turnsNow = own(this.d.turns, sid) && isObj(this.d.turns[sid]) ? this.d.turns[sid] : {};
+      if (JSON.stringify(rec.session) !== JSON.stringify(s) || JSON.stringify(rec.items) !== JSON.stringify(this.itemsOf(sid))
+        || JSON.stringify(rec.turns) !== JSON.stringify(turnsNow) || JSON.stringify(rec.n) !== JSON.stringify(this.coldCounts(sid))) continue;
+      let ok = false;
+      try { ok = canFreeze(sid) === true; } catch { ok = false; }
+      if (!ok) continue;
+      const clock = this.touchedAt(sid);
+      if (clock > num(s.touchedAt)) s.touchedAt = clock;
+      for (const it of this.itemsOf(sid)) delete this.d.items[it.id];
+      delete this.d.turns[sid];
+      s.cold = { file, at: rec.at, n: copy(rec.n) };
+      out.push(sid);
+    }
+    return out;
+  }
+
+  // ── thaw and merge ──
+  // The sessions an event needs warm: its own (session_id, else session, else request.anchor.sessionId), a
+  // branch_started's parent_session_id too, a pins_asked's for_session too; only those that are cold. None
+  // for the COLD_FREE events, for an act "seen" (it marks the record's chip seen, nothing else), and for an
+  // event apply() drops (a forgotten session's). The writer leaves out what `ingested` already holds.
+  coldOf(ev) {
+    if (!isObj(ev) || !ev.type || COLD_FREE.has(ev.type)) return [];
+    if (ev.type === "act" && ev.action === "seen") return [];
+    const sid = str(ev.session_id) ?? str(ev.session) ?? str(ev.request?.anchor?.sessionId);
+    if (!sid || this.isForgotten(sid)) return [];
+    const out = [];
+    const add = (x) => { if (x && this.isCold(x) && !this.isForgotten(x) && !out.includes(x)) out.push(x); };
+    add(sid);
+    if (ev.type === "branch_started") add(str(ev.parent_session_id));
+    if (ev.type === "pins_asked") add(str(ev.for_session));
+    return out;
+  }
+  // coldOf over a batch: Set<sid> of the cold sessions it needs, the events already in `ingested` left out.
+  // It may name a session the same batch later forgets (thawing it is harmless).
+  coldNeeded(events) {
+    const out = new Set(), ing = new Set(this.d.ingested);
+    for (const ev of Array.isArray(events) ? events : []) {
+      if (!isObj(ev) || (ev.id && ing.has(ev.id))) continue;
+      for (const sid of this.coldOf(ev)) out.add(sid);
+    }
+    return out;
+  }
+
+  // The file's items and turn records back in the store (the writer, once it has read and parsed the file the
+  // stub names). Refused (nothing changed) when the record fails coldRecordError, or the session is not
+  // recorded, not cold, or names another file. Items go in file order, the ones whose id the store already
+  // holds left out (the store's copy wins: a mixed session), then the store's own items of the session after
+  // them; turn records the same by key. `it.branch` naming a branch record no longer there goes, as Forget
+  // drops it. nextHandle becomes the larger of the stub's, the file's and one past every handle the session's
+  // items hold, so no handle is handed out twice. The file stays on disk (the sweep deletes it after the
+  // grace). {ok: true, items, turns} (how many came back; `kept`, those the store won) or {ok: false, error}.
+  thaw(sid, record, file, now = Date.now()) {
+    const s = own(this.d.sessions, sid) ? this.d.sessions[sid] : null;
+    if (!s) return { ok: false, error: "the session is not in the store" };
+    if (!s.cold) return { ok: false, error: "the session is not cold" };
+    if (s.cold.file !== file) return { ok: false, error: `the session names ${String(s.cold.file).slice(0, 80)}, not ${String(file).slice(0, 80)}` };
+    const bad = coldRecordError(record, sid);
+    if (bad) return { ok: false, error: bad };
+    const theirs = this.itemsOf(sid);
+    // A handle the store's own items of the session already hold (integration, 2026-11-19): a session that came
+    // back warm after store.json lost its stub (a corrupt start, an older copy put back) counts from A1 again, and
+    // a file merged into it by hand (Retention.md 10.8) holds A1 too. Such an item of the file takes the next
+    // handle once the counters are raised, its own kept as `handleWas` (as restoreItem does).
+    const held = new Set(theirs.map((it) => it.handle).filter((h) => typeof h === "string" && h));
+    const clash = [];
+    let items = 0, turns = 0, keptItems = 0, keptTurns = 0;
+    for (const it of record.items) {
+      if (own(this.d.items, it.id)) { keptItems++; continue; }
+      const c = copy(it);
+      if (c.branch && !own(this.d.branches, c.branch.branchId)) delete c.branch;
+      this.d.items[c.id] = c;
+      if (typeof c.handle === "string" && held.has(c.handle)) clash.push(c); else if (typeof c.handle === "string") held.add(c.handle);
+      items++;
+    }
+    for (const it of theirs) { delete this.d.items[it.id]; this.d.items[it.id] = it; }
+    for (const [k, r] of Object.entries(record.turns ?? {})) {
+      const all = own(this.d.turns, sid) && isObj(this.d.turns[sid]) ? this.d.turns[sid] : (this.d.turns[sid] = {});
+      if (own(all, k)) { keptTurns++; continue; }
+      all[k] = copy(r);
+      turns++;
+    }
+    this.raiseHandles(s, record.session?.nextHandle);
+    for (const c of clash) {
+      const m = /^([AQ])\d+$/.exec(c.handle);
+      if (!m) continue;
+      if (!isObj(s.nextHandle)) s.nextHandle = { A: 1, Q: 1, P: 1 };
+      const k = m[1], next = Math.max(1, Math.floor(Number(s.nextHandle[k]) || 1));
+      c.handleWas = c.handle;
+      c.handle = `${k}${next}`;
+      s.nextHandle[k] = next + 1;
+    }
+    delete s.cold;
+    this.merged.delete(sid);
+    s.thawedAt = s.touchedAt = num(now, Date.now());
+    // The file is now redundant for this store's history (its items are here, the store's own winning): the
+    // sweep may delete it by name, after the grace (coldGarbage), and only because this record lists it.
+    const was = Array.isArray(s.coldThawed) ? s.coldThawed.filter((e) => isObj(e) && e.file !== file) : [];
+    s.coldThawed = [...was, { file, at: s.thawedAt }].slice(-COLD_THAWED_MAX);
+    return { ok: true, items, turns, kept: { items: keptItems, turns: keptTurns } };
+  }
+  // nextHandle at least `other`'s (the file's copy of the record) and past every A/Q handle the session's
+  // items hold; a counter already high enough is left as it is (a missing one stays missing unless raised).
+  raiseHandles(s, other) {
+    const want = {};
+    const up = (k, v) => { const x = Number(v); if (Number.isFinite(x) && x >= 1) want[k] = Math.max(want[k] ?? 0, Math.floor(x)); };
+    if (isObj(other)) for (const k of ["A", "Q", "P"]) up(k, other[k]);
+    for (const it of this.itemsOf(s.sessionId)) {
+      const m = /^([AQ])(\d+)$/.exec(String(it.handle ?? ""));
+      if (m) up(m[1], Number(m[2]) + 1);
+    }
+    for (const [k, v] of Object.entries(want)) {
+      const cur = Number(s.nextHandle?.[k]);
+      if (Number.isFinite(cur) && cur >= v) continue;
+      if (v <= 1 && !Number.isFinite(cur)) continue;
+      if (!isObj(s.nextHandle)) s.nextHandle = { A: 1, Q: 1, P: 1 };
+      s.nextHandle[k] = v;
+    }
+  }
+
+  // A reading copy's view of a cold session: copies of the file's items and turn records beside its stub (the
+  // store's own winning, as in thaw), `s.cold` unchanged, the session marked merged (countsOf and chips() then
+  // count from the items). What it adds stays out of toText() and snapshot(); a writer never merges. The same
+  // file again adds nothing. false when the record fails coldRecordError or the stub does not name `file`.
+  mergeCold(sid, record, file) {
+    if (!this.isCold(sid) || this.d.sessions[sid].cold.file !== file || coldRecordError(record, sid)) return false;
+    let m = this.merged.get(sid);
+    if (m && m.file !== file) { this.unmerge(sid); m = null; }
+    if (!m) { m = { file, items: new Set(), turns: new Set(), madeTurns: false }; this.merged.set(sid, m); }
+    for (const it of record.items) {
+      if (own(this.d.items, it.id)) continue;
+      const c = copy(it);
+      if (c.branch && !own(this.d.branches, c.branch.branchId)) delete c.branch;
+      this.d.items[c.id] = c;
+      m.items.add(c.id);
+    }
+    for (const [k, r] of Object.entries(record.turns ?? {})) {
+      if (!(own(this.d.turns, sid) && isObj(this.d.turns[sid]))) { this.d.turns[sid] = {}; m.madeTurns = true; }
+      if (own(this.d.turns[sid], k)) continue;
+      this.d.turns[sid][k] = copy(r);
+      m.turns.add(k);
+    }
+    return true;
+  }
+  // What a merge added, taken out again.
+  unmerge(sid) {
+    const m = this.merged.get(sid);
+    if (!m) return;
+    for (const id of m.items) delete this.d.items[id];
+    const all = own(this.d.turns, sid) ? this.d.turns[sid] : null;
+    if (isObj(all)) { for (const k of m.turns) delete all[k]; if (m.madeTurns && !Object.keys(all).length) delete this.d.turns[sid]; }
+    this.merged.delete(sid);
+  }
+
+  // ── faults, cold_retry, cold_reset ──
+  // The writer could not read the session's file (missing, unparseable, wrong format or session): recorded on
+  // the stub as `cold.fault = {at, error, tries, held}`. A try (heldDelta 0, or the first fault) moves `at` and
+  // `tries`; a call that only adds held events (heldDelta > 0) adds to `held` alone. false when the session is
+  // not cold.
+  coldFault(sid, error, now = Date.now(), heldDelta = 0) {
+    if (!this.isCold(sid)) return false;
+    const c = this.d.sessions[sid].cold, add = Math.max(0, Math.floor(num(heldDelta, 0)));
+    const why = error === null || error === undefined || String(error) === "" ? null : String(error).slice(0, 300);
+    const f = isObj(c.fault) ? c.fault : null;
+    if (!f) c.fault = { at: num(now, Date.now()), error: why ?? "the file cannot be read", tries: 1, held: add };
+    else if (add) { f.held = tally(f.held) + add; if (why) f.error = why; }
+    else { f.at = num(now, Date.now()); if (why) f.error = why; f.tries = tally(f.tries) + 1; }
+    return true;
+  }
+
+  // {type: "cold_retry", session_id}: the panel's Try again. The writer has tried the read before the batch
+  // applies (a read that worked has thawed the session); nothing to change here.
+  on_cold_retry() {}
+
+  // {type: "cold_reset", session_id, file}: the panel's "Use without its older items" (two clicks), on a session
+  // whose file the writer could not read. Only a faulted stub that still names `file`: `coldLost` keeps the file's
+  // name, the counts and the error ({file, at (now), frozenAt, n, error}); the session is warm again and empty of
+  // what the file held (its nextHandle, pins, branches and `archived` stay, so no handle is handed out twice),
+  // and its held events replay into it. The file itself is kept on disk (coldGarbage never deletes a file a
+  // record names, coldLost included).
+  on_cold_reset(ev, s, at) {
+    const c = s.cold;
+    if (!c || !isObj(c.fault) || typeof ev.file !== "string" || c.file !== ev.file) return;
+    s.coldLost = { file: c.file, at, frozenAt: num(c.at), n: copy(isObj(c.n) ? c.n : {}), error: str(c.fault.error) ?? "the file cannot be read" };
+    this.unmerge(s.sessionId);   // a reading copy's view: the file's items are not the session's any more
+    delete s.cold;
+    s.thawedAt = s.touchedAt = at;
+  }
+
+  // ── the sweep ──
+  // Integration, 2026-11-19 (the review's blocker): a cold file is deleted only when it is provably redundant.
+  // A file no record names is not proof by itself: store.json can go back in time (a store.json the writer
+  // could not parse at a start, kept aside as store.corrupt-<ms>.json, the writer starting empty; one restored
+  // by hand from an older copy), and a session it lost comes back warm with none of the file's items. So by name
+  // alone only two kinds go: a file the session's own record lists as thawed (`coldThawed`: its items came back
+  // into this store's history, so a store that holds the record holds them), once the thaw is graceMs old; and a
+  // file of a session this store forgot, keepMs after the Forget. Every other file a record does not name is the
+  // writer's to read (coldUnproven) and to delete only when it holds nothing store.json lacks (coldLacks).
+
+  // The names a record holds (cold.file, coldLost.file) and the sessions each safe name stands for.
+  coldNames() {
+    const named = new Set();
+    for (const s of Object.values(this.d.sessions)) {
+      if (typeof s?.cold?.file === "string") named.add(s.cold.file);
+      if (typeof s?.coldLost?.file === "string") named.add(s.coldLost.file);
+    }
+    const bySafe = new Map();
+    for (const sid of new Set([...Object.keys(this.d.sessions), ...Object.keys(this.d.forgotten)])) {
+      const k = safeName(sid);
+      if (!bySafe.has(k)) bySafe.set(k, []);
+      bySafe.get(k).push(sid);
+    }
+    return { named, bySafe };
+  }
+  // A name's session when it is a cold file's name, no record names it, and its safe name stands for exactly one
+  // session (recorded or forgotten): {sid, ms}; else null (kept: unknown sessions, shared safe names).
+  coldFileOf(name, { named, bySafe }) {
+    if (typeof name !== "string" || named.has(name)) return null;
+    const m = COLD_NAME.exec(name);
+    const sids = m ? bySafe.get(m[1]) : null;
+    return sids && sids.length === 1 ? { sid: sids[0], ms: Number(m[2]) } : null;
+  }
+  // The session's thawed list entry for a file, or null.
+  thawedEntry(s, name) {
+    return (Array.isArray(s?.coldThawed) ? s.coldThawed : []).find((e) => isObj(e) && e.file === name) ?? null;
+  }
+
+  // Which of `names` (files in cold/, no folder) the writer's sweep may delete by name, decided from a store
+  // equal to store.json on disk: (t) one its session's record lists as thawed (`coldThawed`), the thaw more than
+  // graceMs ago; (a) one of a session forgotten more than keepMs ago. Never a name that does not match COLD_NAME,
+  // that a record names (cold.file, coldLost.file), or whose safe name matches no session or more than one.
+  coldGarbage(names, now = Date.now(), { graceMs = 3600e3, keepMs = 86400e3 } = {}) {
+    const idx = this.coldNames();
+    const t = num(now, Date.now()), grace = nonNeg(graceMs, 3600e3), keep = nonNeg(keepMs, 86400e3);
+    const out = [];
+    for (const name of new Set(Array.isArray(names) ? names : [])) {
+      const f = this.coldFileOf(name, idx);
+      if (!f) continue;
+      const s = own(this.d.sessions, f.sid) ? this.d.sessions[f.sid] : null;
+      if (!s) {
+        const at = Number(this.d.forgotten[f.sid]);
+        if (Number.isFinite(at) && t - at > keep) out.push(name);
+        continue;
+      }
+      const e = this.thawedEntry(s, name);
+      if (e && t - num(e.at) > grace) out.push(name);
+    }
+    return out;
+  }
+
+  // The files of `names` only a read can prove redundant: a cold file's name no record names, of exactly one
+  // recorded session that is not faulted (a faulted session keeps every file: one may be what repairs it), not
+  // in its thawed list, written more than keepMs ago. [{name, sid, ms}], oldest first. The writer reads each and
+  // deletes it only when coldLacks finds nothing in it that store.json lacks; anything else stays for good.
+  coldUnproven(names, now = Date.now(), { keepMs = 86400e3 } = {}) {
+    const idx = this.coldNames();
+    const t = num(now, Date.now()), keep = nonNeg(keepMs, 86400e3);
+    const out = [];
+    for (const name of new Set(Array.isArray(names) ? names : [])) {
+      const f = this.coldFileOf(name, idx);
+      if (!f) continue;
+      const s = own(this.d.sessions, f.sid) ? this.d.sessions[f.sid] : null;
+      if (!s || isObj(s.cold?.fault) || this.thawedEntry(s, name) || !(t - f.ms > keep)) continue;
+      out.push({ name, sid: f.sid, ms: f.ms });
+    }
+    return out.sort((x, y) => x.ms - y.ms || (x.name < y.name ? -1 : 1));
+  }
+
+  // What a cold file's record (`record`, already checked by coldRecordError) holds that this store (store.json as
+  // read from disk) lacks for session sid: {items, turns}, how many. Integration, 2026-11-19 (second and third
+  // review): an id or a turn number found elsewhere is no proof, and neither is a later `updatedAt` (a store put
+  // back from a backup and touched once is stamped later while holding less: the file's draft, its resolution).
+  // An item counts as held only when a copy of the same id, of this session (`anchor.sessionId`), is identical
+  // to the file's (JSON): the store's, or one of `copies` (id -> [items]: the session's named cold file, its
+  // archive items files). The cost, accepted: an orphan whose items changed afterwards stays for good. A turn record counts as held only when the store's record of that turn is identical, or `turnCopies`
+  // (turn -> [records]: the named file's, the archive's cut ones) holds an identical one, or the store's record
+  // is the file's without its head and `heads` (turn -> textHead: the archive's moved heads) holds that head. A
+  // store that went back in time never cut a record, so "older than the oldest kept" proves nothing.
+  coldLacks(sid, record, { copies = new Map(), turnCopies = new Map(), heads = new Map() } = {}) {
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    const out = { items: 0, turns: 0 };
+    for (const it of Array.isArray(record?.items) ? record.items : []) {
+      if (!isObj(it) || typeof it.id !== "string") { out.items++; continue; }
+      const cand = [...(own(this.d.items, it.id) ? [this.d.items[it.id]] : []), ...(copies.get(it.id) ?? [])].filter((c) => isObj(c) && c.anchor?.sessionId === sid);
+      if (!cand.some((c) => same(c, it))) out.items++;
+    }
+    const mine = own(this.d.turns, sid) && isObj(this.d.turns[sid]) ? this.d.turns[sid] : {};
+    for (const [k, r] of Object.entries(isObj(record?.turns) ? record.turns : {})) {
+      if (own(mine, k) && same(mine[k], r)) continue;
+      if ((turnCopies.get(k) ?? []).some((c) => same(c, r))) continue;
+      if (isObj(r) && typeof r.textHead === "string" && own(mine, k) && heads.get(k) === r.textHead) {
+        const lean = { ...r };
+        delete lean.textHead;
+        if (same(mine[k], lean)) continue;
+      }
+      out.turns++;
+    }
+    return out;
+  }
+
+  // The thawed lists trimmed: an entry goes once its file is no longer in `present` (the sweep removed it) or
+  // keepMs after the thaw (a file still there then is the read's to prove). True when anything changed.
+  trimThawed(present, now = Date.now(), { keepMs = 86400e3 } = {}) {
+    const there = new Set(Array.isArray(present) ? present : []), t = num(now, Date.now()), keep = nonNeg(keepMs, 86400e3);
+    let changed = false;
+    for (const s of Object.values(this.d.sessions)) {
+      if (!Array.isArray(s?.coldThawed)) continue;
+      const left = s.coldThawed.filter((e) => isObj(e) && there.has(e.file) && t - num(e.at) <= keep);
+      if (left.length === s.coldThawed.length) continue;
+      changed = true;
+      if (left.length) s.coldThawed = left; else delete s.coldThawed;
+    }
+    return changed;
   }
 }

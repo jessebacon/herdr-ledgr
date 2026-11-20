@@ -1241,7 +1241,7 @@ let retSizes = "";
 
   // 1. the settled values; the hooks' defaults (ledgr_config.py) agree with config.js on every key they hold
   A.equal(CFG.DEFAULTS.retention_days, 3, "retention_days: 3 (was 14)");
-  A.deepEqual(CFG.DEFAULTS.retention, { turns: 12 }, "retention.turns: 12 records per session");
+  A.deepEqual(CFG.DEFAULTS.retention, { turns: 12, coldDays: 7 }, "retention.turns: 12 records per session (and Phase 2's coldDays 7 beside it)");
   A.equal(CFG.LIMITS.turnHeads, 2, "LIMITS.turnHeads: 2");
   {
     const { spawnSync } = await import("node:child_process");
@@ -1254,7 +1254,7 @@ let retSizes = "";
     const atPath = (o, p) => p.reduce((x, k) => (x && typeof x === "object" ? x[k] : undefined), o);
     A.deepEqual(leaves(py).filter(([p, v]) => JSON.stringify(atPath(CFG.DEFAULTS, p)) !== JSON.stringify(v)).map(([p]) => p.join(".")), [],
       "every default ledgr_config.py holds is config.js's");
-    A.equal(py.retention_days, 3); A.deepEqual(py.retention, { turns: 12 });
+    A.equal(py.retention_days, 3); A.deepEqual(py.retention, { turns: 12, coldDays: 7 });
   }
 
   // 2. archivable: closed past `days`; a dismissed item never before 7 days; copies
@@ -1422,7 +1422,8 @@ let retSizes = "";
   ro_.d.retention = { v: 1, at };   // the writer's mark once the first run after the upgrade has finished
   const reread = Store.fromText(ro_.toText());
   A.equal(reread.d.sessions[RS_].archived, 2, "session.archived survives a save and a load"); A.deepEqual(reread.d.retention, { v: 1, at }, "...and so does d.retention");
-  const textNoIngested = () => { const d = JSON.parse(ro_.toText()); delete d.ingested; return JSON.stringify(d); };
+  // ...and without the sessions' idle clock (Phase 2: every event of a warm session moves its touchedAt).
+  const textNoIngested = () => { const d = JSON.parse(ro_.toText()); delete d.ingested; for (const s of Object.values(d.sessions)) delete s.touchedAt; return JSON.stringify(d); };
   const e1 = rv("restore", { item: ra1.id, file: "items-1800000000000-a1b2c3.jsonl", reopen: true, record: line[ra1.id] });
   let rr = ro_.apply(e1);
   A.deepEqual(rr.restore, { item: ra1.id, ok: true }, "the result says it was restored"); A.ok(ro_.d.ingested.includes(e1.id));
@@ -1670,14 +1671,715 @@ let retSizes = "";
     globalThis.__herdr = { files: { [CFG.configPath()]: JSON.stringify({ v: 1, retention_days: 14, extract: { threshold: "blocking" } }) } };
     const merged = await CFG.loadConfig();
     A.equal(merged._source, "file"); A.equal(merged.retention_days, 14, "the file's retention_days wins over the default");
-    A.deepEqual(merged.retention, { turns: 12 }, "retention.turns filled in from the defaults");
-    globalThis.__herdr = { files: { [CFG.configPath()]: JSON.stringify({ retention: { coldDays: 7 } }) } };
-    A.deepEqual((await CFG.loadConfig()).retention, { turns: 12, coldDays: 7 }, "a partial retention keeps turns");
+    A.deepEqual(merged.retention, { turns: 12, coldDays: 7 }, "retention.turns (and coldDays) filled in from the defaults");
+    globalThis.__herdr = { files: { [CFG.configPath()]: JSON.stringify({ retention: { coldDays: 3 } }) } };
+    A.deepEqual((await CFG.loadConfig()).retention, { turns: 12, coldDays: 3 }, "a partial retention keeps turns");
     globalThis.__herdr = { files: { [CFG.configPath()]: JSON.stringify({ retention: null }) } };
-    A.deepEqual((await CFG.loadConfig()).retention, { turns: 12 }, "a null retention: the defaults");
+    A.deepEqual((await CFG.loadConfig()).retention, { turns: 12, coldDays: 7 }, "a null retention: the defaults");
     globalThis.__herdr = {};
   }
 }
 const retChecks = checks - phase1 - phase2 - phase3 - sev - prof - toolChecks - settleChecks - spaceChecks - pinChecks;
 
-console.log(`OK: store, ${checks} checks (${phase1} phase 1, ${phase2} phase 2, ${phase3} phase 3, ${sev} severity and resume, ${prof} profiles, handoff and paste words, ${toolChecks} tool asks, ${settleChecks} blocking while working, closed by the agent, answered then settled, ${spaceChecks} spaces off and Clear all, ${pinChecks} pins, ${retChecks} retention${retSizes}), 0 failure(s)`);
+// ── Retention Phase 2: cold sessions (2026-11-19) ───────────────────────
+let coldSizes = "";
+{
+  const SC = await import(`${dir}/store.js`);
+  const { ColdError, COLD_FREE, COLD_FORMAT, coldRecordError, COLD_THAWED_MAX } = SC;
+  const { liveShape } = await import(new URL("./fixture_cold.mjs", import.meta.url).href);
+  const DAY = 86400e3, NOW = 1795100000000;
+  let cn = 0;
+  const fileFor = (p, r = "a1b2c3") => CFG.coldName(p.sid, p.record.at, r);
+  // A plan frozen as the writer does it: each file's text is JSON.stringify(record), read back and parsed.
+  const freeze = (store, plan, now = NOW) => {
+    const done = plan.map((p) => ({ ...p, file: fileFor(p) }));
+    const frozen = store.commitFreeze(done, now);
+    const files = Object.fromEntries(done.filter((x) => frozen.includes(x.sid)).map((x) => [x.sid, { file: x.file, record: JSON.parse(JSON.stringify(x.record)) }]));
+    return { done, frozen, files };
+  };
+  const planned = (st, days = 7, o = {}) => st.planFreeze(days, NOW, o).map((p) => p.sid);
+
+  // 1. config: retention.coldDays, the names under cold/
+  A.equal(CFG.DEFAULTS.retention.coldDays, 7);
+  A.equal(CFG.coldDaysOf({}), 7, "missing: 7"); A.equal(CFG.coldDaysOf(null), 7);
+  A.equal(CFG.coldDaysOf({ retention: { coldDays: 0 } }), 0, "0 is kept: never"); A.equal(CFG.coldDaysOf({ retention: { coldDays: "0" } }), 0);
+  A.equal(CFG.coldDaysOf({ retention: { coldDays: "14" } }), 14, "a numeric string"); A.equal(CFG.coldDaysOf({ retention: { coldDays: 2.6 } }), 3, "rounded to whole days");
+  A.equal(CFG.coldDaysOf({ retention: { coldDays: 0.2 } }), 1, "any positive value is at least one day (only 0 means never)");
+  A.equal(CFG.coldDaysOf({ retention: { coldDays: 365 } }), 365); A.equal(CFG.coldDaysOf({ retention: { coldDays: 60 } }), 60);
+  for (const bad of [-1, 366, "x", "", " ", true, null, NaN, Infinity, {}, []]) A.equal(CFG.coldDaysOf({ retention: { coldDays: bad } }), 7, `${JSON.stringify(bad)}: the default`);
+  A.equal(CFG.coldDir(), "/tmp/nowhere/ledgr-data/cold"); A.equal(CFG.coldPath("x.json"), "/tmp/nowhere/ledgr-data/cold/x.json");
+  A.equal(CFG.heldDir("herdr:t3/x"), "/tmp/nowhere/ledgr-data/cold/held/herdr_t3_x", "held/<safeName(sid)>");
+  const nm = CFG.coldName("herdr:t3", 1795100000000, "a1b2c3");
+  A.equal(nm, "herdr_t3.1795100000000-a1b2c3.json"); A.deepEqual([...CFG.COLD_NAME.exec(nm)].slice(1), ["herdr_t3", "1795100000000", "a1b2c3"]);
+  A.deepEqual(CFG.COLD_NAME.exec(CFG.coldName("a.b.1234567890123-abcdef", 1795100000000, "zz9900")).slice(1), ["a.b.1234567890123-abcdef", "1795100000000", "zz9900"], "the last ms-rand6 is the file's");
+  for (const bad of ["x.179510000000-a1b2c3.json", "x.1795100000000-A1b2c3.json", "x.1795100000000-a1b2c.json", ".1795100000000-a1b2c3.json",
+    "x.1795100000000-a1b2c3.json.tmp", "x.1795100000000-a1b2c3.jsonl", "held"]) A.equal(CFG.COLD_NAME.test(bad), false, `not a cold file name: ${bad}`);
+  A.equal(SC.safeName, CFG.safeName, "one safe name (config.js), re-exported by store.js");
+  A.equal(COLD_FORMAT, "ledgr-cold");
+  A.deepEqual([...COLD_FREE].sort(), ["cold_reset", "forget", "pin_archive", "pin_delete", "pin_note", "pin_restore"], "COLD_FREE: the pin ops, forget, cold_reset");
+
+  // 2. planFreeze: a small store, one session idle 10 days with items and turn records; each rule on its own
+  const S0 = "c0c0c0c0-0000-4000-8000-000000000001", T10 = NOW - 10 * DAY;
+  const mk = () => {
+    const it = (id, handle, extra) => ({ id, key: id, handle, direction: "agent_to_human", text: `ask ${id}`, kind: "decide", level: "needed",
+      anchor: { sessionId: S0, turn: 2, hash: id }, status: "open", createdAt: T10 - DAY, updatedAt: T10, ...extra });
+    const q = it("rq_c0q", "Q1", { direction: "human_to_agent", kind: "question", text: "Why is the pool shared?" });
+    delete q.level;
+    return new Store({ v: 1, items: {
+      rq_c0a: it("rq_c0a", "A1", { level: "blocking", blocking: true }),
+      rq_c0b: it("rq_c0b", "A2", { status: "answered", answer: "a", draft: "a" }),
+      rq_c0q: q,
+    }, sessions: { [S0]: { sessionId: S0, agent: "claude-code", terminal: "t1", turn: 3, turnSource: "hooks", state: "idle", cwd: "/c0", nextHandle: { A: 3, Q: 2, P: 1 },
+      startedAt: T10 - DAY, updatedAt: T10, seenAt: T10, promptAt: T10, surfaced: false, lastStopAt: T10 } },
+    branches: {}, terminals: { t1: { sessionId: S0, agent: "claude-code", updatedAt: T10 } }, ingested: [], forgotten: {}, pins: {},
+    turns: { [S0]: { 2: { stopAt: T10 - 600e3, asks: { source: "tool", count: 2, at: T10 - 600e3 } }, 3: { stopAt: T10 } } }, retention: { v: 1, at: NOW - 20 * DAY } });
+  };
+  A.deepEqual(planned(mk()), [S0], "idle 10 days, with items and turn records: planned");
+  A.equal(mk().touchedAt(S0), T10);
+  A.deepEqual(planned(mk(), 11), [], "11 days: not idle long enough"); A.deepEqual(planned(mk(), 10), [], "exactly 10 days: not past it");
+  A.deepEqual(planned(mk(), "7"), [S0], "days as a numeric string");
+  for (const d0 of [0, "0", null, undefined, "x", -3]) A.deepEqual(mk().planFreeze(d0, NOW), [], `days ${JSON.stringify(d0)}: never`);
+  { const st = mk(); delete st.d.retention; A.deepEqual(planned(st), [], "before Phase 1's first run has finished (no d.retention)");
+    st.d.retention = { v: 2 }; A.deepEqual(planned(st), [], "...or another version"); }
+  {
+    const st = mk(), t0 = st.toText(), plan = st.planFreeze(7, NOW);
+    A.equal(st.toText(), t0, "planFreeze mutates nothing");
+    const r = plan[0].record;
+    A.deepEqual(Object.keys(r), ["ledgr", "v", "sessionId", "at", "session", "items", "turns", "n"], "the cold file's fields, in order");
+    A.equal(r.ledgr, "ledgr-cold"); A.equal(r.v, 1); A.equal(r.sessionId, S0); A.equal(r.at, NOW);
+    A.deepEqual(r.session, st.d.sessions[S0]); A.notEqual(r.session, st.d.sessions[S0], "copies");
+    A.deepEqual(r.items, st.itemsOf(S0), "the items in itemsOf order"); A.notEqual(r.items[0], st.itemsOf(S0)[0]);
+    A.deepEqual(r.turns, st.d.turns[S0]); A.notEqual(r.turns, st.d.turns[S0]);
+    A.deepEqual(r.n, { q: 1, qNew: 0, blocking: 1, needed: 0, optional: 0, promoted: 0, answered: 1, closed: 0, items: 3, turns: 2 }, "the counts by level");
+    const st2 = mk(); st2.d.sessions[S0].promptAt = T10 - 2 * DAY;
+    A.equal(st2.coldCounts(S0).qNew, 1, "qNew: the open questions created at or after the last prompt");
+    A.equal(plan[0].sig, JSON.stringify({ items: st.itemsOf(S0), turns: st.d.turns[S0] }), "sig: the items and turn records as one text");
+    A.equal(coldRecordError(JSON.parse(JSON.stringify(r)), S0), null, "a planned record passes the check thaw makes");
+  }
+  // The idle clock, field by field: a day ago keeps the session warm; 8 days ago it still goes (and the clock reads it).
+  const clock = {
+    touchedAt: (st, v) => { st.d.sessions[S0].touchedAt = v; }, updatedAt: (st, v) => { st.d.sessions[S0].updatedAt = v; },
+    thawedAt: (st, v) => { st.d.sessions[S0].thawedAt = v; },
+    promptAt: (st, v) => { st.d.sessions[S0].promptAt = v; }, lastStopAt: (st, v) => { st.d.sessions[S0].lastStopAt = v; },
+    "resume.at": (st, v) => { st.d.sessions[S0].resume = { at: v, state: "resumed" }; },
+    "resume.resumedAt": (st, v) => { st.d.sessions[S0].resume = { at: T10 - DAY, state: "resumed", resumedAt: v }; },
+    "lastClear.at": (st, v) => { st.d.sessions[S0].lastClear = { at: v, cleared: 1, kept: 0 }; },
+    "an item's updatedAt": (st, v) => { st.d.items.rq_c0b.updatedAt = v; },
+    "a turn record's stopAt": (st, v) => { st.d.turns[S0][3].stopAt = v; },
+    "a turn record's asks.at": (st, v) => { st.d.turns[S0][2].asks.at = v; },
+    "a turn record's retry.at": (st, v) => { st.d.turns[S0][3].retry = { at: v, state: "done" }; },
+  };
+  for (const [k, f] of Object.entries(clock)) {
+    const st = mk(); f(st, NOW - DAY);
+    A.equal(st.touchedAt(S0), NOW - DAY, `${k} moves the idle clock`); A.deepEqual(planned(st), [], `${k} a day ago: warm`);
+    const st8 = mk(); f(st8, NOW - 8 * DAY);
+    A.equal(st8.touchedAt(S0), NOW - 8 * DAY); A.deepEqual(planned(st8), [S0], `${k} 8 days ago: still idle past 7`);
+  }
+  {
+    // Integration (2026-11-19): seenAt is not on the clock. A session only looked at is not in use: the panel
+    // posts `seen` whenever it shows a surfaced session, and a cold one's menu row then said "idle 1 min".
+    const st = mk(); st.d.sessions[S0].seenAt = NOW - DAY;
+    A.equal(st.touchedAt(S0), T10, "seenAt does not move the idle clock"); A.deepEqual(planned(st), [S0], "seen a day ago: still goes cold");
+  }
+  {
+    const st = mk();
+    st.d.items.rq_other = { id: "rq_other", handle: "A1", direction: "agent_to_human", anchor: { sessionId: "another" }, status: "open", updatedAt: NOW };
+    st.d.pins.pn_00000000 = { id: "pn_00000000", sessionId: S0, status: "open", updatedAt: NOW, anchor: { sessionId: S0 } };
+    A.equal(st.touchedAt(S0), T10, "another session's items and the session's pins do not move the clock"); A.deepEqual(planned(st), [S0]);
+  }
+  // What never goes cold, each on its own (the store's rules), and what does not stop it.
+  const branch = (st, side, status) => {
+    st.d.branches.br_00000000x = { id: "br_00000000x", name: "br-q1-0000", requestId: "rq_c0q", status,
+      parentSessionId: side === "parent" ? S0 : "pppppppp-0000-4000-8000-000000000009", sessionId: side === "child" ? S0 : null };
+  };
+  const never = {
+    "an item deferred to the next session": (st) => Object.assign(st.d.items.rq_c0b, { status: "deferred", deferUntil: "next_session" }),
+    "an item deferred to a time": (st) => Object.assign(st.d.items.rq_c0b, { status: "deferred", deferUntil: NOW + DAY }),
+    "a question rejoin_pending": (st) => { st.d.items.rq_c0q.status = "rejoin_pending"; },
+    "a question with it.rejoin": (st) => { st.d.items.rq_c0q.rejoin = { branchId: "br_00000000x", at: T10 }; },
+    "a resume launching": (st) => { st.d.sessions[S0].resume = { at: T10, state: "launching" }; },
+    "a resume launched": (st) => { st.d.sessions[S0].resume = { at: T10, state: "launched" }; },
+    "an extraction re-run requested": (st) => { st.d.turns[S0][2].retry = { at: T10, state: "requested" }; },
+    "an extraction re-run running": (st) => { st.d.turns[S0][2].retry = { at: T10, state: "running" }; },
+  };
+  for (const side of ["parent", "child"]) for (const status of ["launching", "launched", "running", "concluded"]) never[`a branch ${status}, the session its ${side}`] = (st) => branch(st, side, status);
+  for (const [k, f] of Object.entries(never)) {
+    const st = mk(); f(st);
+    A.deepEqual(planned(st), [], `never cold: ${k}`); A.ok(st.freezeBlocker(S0), `freezeBlocker names it: ${k}`);
+  }
+  const fine = {
+    "an open blocking ask (its counts are kept)": () => {}, "an open ask with a draft": (st) => { st.d.items.rq_c0a.draft = "typed, not sent"; },
+    "a resume resumed": (st) => { st.d.sessions[S0].resume = { at: T10, state: "resumed" }; },
+    "a resume failed": (st) => { st.d.sessions[S0].resume = { at: T10, state: "failed" }; },
+    "a re-run done": (st) => { st.d.turns[S0][2].retry = { at: T10, state: "done" }; },
+    "a re-run failed": (st) => { st.d.turns[S0][2].retry = { at: T10, state: "failed" }; },
+    "an item deferred in another session": (st) => { st.d.items.rq_far = { id: "rq_far", anchor: { sessionId: "far" }, status: "deferred", deferUntil: "next_session", updatedAt: NOW }; },
+  };
+  for (const side of ["parent", "child"]) for (const status of ["rejoined", "refused", "failed"]) fine[`a branch ${status}, the session its ${side}`] = (st) => branch(st, side, status);
+  for (const [k, f] of Object.entries(fine)) { const st = mk(); f(st); A.deepEqual(planned(st), [S0], `still goes cold: ${k}`); A.equal(st.freezeBlocker(S0), null); }
+  {
+    const st = mk(); st.d.items = {}; delete st.d.turns[S0];
+    A.deepEqual(planned(st), [], "no items and no turn records: nothing to move, no file");
+    const st2 = mk(); st2.d.items = {}; A.deepEqual(planned(st2), [S0], "turn records only: planned");
+    const st3 = mk(); delete st3.d.turns[S0]; A.deepEqual(planned(st3), [S0], "items only: planned");
+    A.deepEqual(st3.planFreeze(7, NOW)[0].record.turns, {}, "...with an empty turn map in the file");
+  }
+  A.deepEqual(planned(mk(), 7, { canFreeze: () => false }), [], "canFreeze false (the writer's: a live terminal, the open dialog, the running pass)");
+  A.deepEqual(planned(mk(), 7, { canFreeze: () => { throw new Error("x"); } }), [], "canFreeze throwing: not frozen");
+  A.deepEqual(planned(mk(), 7, { canFreeze: () => 1 }), [], "only true lets it go");
+  { let asked = []; planned(mk(), 11, { canFreeze: (sid) => { asked.push(sid); return true; } }); A.deepEqual(asked, [], "canFreeze is asked only for sessions the store would move"); }
+  {
+    // oldest idle first, at most max; ids that make no file of their own stay
+    const st = mk();
+    const add = (sid, days) => {
+      st.d.sessions[sid] = { ...st.d.sessions[S0], sessionId: sid, updatedAt: NOW - days * DAY, seenAt: 0, promptAt: 0, lastStopAt: 0 };
+      st.d.turns[sid] = { 1: { stopAt: NOW - days * DAY } };
+    };
+    add("c1c1c1c1-0000-4000-8000-000000000001", 15); add("c2c2c2c2-0000-4000-8000-000000000001", 12); add("c3c3c3c3-0000-4000-8000-000000000001", 9);
+    A.deepEqual(planned(st, 7, { max: 2 }), ["c1c1c1c1-0000-4000-8000-000000000001", "c2c2c2c2-0000-4000-8000-000000000001"], "max 2: the two idle longest");
+    A.deepEqual(planned(st, 7), ["c1c1c1c1-0000-4000-8000-000000000001", "c2c2c2c2-0000-4000-8000-000000000001", S0, "c3c3c3c3-0000-4000-8000-000000000001"], "oldest idle first");
+    A.deepEqual(planned(st, 7, { max: 0 }), []);
+    add("herdr:t9", 20); add("herdr_t9", 20);
+    A.equal(planned(st).includes("herdr:t9") || planned(st).includes("herdr_t9"), false, "two sessions with one safe name: neither (their files and held/ folders would be shared)");
+    A.match(st.freezeBlocker("herdr:t9"), /same file name/);
+    delete st.d.sessions.herdr_t9; delete st.d.turns.herdr_t9;
+    A.ok(planned(st).includes("herdr:t9"), "alone: herdr:t9 goes (as herdr_t9.<ms>-<rand6>.json)");
+    st.d.forgotten.herdr_t9 = NOW - DAY;
+    A.equal(planned(st).includes("herdr:t9"), false, "a forgotten session's safe name counts too");
+    for (const odd of [".", "..", ".hidden-session", "..x"]) { add(odd, 20); A.equal(planned(st).includes(odd), false, `the id ${odd} makes no file name`); A.match(st.freezeBlocker(odd), /no file name/); }
+    add("x.hidden", 20); A.ok(planned(st).includes("x.hidden"), "a dot inside an id is fine");
+  }
+
+  // 3. commitFreeze: one step, only what is still as planned; the same plan twice is a no-op
+  {
+    const st = mk(), plan = st.planFreeze(7, NOW), file = fileFor(plan[0]);
+    const pinsBefore = JSON.stringify(st.d.pins);
+    const { frozen } = freeze(st, plan);
+    A.deepEqual(frozen, [S0]);
+    A.deepEqual(st.itemsOf(S0), [], "its items left the store"); A.equal(S0 in st.d.turns, false, "...and its turn records");
+    A.deepEqual(st.d.sessions[S0].cold, { file, at: NOW, n: plan[0].record.n }, "the stub names the file, its time and its counts");
+    A.equal(st.isCold(S0), true); A.deepEqual(st.coldSessions(), [S0]); A.deepEqual(st.mixedCold(), []);
+    A.deepEqual(st.d.sessions[S0].nextHandle, { A: 3, Q: 2, P: 1 }, "nextHandle stays on the stub");
+    A.equal(JSON.stringify(st.d.pins), pinsBefore);
+    A.equal(st.d.sessions[S0].touchedAt, T10, "the stub keeps the idle clock it had (its items and turn records left)"); A.equal(st.touchedAt(S0), T10);
+    const t1 = st.toText();
+    A.deepEqual(st.commitFreeze(plan.map((p) => ({ ...p, file })), NOW), [], "the same plan again: nothing"); A.equal(st.toText(), t1);
+    A.deepEqual(planned(st), [], "already cold: never planned again");
+    A.equal(st.freezeBlocker(S0), "already cold");
+  }
+  {
+    // Integration (2026-11-19): the clock read from an item past the record's own times survives the freeze. Before,
+    // the stub read only its record, so "idle N d" counted from too early (and coldGarbage rule c read it too).
+    const st = mk(), late = T10 + 3600e3;
+    st.d.items.rq_c0a.updatedAt = late;
+    A.equal(st.touchedAt(S0), late, "warm: an item's updatedAt is the latest");
+    const { frozen } = freeze(st, st.planFreeze(7, NOW));
+    A.deepEqual(frozen, [S0]);
+    A.equal(st.d.sessions[S0].touchedAt, late, "the stub carries it in touchedAt"); A.equal(st.touchedAt(S0), late, "...and the clock reads the same after the freeze");
+    const before = st.d.sessions[S0].touchedAt;
+    st.apply({ v: 1, id: `cs${++cn}`, type: "act", session_id: S0, action: "seen", at: NOW });
+    A.equal(st.d.sessions[S0].seenAt, NOW, "seen marks the stub's chip"); A.equal(st.touchedAt(S0), before, "...and leaves its idle clock where it was");
+  }
+  const changed = {
+    "an item updated (a draft)": (st) => st.act("rq_c0b", "draft", "typed while the file was written", NOW),
+    "a new item (a capture)": (st) => st.apply({ v: 1, id: `cf${++cn}`, type: "capture", at: NOW, session_id: S0, terminal: "t1",
+      request: { id: "rq_new", text: "And the gateway?", anchor: { sessionId: S0, turn: 3, settled: true }, createdAt: NOW } }),
+    "a new turn record (a stop)": (st) => st.apply({ v: 1, id: `cf${++cn}`, type: "stop", at: NOW, session_id: S0, turn: 4 }),
+    "its record changed (seen)": (st) => st.markSeen(S0, NOW),
+    "its record changed (a space)": (st) => st.noteSpace({ terminal: "t1", session_id: S0, space: "spX" }),
+    "a branch started from it meanwhile (no item change)": (st) => st.apply({ v: 1, id: `cf${++cn}`, type: "branch_started", at: NOW,
+      session_id: "dddddddd-0000-4000-8000-000000000001", terminal: "t9", parent_session_id: S0, depth: 1, fork_turn: 3, anchor_turn: 2 }),
+    "a turn record changed (a re-run)": (st) => st.apply({ v: 1, id: `cf${++cn}`, type: "retry", at: NOW, session_id: S0, turn: 2 }),
+  };
+  for (const [k, f] of Object.entries(changed)) {
+    const st = mk(), plan = st.planFreeze(7, NOW);
+    f(st);
+    const t = st.toText();
+    A.deepEqual(freeze(st, plan).frozen, [], `changed since its plan, not frozen: ${k}`);
+    A.equal(st.toText(), t, `...and nothing changed: ${k}`);
+  }
+  {
+    const st = mk(), plan = st.planFreeze(7, NOW);
+    A.deepEqual(st.commitFreeze(plan.map((p) => ({ ...p, file: fileFor(p) })), NOW, { canFreeze: () => false }), [], "canFreeze false at the commit");
+    const bad = (file, rec = plan[0].record) => st.commitFreeze([{ ...plan[0], record: rec, file }], NOW);
+    A.deepEqual(bad(CFG.coldName("another", NOW, "a1b2c3")), [], "a file named for another session");
+    A.deepEqual(bad(CFG.coldName(S0, NOW + 1, "a1b2c3")), [], "a file whose ms is not the record's at");
+    A.deepEqual(bad(`${S0}.json`), [], "not a cold file name"); A.deepEqual(bad(null), []);
+    A.deepEqual(bad(fileFor(plan[0]), { ...plan[0].record, items: plan[0].record.items.slice(1) }), [], "a record that does not hold what leaves");
+    A.deepEqual(bad(fileFor(plan[0]), { ...plan[0].record, n: { ...plan[0].record.n, q: 9 } }), [], "...or counts other than the items'");
+    A.deepEqual(st.commitFreeze([{ ...plan[0], sig: "{}", file: fileFor(plan[0]) }], NOW), [], "a sig other than the store's");
+    A.deepEqual(st.commitFreeze("x", NOW), []); A.deepEqual(st.commitFreeze([null, 7, { sid: "__proto__" }], NOW), []);
+    const ret = st.d.retention; delete st.d.retention;
+    A.deepEqual(st.commitFreeze(plan.map((p) => ({ ...p, file: fileFor(p) })), NOW), [], "no Phase 1 mark: nothing committed"); st.d.retention = ret;
+    A.equal(st.isCold(S0), false, "after all of that: still warm");
+    A.deepEqual(freeze(st, plan).frozen, [S0], "...and the plan itself commits");
+  }
+
+  // 4. coldNeeded, exhaustively: every on_* handler (and restore, an unknown type) has its decision here; a new
+  // handler without one fails this test.
+  const NEEDS = {
+    session_start: "own", prompt: "own", stop: "own", asks: "own", pending: "own", act: "own", clear_questions: "own", retry: "own",
+    settle: "own", session_end: "own", branch: "own", branch_started: "own+parent", compacted: "own", forget: "none", conclude: "own",
+    confluence_landed: "own", answers_landed: "own", pins_asked: "own+for", pin: "own", pin_note: "none", pin_archive: "none",
+    pin_restore: "none", pin_delete: "none", close_branch: "own", resume: "own", capture: "own", restore: "own",
+    cold_retry: "own", cold_reset: "none",
+  };
+  const handlers = Object.getOwnPropertyNames(Store.prototype).filter((k) => k.startsWith("on_") && typeof Store.prototype[k] === "function").map((k) => k.slice(3));
+  A.deepEqual(handlers.filter((h) => !(h in NEEDS)), [], "every on_* handler has a coldNeeded decision (add new ones to NEEDS)");
+  A.deepEqual(Object.keys(NEEDS).filter((h) => !handlers.includes(h)), [], "...and NEEDS names no handler that is gone");
+  A.ok(handlers.includes("restore") && handlers.includes("cold_retry") && handlers.includes("cold_reset"));
+  const CC = "cccc0001-0000-4000-8000-000000000001", CP = "cccc0002-0000-4000-8000-000000000001", CF = "cccc0003-0000-4000-8000-000000000001";
+  const WW = "wwww0001-0000-4000-8000-000000000001", FG = "ffff0001-0000-4000-8000-000000000001";
+  const stub = (sid) => ({ sessionId: sid, agent: "claude-code", terminal: null, turn: 5, turnSource: "hooks", state: "idle", cwd: "/x", nextHandle: { A: 4, Q: 2, P: 1 },
+    updatedAt: T10, cold: { file: CFG.coldName(sid, T10, "a1b2c3"), at: T10, n: { q: 0, qNew: 0, blocking: 0, needed: 1, optional: 0, promoted: 0, answered: 0, closed: 0, items: 1, turns: 1 } } });
+  const needStore = () => {
+    const d = { v: 1, items: {}, sessions: { [CC]: stub(CC), [CP]: stub(CP), [CF]: stub(CF), [WW]: { ...stub(WW), cold: undefined } }, branches: {}, terminals: {}, turns: {},
+      ingested: ["seen-before"], forgotten: { [FG]: T10 }, pins: {}, retention: { v: 1, at: T10 } };
+    delete d.sessions[WW].cold;
+    return new Store(d);
+  };
+  const evFor = (type, sid, extra = {}) => ({ v: 1, id: `cn${++cn}`, type, at: NOW, session_id: sid, terminal: "t5", parent_session_id: CP, for_session: CF,
+    action: "resolve", item: "rq_x", file: CFG.coldName(sid, T10, "a1b2c3"), pin: "pn_00000000-0000-4000-8000-000000000099", ...extra });
+  const want = (rule, own_) => [...(rule === "none" ? [] : [own_].filter(Boolean)), ...(rule === "own+parent" ? [CP] : rule === "own+for" ? [CF] : [])];
+  for (const type of [...Object.keys(NEEDS), "zz_future_type"]) {
+    const rule = NEEDS[type] ?? "own";   // an unknown type that carries a session: the uniform rule
+    const ns = needStore();
+    A.deepEqual([...ns.coldNeeded([evFor(type, CC)])], want(rule, CC), `coldNeeded ${type}, its session cold: ${rule}`);
+    A.deepEqual([...ns.coldNeeded([evFor(type, WW)])], want(rule, null), `coldNeeded ${type}, its session warm`);
+    A.deepEqual([...ns.coldNeeded([evFor(type, FG)])], [], `coldNeeded ${type}, its session forgotten: apply() drops it`);
+    A.deepEqual([...ns.coldNeeded([evFor(type, CC, { id: "seen-before" })])], [], `coldNeeded ${type}, already ingested`);
+    // apply(): an event that needs a cold session throws ColdError and changes nothing; the rest apply to stubs
+    const t0 = ns.toText(), e = evFor(type, CC);
+    if (rule === "none" || type === "cold_retry") {
+      A.doesNotThrow(() => ns.apply(e), `apply ${type} to a stub`);
+    } else {
+      A.throws(() => ns.apply(e), (err) => err instanceof ColdError && err.name === "ColdError" && JSON.stringify(err.cold) === JSON.stringify(want(rule, CC)), `apply ${type}: ColdError`);
+      A.equal(ns.toText(), t0, `apply ${type}: nothing changed`);
+      if (rule !== "own") {
+        const e2 = evFor(type, WW);
+        A.throws(() => ns.apply(e2), (err) => err instanceof ColdError && JSON.stringify(err.cold) === JSON.stringify(want(rule, null)), `apply ${type} with a warm session: ColdError for the other`);
+      }
+    }
+  }
+  {
+    const ns = needStore();
+    A.deepEqual([...ns.coldNeeded([{ v: 1, id: "p1", type: "pending", session: CC, turn: 6 }])], [CC], "`session` (pending) names the session");
+    A.deepEqual([...ns.coldNeeded([{ v: 1, id: "c1", type: "capture", request: { id: "rq_n", anchor: { sessionId: CC } } }])], [CC], "...and request.anchor.sessionId (capture)");
+    A.deepEqual([...ns.coldNeeded([{ v: 1, id: "a1", type: "act", session_id: CC, action: "seen" }])], [], "an act \"seen\" marks the stub's chip seen: no thaw (showing a session never thaws it)");
+    A.deepEqual([...ns.coldNeeded([{ v: 1, id: "b1", type: "branch_started", session_id: WW, parent_session_id: CC }, evFor("prompt", CF), evFor("prompt", CC), evFor("stop", CC)])].sort(), [CC, CF].sort(), "a batch: each cold session once");
+    A.deepEqual([...ns.coldNeeded([null, 7, {}, { type: "prompt" }, { session_id: CC }])], [], "nothing for what is not an event");
+    A.deepEqual([...ns.coldNeeded("x")], []);
+    const seen = ns.apply({ v: 1, id: "a2", type: "act", session_id: CC, action: "seen", at: NOW });
+    A.equal(seen.applied, true); A.equal(ns.d.sessions[CC].seenAt, NOW, "seen applied to the stub"); A.ok(ns.isCold(CC), "...which stays cold");
+    A.equal(ns.d.sessions[CC].touchedAt, undefined, "a cold stub's touchedAt moves only with a thaw or a reset");
+    const r = ns.apply({ v: 1, id: "r1", type: "cold_retry", session_id: CC, at: NOW });
+    A.equal(r.applied, true, "a cold_retry whose read failed (still cold): recorded and dropped"); A.ok(ns.d.ingested.includes("r1")); A.ok(ns.isCold(CC));
+    ns.apply({ v: 1, id: "f1", type: "forget", session_id: CC, at: NOW });
+    A.equal(ns.d.sessions[CC], undefined, "forget a cold session: no file read, the stub goes"); A.equal(ns.d.forgotten[CC], NOW);
+    A.deepEqual([...ns.coldNeeded([evFor("prompt", CC)])], [], "its late events need nothing (dropped as forgotten)");
+    A.doesNotThrow(() => ns.apply(evFor("prompt", CC)));
+  }
+
+  // 5. touchedAt: every event of a warm session moves it (pin ops aside), never back
+  {
+    const st = mk();
+    st.apply({ v: 1, id: `ta${++cn}`, type: "act", session_id: S0, item: "rq_c0a", action: "promote", at: NOW - 3 * DAY });
+    A.equal(st.d.sessions[S0].touchedAt, NOW - 3 * DAY, "an act (no updatedAt on the record) moves touchedAt");
+    st.apply({ v: 1, id: `ta${++cn}`, type: "close_branch", session_id: S0, branch_id: "br_none", at: NOW - 2 * DAY });
+    A.equal(st.d.sessions[S0].touchedAt, NOW - 2 * DAY, "...so does an event that changed nothing else (close_branch)");
+    A.equal(st.touchedAt(S0), NOW - 2 * DAY, "the idle clock reads it");
+    st.apply({ v: 1, id: `ta${++cn}`, type: "act", session_id: S0, item: "rq_c0a", action: "draft", arg: "x", at: NOW - 5 * DAY });
+    A.equal(st.d.sessions[S0].touchedAt, NOW - 2 * DAY, "an older event does not move it back");
+    st.apply({ v: 1, id: `ta${++cn}`, type: "pin_note", session_id: S0, pin: "pn_00000000-0000-4000-8000-000000000001", note: "n", at: NOW });
+    A.equal(st.d.sessions[S0].touchedAt, NOW - 2 * DAY, "a pin op does not");
+    st.d.sessions[S0].surfaced = true;
+    st.apply({ v: 1, id: `ta${++cn}`, type: "act", session_id: S0, action: "seen", at: NOW - DAY });
+    A.equal(st.d.sessions[S0].seenAt, NOW - DAY, "seen marks the chip seen");
+    A.equal(st.d.sessions[S0].touchedAt, NOW - 2 * DAY, "...and does not move touchedAt: a session only looked at is not in use"); A.equal(st.touchedAt(S0), NOW - 2 * DAY);
+  }
+
+  // 6. the live-shape fixture: 20 of 42 sessions go cold; counts and chips the same before and after; the store
+  // shrinks by exactly what left, less what the stubs gained; the round trip gives every session back
+  const fx = liveShape({ now: NOW });
+  const coldSet = new Set(fx.sids.cold);
+  // promoted asks (needed, optional, and a blocking one) and a working session with questions parked this turn
+  let pi = 0;
+  for (const it of Object.values(fx.data.items)) {
+    if (!coldSet.has(it.anchor.sessionId) || it.direction !== "agent_to_human" || it.status !== "open") continue;
+    if (++pi % 5 === 0) it.promoted = true;
+  }
+  const work = fx.sids.cold[4];   // 12 items, idle 9 days, no blocking ask: its chip can say "collecting"
+  Object.assign(fx.data.sessions[work], { state: "working", promptAt: NOW - 30 * DAY });
+  const orig = JSON.stringify(fx.data);
+  const big = Store.fromText(orig);
+  const orderCold = [...fx.sids.cold].sort((x, y) => big.touchedAt(x) - big.touchedAt(y) || (x < y ? -1 : 1));
+  const planB = big.planFreeze(CFG.DEFAULTS.retention.coldDays, NOW, { max: 40 });
+  A.deepEqual(planB.map((p) => p.sid), orderCold, "the 20 sessions idle past 7 days with something to move, oldest idle first; the 9 empty and the 13 active stay");
+  A.equal(big.planFreeze(7, NOW, { canFreeze: (sid) => !fx.sids.cold.slice(0, 6).includes(sid) }).length, 14, "with 6 of them on a live terminal: 14");
+  const LV = ["optional", "needed", "blocking"];
+  const countsAll = (st) => Object.fromEntries(LV.map((th) => { st.threshold = th; return [th, Object.fromEntries(Object.keys(st.d.sessions).map((sid) => [sid, st.countsOf(sid)]))]; }));
+  const chipsAll = (st) => Object.fromEntries(LV.map((th) => { st.threshold = th; return [th, st.chips(NOW)]; }));
+  const noO = (x) => JSON.parse(JSON.stringify(x), (k, v) => (k === "o" ? undefined : v));
+  const c0 = countsAll(big), ch0 = chipsAll(big);
+  A.ok(Object.values(c0.needed).some((c) => c.below > 0) && Object.values(c0.blocking).some((c) => c.b > 0), "the fixture has suggestions and blocking asks");
+  {
+    // countsOf from items means what counts(it) and the chips mean
+    big.threshold = "needed";
+    for (const sid of fx.sids.cold.slice(0, 4)) {
+      const its = big.itemsOf(sid), c = big.countsOf(sid);
+      A.equal(c.open, its.filter((it) => big.counts(it)).length, "open: the items counts() counts");
+      A.equal(c.below, its.filter((it) => it.status === "open" && isSuggestion(it, "needed")).length, "below: the suggestions");
+    }
+  }
+  const { frozen, files } = freeze(big, planB);
+  A.deepEqual(frozen, orderCold, "all 20 committed");
+  A.deepEqual(countsAll(big), c0, "countsOf the same before and after the freeze, at all three thresholds (from the stubs' n)");
+  const ch1 = chipsAll(big);
+  A.deepEqual(noO(ch1), noO(ch0), "chips() the same before and after, apart from o");
+  A.ok(Object.values(ch0.needed).some((c) => coldSet.has(c.s) && c.o) && Object.values(ch1.needed).every((c) => !coldSet.has(c.s) || c.o === undefined), "o: there before, left out for a cold session");
+  A.equal(ch1.blocking[`t${fx.sids.active.length + 5}`]?.st, "collecting", "a working cold session's chip says collecting, from n.qNew");
+  A.ok(Object.values(ch1.needed).some((c) => coldSet.has(c.s) && c.st === "blocking"), "...and one with an open blocking ask says blocking");
+  const after = big.toText();
+  A.deepEqual(big.mixedCold(), []); A.deepEqual(big.coldSessions().sort(), [...fx.sids.cold].sort());
+  // the oracle: the original less the cold items and turn records, plus the stubs' cold field and (integration,
+  // 2026-11-19) the idle clock each had, carried in touchedAt when its items or turn records held a later time
+  const wantD = JSON.parse(orig), ref = Store.fromText(orig);
+  for (const sid of frozen) {
+    for (const [id, it] of Object.entries(wantD.items)) if (it.anchor.sessionId === sid) delete wantD.items[id];
+    delete wantD.turns[sid];
+    if (ref.touchedAt(sid) > (Number(wantD.sessions[sid].touchedAt) || 0)) wantD.sessions[sid].touchedAt = ref.touchedAt(sid);
+    wantD.sessions[sid].cold = { file: files[sid].file, at: NOW, n: files[sid].record.n };
+  }
+  A.equal(after, JSON.stringify(wantD), "the frozen store is exactly the original less what moved, plus the stubs' cold field and idle clock");
+  A.ok(frozen.every((sid) => big.touchedAt(sid) === ref.touchedAt(sid)), "every stub's idle clock reads as it did warm");
+  const origD = JSON.parse(orig);
+  let moved = 0, grew = 0;
+  for (const sid of frozen) {
+    for (const [id, it] of Object.entries(origD.items)) if (it.anchor.sessionId === sid) moved += JSON.stringify(id).length + 1 + JSON.stringify(it).length + 1;
+    if (origD.turns[sid]) moved += JSON.stringify(sid).length + 1 + JSON.stringify(origD.turns[sid]).length + 1;
+    grew += JSON.stringify(wantD.sessions[sid]).length - JSON.stringify(origD.sessions[sid]).length;
+  }
+  A.equal(orig.length - after.length, moved - grew, "store.json shrinks by the cold items and turn records, less the stubs' growth");
+  const fileBytes = frozen.map((sid) => JSON.stringify(files[sid].record).length);
+  const total = fileBytes.reduce((a, b) => a + b, 0), largest = Math.max(...fileBytes);
+  A.ok(largest < 40 * 1024, `the largest cold file is under 40 KB (${largest}): the fast write path, far under 1 MiB`);
+  A.ok(grew < 6000, `the stubs grow about 4 KB (${grew})`);
+  A.ok(after.length < 0.8 * orig.length, `about a quarter goes (${orig.length} to ${after.length})`);
+  coldSizes = `, live shape ${(orig.length / 1e6).toFixed(2)} MB to ${(after.length / 1e6).toFixed(2)} MB (${frozen.length} sessions cold, ${(total / 1e3).toFixed(0)} KB in files, largest ${(largest / 1e3).toFixed(1)} KB)`;
+  {
+    const snap = big.snapshot(NOW);
+    A.deepEqual(Object.keys(snap), ["v", "updatedAt", "items", "cold"]);
+    A.equal(snap.items.some((it) => coldSet.has(it.sessionId)), false, "snapshot: no cold session's items");
+    A.deepEqual(Object.keys(snap.cold).sort(), [...fx.sids.cold].sort(), "snapshot.cold names every cold session");
+    A.deepEqual(snap.cold[fx.sids.cold[0]], { file: files[fx.sids.cold[0]].file, fault: null });
+    A.deepEqual(JSON.stringify(Store.fromText(orig).snapshot(NOW).cold), "{}", "a store with no cold session: an empty map");
+    A.equal(JSON.stringify(big.d.pins), JSON.stringify(origD.pins), "pins never go cold");
+    A.ok(fx.sids.cold.some((sid) => big.pinsOfSession(sid).length > 0), "...a cold session's pins are still there");
+  }
+  // the round trip: every file parsed back and thawed
+  const big2 = Store.fromText(after);   // what a restart reads
+  for (const sid of frozen) {
+    const r = big2.thaw(sid, files[sid].record, files[sid].file, NOW + 5);
+    A.equal(r.ok, true, `thaw ${sid.slice(0, 13)}`);
+  }
+  const back = Store.fromText(orig);
+  const per = (st) => Object.fromEntries(Object.keys(st.d.sessions).map((sid) => [sid, st.itemsOf(sid)]));
+  A.deepEqual(per(big2), per(back), "every session's items back, in itemsOf order, whole");
+  A.deepEqual(big2.d.turns, back.d.turns, "every turn record back");
+  const strip = (st) => Object.fromEntries(Object.entries(JSON.parse(JSON.stringify(st.d.sessions))).map(([k, s]) => { delete s.thawedAt; delete s.touchedAt; delete s.coldThawed; return [k, s]; }));
+  A.deepEqual(strip(big2), strip(back), "every session record as it was, apart from thawedAt, touchedAt and coldThawed");
+  A.ok(frozen.every((sid) => big2.d.sessions[sid].thawedAt === NOW + 5 && big2.d.sessions[sid].touchedAt === NOW + 5), "thawedAt and touchedAt: the thaw's time");
+  A.ok(frozen.every((sid) => JSON.stringify(big2.d.sessions[sid].coldThawed) === JSON.stringify([{ file: files[sid].file, at: NOW + 5 }])), "coldThawed: the file, the thaw's time (the sweep's proof)");
+  A.deepEqual(countsAll(big2), c0, "counts after the round trip as before");
+  A.deepEqual(big2.coldSessions(), [], "nothing cold");
+  // a thawed session goes cold again only after another idle week
+  const again = (t) => big2.planFreeze(7, t).filter((p) => coldSet.has(p.sid)).length;
+  A.equal(again(NOW + 6 * DAY), 0, "thawed: warm for the next 7 days"); A.equal(again(NOW + 8 * DAY), 20, "...and idle again after them");
+
+  // 7. handles after a thaw continue from nextHandle; nextHandle is kept as the larger
+  {
+    const st = Store.fromText(after), sid = fx.sids.cold[0], s = st.d.sessions[sid];
+    const nh = { ...s.nextHandle };
+    st.thaw(sid, files[sid].record, files[sid].file, NOW);
+    st.apply({ v: 1, id: `nh${++cn}`, type: "capture", at: NOW, session_id: sid, terminal: s.terminal, request: { id: "rq_after-thaw", text: "One more question", anchor: { sessionId: sid, turn: s.turn, settled: true }, createdAt: NOW } });
+    A.equal(st.item("rq_after-thaw").handle, `Q${nh.Q}`, "the next question takes Q from nextHandle");
+    st.apply({ v: 1, id: `nh${++cn}`, type: "asks", at: NOW, session_id: sid, turn: s.turn + 1, source: "block", asks: [{ text: "A brand new ask after the thaw", kind: "do", level: "needed" }] });
+    A.equal(st.itemsOf(sid).find((it) => it.text === "A brand new ask after the thaw").handle, `A${nh.A}`, "the next ask takes A from nextHandle");
+    A.equal(new Set(st.itemsOf(sid).map((it) => it.handle)).size, st.itemsOf(sid).length, "no handle twice");
+    // a stub whose counter fell behind (an older build's, a hand edit): raised past the file's and every handle's
+    const s2 = Store.fromText(after), sid2 = fx.sids.cold[1];
+    s2.d.sessions[sid2].nextHandle = { A: 1, Q: 1, P: 1 };
+    s2.thaw(sid2, files[sid2].record, files[sid2].file, NOW);
+    A.deepEqual(s2.d.sessions[sid2].nextHandle, files[sid2].record.session.nextHandle, "nextHandle: the larger, the file's");
+    const s3 = Store.fromText(after), rec3 = JSON.parse(JSON.stringify(files[sid2].record));
+    s3.d.sessions[sid2].nextHandle = { A: 2, Q: 1, P: 1 }; rec3.session.nextHandle = { A: 1, Q: 1, P: 1 };
+    s3.thaw(sid2, rec3, files[sid2].file, NOW);
+    const maxA = Math.max(...rec3.items.filter((it) => /^A\d+$/.test(it.handle)).map((it) => Number(it.handle.slice(1))));
+    A.equal(s3.d.sessions[sid2].nextHandle.A, maxA + 1, "...past every handle the items hold, whatever both counters said");
+  }
+
+  // 8. thaw refuses what is not this session's file, and a mixed session keeps the store's copies
+  {
+    const sid = fx.sids.cold[2], { file, record } = files[sid];
+    const fresh = () => Store.fromText(after);
+    const refuse = (rec, f = file, s0 = sid, why) => { const st = fresh(), t = st.toText(); const r = st.thaw(s0, rec, f, NOW); A.equal(r.ok, false, why); A.equal(typeof r.error, "string"); A.equal(st.toText(), t, `${why}: nothing changed`); return r.error; };
+    refuse({ ...record, ledgr: "other" }, file, sid, "a wrong format");
+    refuse({ ...record, v: 2 }, file, sid, "another version");
+    A.match(refuse({ ...record, sessionId: fx.sids.cold[3] }, file, sid, "another session's file"), /not/);
+    refuse(record, files[fx.sids.cold[3]].file, sid, "a file the stub does not name");
+    refuse(record, file, fx.sids.active[0], "a warm session");
+    refuse(record, file, "nobody-0000", "an unknown session");
+    refuse({ ...record, items: "x" }, file, sid, "no item list");
+    refuse({ ...record, items: [...record.items, { text: "no id" }] }, file, sid, "an item with no id");
+    refuse({ ...record, items: [...record.items, { ...record.items[0], id: "rq_elsewhere", anchor: { sessionId: "elsewhere" } }] }, file, sid, "an item of another session");
+    refuse({ ...record, turns: [1, 2] }, file, sid, "turn records not a map");
+    refuse({ ...record, turns: { ...record.turns, 99: "x" } }, file, sid, "a turn record not a record");
+    refuse(JSON.parse(`{"ledgr":"ledgr-cold","v":1,"sessionId":${JSON.stringify(sid)},"items":[{"id":"__proto__","anchor":{"sessionId":${JSON.stringify(sid)}}}],"turns":{}}`), file, sid, "an id __proto__");
+    refuse(null, file, sid, "null"); refuse([], file, sid, "an array");
+    A.equal(coldRecordError({ ...record, turns: undefined }, sid), null, "no turns key: allowed (no records)");
+    // mixed: an older build added an item and a turn record beside the stub, and changed one of the file's ids
+    const st = fresh(), sOld = record.items[0], tKey = Object.keys(record.turns)[0];
+    st.d.items[sOld.id] = { ...sOld, text: "the store's newer copy" };
+    st.d.items.rq_older_build = { ...sOld, id: "rq_older_build", handle: "A999", text: "added by an older build" };
+    st.d.turns[sid] = { [tKey]: { stopAt: 1, note: "the store's record" }, 9999: { stopAt: 2 } };
+    A.deepEqual(st.mixedCold(), [sid], "mixedCold names it");
+    st.threshold = "needed";
+    const base = Store.fromText(after); base.threshold = "needed";
+    A.equal(sOld.status, "open"); A.equal(st.countsOf(sid).open, base.countsOf(sid).open + 2, "countsOf a mixed stub: n plus the store's own items");
+    const r = st.thaw(sid, record, file, NOW);
+    A.deepEqual({ ok: r.ok, items: r.items, turns: r.turns, kept: r.kept }, { ok: true, items: record.items.length - 1, turns: Object.keys(record.turns).length - 1, kept: { items: 1, turns: 1 } });
+    A.equal(st.item(sOld.id).text, "the store's newer copy", "an id in both: the store's wins");
+    A.equal(st.d.turns[sid][tKey].note, "the store's record", "a turn in both: the store's wins"); A.equal(st.d.turns[sid][9999].stopAt, 2);
+    const ids = st.itemsOf(sid).map((it) => it.id);
+    A.deepEqual(ids.slice(0, record.items.length - 1), record.items.slice(1).map((it) => it.id), "the file's items first, in file order");
+    A.deepEqual(ids.slice(-2), [sOld.id, "rq_older_build"], "...then the store's own");
+    A.ok(st.d.sessions[sid].nextHandle.A >= 1000, "nextHandle past A999");
+    A.deepEqual(st.mixedCold(), []);
+    // an item whose branch record is gone loses the mark, as Forget drops it
+    const st2 = fresh(), rec2 = JSON.parse(JSON.stringify(record));
+    rec2.items[0].branch = { branchId: "br_gone" }; rec2.items[1].branch = { branchId: "br_kept" };
+    st2.d.branches.br_kept = { id: "br_kept", parentSessionId: sid, status: "rejoined" };
+    st2.thaw(sid, rec2, file, NOW);
+    A.equal(st2.item(rec2.items[0].id).branch, undefined, "a branch mark whose record is gone goes"); A.deepEqual(st2.item(rec2.items[1].id).branch, { branchId: "br_kept" });
+  }
+
+  // 9. mergeCold: a reading copy's view; s.cold kept; copies; never in toText() or snapshot()
+  {
+    const st = Store.fromText(after), sid = fx.sids.cold[0], { file, record } = files[sid];
+    const t0 = st.toText(), snap0 = JSON.stringify(st.snapshot(NOW)), cold0 = JSON.stringify(st.d.sessions[sid].cold);
+    const want0 = Store.fromText(orig).itemsOf(sid);
+    st.threshold = "needed"; const cnt0 = st.countsOf(sid);
+    A.equal(st.mergeCold(sid, record, file), true);
+    A.equal(st.isMerged(sid), true); A.equal(st.isCold(sid), true, "still cold"); A.equal(JSON.stringify(st.d.sessions[sid].cold), cold0, "s.cold unchanged");
+    A.deepEqual(st.itemsOf(sid), want0, "the file's items in the view");
+    A.deepEqual(st.d.turns[sid], Store.fromText(orig).d.turns[sid]);
+    A.deepEqual(st.countsOf(sid), cnt0, "countsOf from the merged items: the same as from n");
+    st.itemsOf(sid)[0].text = "changed in the view"; st.d.turns[sid][Object.keys(st.d.turns[sid])[0]].stopAt = 1;
+    A.notEqual(record.items[0].text, "changed in the view", "copies: the record is untouched"); A.notEqual(Object.values(record.turns)[0].stopAt, 1);
+    A.equal(st.toText(), t0, "toText() leaves the merge out (a merged store written by mistake is still the stubs)");
+    A.equal(JSON.stringify(st.snapshot(NOW)), snap0, "...and so does snapshot()");
+    A.equal(st.mergeCold(sid, record, file), true, "the same file again"); A.equal(st.itemsOf(sid).length, want0.length, "...adds nothing");
+    A.equal(st.mergeCold(sid, record, files[fx.sids.cold[1]].file), false, "a file the stub does not name");
+    A.equal(st.mergeCold(fx.sids.cold[1], record, files[fx.sids.cold[1]].file), false, "another session's record");
+    A.equal(st.mergeCold(fx.sids.active[0], record, file), false, "a warm session");
+    A.equal(st.isMerged(fx.sids.cold[1]), false);
+    st.unmerge(sid);
+    A.equal(st.isMerged(sid), false); A.deepEqual(st.itemsOf(sid), []); A.equal(st.toText(), t0, "unmerge: as before");
+    // a merge that reached a writer's store by mistake: the session reads as mixed, and its thaw makes the copies real
+    const w = Store.fromText(after);
+    w.mergeCold(sid, record, file);
+    A.ok(w.mixedCold().includes(sid)); A.equal(w.coldNeeded([evFor("prompt", sid)]).has(sid), true, "a merged session still needs its thaw");
+    A.equal(w.thaw(sid, record, file, NOW).ok, true); A.equal(w.isMerged(sid), false);
+    A.equal(JSON.parse(w.toText()).items[want0[0].id]?.id, want0[0].id, "thawed: in toText() for good");
+  }
+
+  // 10. Phase 1 holds for cold and thawed sessions: archive, restore, slim; `archived` stays on the stub
+  {
+    const st = mk();
+    st.d.items.rq_c0r = { id: "rq_c0r", key: "k", handle: "A9", direction: "agent_to_human", text: "old", kind: "do", level: "needed",
+      anchor: { sessionId: S0, turn: 1, hash: "r" }, status: "resolved", resolvedAt: T10 - 5 * DAY, createdAt: T10 - 6 * DAY, updatedAt: T10 - 5 * DAY };
+    st.d.sessions[S0].nextHandle.A = 10; st.d.sessions[S0].archived = 4;
+    const line = JSON.parse(JSON.stringify(st.d.items.rq_c0r));
+    const { files: f1 } = freeze(st, st.planFreeze(7, NOW));
+    A.deepEqual(st.archivable(3, NOW), [], "a cold session's closed items wait in its file"); A.equal(st.d.sessions[S0].archived, 4, "archived stays on the stub");
+    A.deepEqual(st.planSlim(0), { cut: [], heads: [] }, "...and its turn records are not slimmed while cold");
+    A.equal(st.restoreItem({ ...line, id: "rq_c0z", handle: "A3" }), null, "restoreItem refuses a cold session (never an item beside a stub)"); A.equal(st.item("rq_c0z"), null);
+    A.throws(() => st.apply({ v: 1, id: `p1${++cn}`, type: "restore", at: NOW, session_id: S0, item: "rq_c0z", file: "items-1795000000000-a1b2c3.jsonl", record: { ...line, id: "rq_c0z" } }), ColdError, "a restore needs its session thawed");
+    st.thaw(S0, f1[S0].record, f1[S0].file, NOW);
+    A.deepEqual(st.archivable(3, NOW).map((x) => x.id), ["rq_c0r"], "thawed: archivable again");
+    A.deepEqual(st.removeItems(st.archivable(3, NOW)).map((x) => x.id), ["rq_c0r"]); A.equal(st.d.sessions[S0].archived, 5);
+    const rr = st.apply({ v: 1, id: `p1${++cn}`, type: "restore", at: NOW, session_id: S0, item: "rq_c0r", file: "items-1795000000000-a1b2c3.jsonl", record: line });
+    A.deepEqual(rr.restore, { item: "rq_c0r", ok: true }, "a restore after the thaw"); A.equal(st.item("rq_c0r").handle, "A9"); A.equal(st.d.sessions[S0].archived, 4);
+  }
+
+  // 11. Forget of a cold parent takes its cold child (the stub's parentSessionId) and a branch's session
+  {
+    const P_ = "eeee0001-0000-4000-8000-000000000001", C_ = "eeee0002-0000-4000-8000-000000000001", G_ = "eeee0003-0000-4000-8000-000000000001", X_ = "eeee0004-0000-4000-8000-000000000001";
+    const st = new Store({ v: 1, items: { rq_g: { id: "rq_g", handle: "A1", direction: "agent_to_human", anchor: { sessionId: G_ }, status: "open" } },
+      sessions: { [P_]: stub(P_), [C_]: { ...stub(C_), parentSessionId: P_, depth: 1 }, [G_]: { ...stub(G_), cold: undefined, parentSessionId: C_, depth: 2 },
+        [X_]: stub(X_), [WW]: { ...stub(WW), cold: undefined } },
+      branches: { br_x: { id: "br_x", parentSessionId: P_, sessionId: X_, status: "rejoined" } }, terminals: { t7: { sessionId: C_ } }, turns: {}, ingested: [], forgotten: {},
+      pins: { "pn_00000000-0000-4000-8000-0000000000c1": { id: "pn_00000000-0000-4000-8000-0000000000c1", sessionId: C_, status: "open", anchor: { sessionId: C_ } } } });
+    delete st.d.sessions[G_].cold; delete st.d.sessions[WW].cold;
+    st.apply({ v: 1, id: `fg${++cn}`, type: "forget", session_id: P_, at: NOW });
+    A.deepEqual(Object.keys(st.d.sessions), [WW], "the cold parent, its cold child, the child's warm child and the branch's session: gone");
+    A.deepEqual(Object.keys(st.d.forgotten).sort(), [P_, C_, G_, X_].sort()); A.deepEqual(st.d.branches, {}); A.deepEqual(st.d.terminals, {}); A.deepEqual(st.d.items, {});
+    A.equal(Object.keys(st.d.pins).length, 1, "the cold child's pin stays");
+  }
+
+  // 12. faults, cold_retry, cold_reset
+  {
+    const st = mk(), { files: f2 } = freeze(st, st.planFreeze(7, NOW)), file = f2[S0].file;
+    A.equal(st.coldFault("nobody", "x", NOW), false); A.equal(st.coldFault(fx.sids.active[0], "x", NOW), false, "a warm session: false");
+    A.deepEqual(st.coldFaults(), []);
+    A.equal(st.coldFault(S0, "missing: cold/x.json", NOW), true);
+    A.deepEqual(st.d.sessions[S0].cold.fault, { at: NOW, error: "missing: cold/x.json", tries: 1, held: 0 }, "the first fault");
+    st.coldFault(S0, "missing again", NOW + 600e3);
+    A.deepEqual(st.d.sessions[S0].cold.fault, { at: NOW + 600e3, error: "missing again", tries: 2, held: 0 }, "a try: at and tries move");
+    st.coldFault(S0, null, NOW + 700e3, 2); st.coldFault(S0, undefined, NOW + 800e3, 1);
+    A.deepEqual(st.d.sessions[S0].cold.fault, { at: NOW + 600e3, error: "missing again", tries: 2, held: 3 }, "held events only: held moves, nothing else");
+    A.deepEqual(st.coldFaults(), [{ sid: S0, file, at: NOW + 600e3, error: "missing again", tries: 2, held: 3 }]);
+    A.deepEqual(st.snapshot(NOW).cold[S0], { file, fault: "missing again" }, "snapshot.cold carries the fault's error");
+    const s2 = mk(); freeze(s2, s2.planFreeze(7, NOW)); s2.coldFault(S0, "bad JSON", NOW, 1);
+    A.deepEqual(s2.d.sessions[S0].cold.fault, { at: NOW, error: "bad JSON", tries: 1, held: 1 }, "a first fault with a held event");
+    // cold_reset: only a faulted stub naming that file
+    const ok0 = mk(); freeze(ok0, ok0.planFreeze(7, NOW));
+    const tOk = ok0.toText();
+    ok0.apply({ v: 1, id: `cr${++cn}`, type: "cold_reset", session_id: S0, file, at: NOW });
+    A.equal(JSON.parse(ok0.toText()).sessions[S0].cold.file, file, "not faulted: nothing reset"); A.equal(JSON.stringify(JSON.parse(ok0.toText()).sessions), JSON.stringify(JSON.parse(tOk).sessions));
+    const n0 = JSON.parse(JSON.stringify(st.d.sessions[S0].cold.n));
+    st.apply({ v: 1, id: `cr${++cn}`, type: "cold_reset", session_id: S0, file: "c0c0c0c0-0000-4000-8000-000000000001.1795000000000-zzzzzz.json", at: NOW });
+    A.ok(st.isCold(S0), "another file: nothing reset");
+    st.apply({ v: 1, id: `cr${++cn}`, type: "cold_reset", session_id: S0, at: NOW });
+    A.ok(st.isCold(S0), "no file: nothing reset");
+    st.apply({ v: 1, id: `cr${++cn}`, type: "cold_reset", session_id: S0, file, at: NOW + DAY });
+    A.equal(st.isCold(S0), false, "reset: warm");
+    A.deepEqual(st.d.sessions[S0].coldLost, { file, at: NOW + DAY, frozenAt: NOW, n: n0, error: "missing again" }, "coldLost: the file, when, its counts and the error");
+    A.equal(st.d.sessions[S0].thawedAt, NOW + DAY); A.equal(st.d.sessions[S0].touchedAt, NOW + DAY);
+    A.deepEqual(st.itemsOf(S0), [], "empty of what the file held");
+    st.apply({ v: 1, id: `cr${++cn}`, type: "capture", at: NOW + DAY, session_id: S0, terminal: "t1", request: { id: "rq_after-reset", text: "Start over?", anchor: { sessionId: S0, turn: 3, settled: true }, createdAt: NOW + DAY } });
+    A.equal(st.item("rq_after-reset").handle, "Q2", "the next capture takes Q from nextHandle: the lost file's Q1 is never handed out again");
+    st.apply({ v: 1, id: `cr${++cn}`, type: "asks", at: NOW + DAY, session_id: S0, turn: 4, source: "block", asks: [{ text: "Run it again", kind: "do", level: "needed" }] });
+    A.equal(st.itemsOf(S0).find((it) => it.text === "Run it again").handle, "A3", "...and A from nextHandle");
+    A.deepEqual(st.coldGarbage([file], NOW + 30 * DAY), [], "the lost file stays on disk (coldLost names it)");
+    // a reading copy that had merged the file: the reset takes the view's copies out
+    const rc = mk(), { files: f3 } = freeze(rc, rc.planFreeze(7, NOW));
+    rc.mergeCold(S0, f3[S0].record, f3[S0].file); rc.coldFault(S0, "gone", NOW);
+    rc.on_cold_reset({ file: f3[S0].file }, rc.d.sessions[S0], NOW);
+    A.deepEqual(rc.itemsOf(S0), [], "reset in a reading copy: its merged copies go too"); A.equal(rc.merged.size, 0);
+  }
+
+  // 13. The sweep's rules (integration, 2026-11-19: the review's blocker). By name (coldGarbage) only a file the
+  // session's record lists as thawed, past the grace, and a forgotten session's, past the keep time. Every other
+  // unnamed file of one recorded, unfaulted session older than the keep time is the writer's to read
+  // (coldUnproven) and to delete only when coldLacks finds nothing store.json lacks.
+  {
+    const H = 3600e3, G = { graceMs: H, keepMs: DAY };
+    const nm_ = (sid, ms, r = "a1b2c3") => CFG.coldName(sid, ms, r);
+    const sid = (x) => `aaaa${String(x).padStart(4, "0")}-0000-4000-8000-000000000001`;
+    const warm = (x, o) => ({ sessionId: sid(x), turn: 1, updatedAt: NOW - 20 * DAY, ...o });
+    const thawed = (x, ms, at) => ({ coldThawed: [{ file: nm_(sid(x), ms), at }], thawedAt: at });
+    const st = new Store({ v: 1, items: {}, branches: {}, terminals: {}, turns: {}, ingested: [], pins: {}, sessions: {
+      [sid(1)]: warm(1, thawed(1, NOW - 3 * DAY, NOW - 2 * H)),
+      [sid(2)]: warm(2, thawed(2, NOW - 3 * DAY, NOW - H / 2)),
+      [sid(3)]: warm(3, { updatedAt: NOW - DAY }),
+      [sid(4)]: warm(4, { updatedAt: NOW - H }),
+      [sid(5)]: warm(5, { updatedAt: NOW - 10 * DAY }),
+      [sid(6)]: { ...warm(6), cold: { file: nm_(sid(6), NOW - DAY), at: NOW - DAY, n: {} } },
+      [sid(7)]: { ...warm(7), cold: { file: nm_(sid(7), NOW - DAY), at: NOW - DAY, n: {}, fault: { at: NOW, error: "missing", tries: 1, held: 0 } } },
+      [sid(8)]: warm(8, { coldLost: { file: nm_(sid(8), NOW - 9 * DAY), at: NOW - 8 * DAY, n: {}, error: "x" }, thawedAt: NOW - 8 * DAY }),
+      [sid(13)]: warm(13, { thawedAt: NOW - 2 * DAY }),
+      "herdr:t9": warm(9), herdr_t9: warm(10),
+    }, forgotten: { [sid(11)]: NOW - 2 * DAY, [sid(12)]: NOW - 2 * H } });
+    const cases = {
+      del: [nm_(sid(1), NOW - 3 * DAY),                    // (t) listed as thawed, the grace past
+        nm_(sid(11), NOW - 3 * DAY)],                       // (a) forgotten over a day ago
+      keep: [nm_(sid(2), NOW - 3 * DAY),                    // listed as thawed, within the grace
+        nm_(sid(3), NOW - 2 * DAY),                         // touched after the file: the old rule (c) deleted it; a read decides now
+        nm_(sid(4), NOW - 3 * H),                           // touched after the file, the file under a day old
+        nm_(sid(5), NOW - 9 * DAY),                         // a warm session untouched since the file (a freeze given up)
+        nm_(sid(6), NOW - 5 * DAY),                         // an older file of a cold session: the old rule (b) deleted it; a read decides now
+        nm_(sid(6), NOW - DAY), nm_(sid(6), NOW),           // the file the stub names; a later one
+        nm_(sid(7), NOW - 5 * DAY),                         // a faulted session keeps every file
+        nm_(sid(8), NOW - 9 * DAY),                         // coldLost names it
+        nm_(sid(13), NOW - 3 * DAY),                        // thawed after the file, but not by this file (a reset, a backup): a read decides
+        nm_("herdr:t9", NOW - 30 * DAY),                    // a safe name two sessions share
+        nm_(sid(12), NOW - 3 * DAY),                        // forgotten under a day ago
+        nm_(sid(99), NOW - 30 * DAY),                       // a session the store does not know
+        "README", "x.json", "held"],
+    };
+    const got = st.coldGarbage([...cases.del, ...cases.keep, ...cases.del, 7, null, {}], NOW, G);
+    A.deepEqual(got.sort(), [...cases.del].sort(), "by name: a thawed file past the grace and a forgotten session's, nothing else, each once");
+    for (const k of cases.keep) A.equal(got.includes(k), false, `kept by name: ${k}`);
+    A.deepEqual(st.coldGarbage([nm_(sid(2), NOW - 3 * DAY)], NOW + H, G), [nm_(sid(2), NOW - 3 * DAY)], "...the thawed file once the grace is past");
+    A.deepEqual(st.coldGarbage([nm_(sid(12), NOW - 3 * DAY)], NOW + DAY, G), [nm_(sid(12), NOW - 3 * DAY)], "...the forgotten session's a day on");
+    A.deepEqual(st.coldGarbage("x", NOW, G), []); A.deepEqual(st.coldGarbage(undefined), []);
+    A.deepEqual(st.coldGarbage([nm_(sid(13), NOW - 3 * DAY)], NOW + 30 * DAY, G), [], "a session thawed after a file it does not list: never by name");
+    // What only a read can prove: oldest first; not a faulted session's, not a listed one, not one under the keep time.
+    const un = st.coldUnproven([...cases.del, ...cases.keep], NOW, { keepMs: DAY });
+    A.deepEqual(un.map((c) => c.name), [nm_(sid(5), NOW - 9 * DAY), nm_(sid(6), NOW - 5 * DAY), nm_(sid(13), NOW - 3 * DAY), nm_(sid(3), NOW - 2 * DAY)],
+      "unproven: the given-up freeze, the older file of a cold session, the reset one, the touched one; oldest first");
+    A.deepEqual(un.map((c) => c.sid), [sid(5), sid(6), sid(13), sid(3)]);
+    A.deepEqual(st.coldUnproven(cases.keep, NOW - 2 * DAY + H, { keepMs: DAY }).map((c) => c.name), [nm_(sid(5), NOW - 9 * DAY), nm_(sid(6), NOW - 5 * DAY), nm_(sid(13), NOW - 3 * DAY)], "a file under a day old waits");
+    // coldLacks (second and third review): only an identical copy proves. An item is held only by an identical copy of
+    // this session (the store's, or `copies`), never a later one (a store put back and touched once is stamped later
+    // while holding less); a turn record only by an identical one (the store's, `turnCopies`) or the store's without
+    // its head plus that head in `heads`. "Older than the oldest kept" proves nothing.
+    const S = sid(3);
+    const it_ = (id, o = {}) => ({ id, anchor: { sessionId: S }, status: "open", updatedAt: 100, ...o });
+    st.d.items.rq_same = it_("rq_same");
+    st.d.items.rq_newer = it_("rq_newer", { status: "resolved", updatedAt: 200 });
+    st.d.items.rq_older = it_("rq_older", { status: "resolved", updatedAt: 50 });
+    st.d.items.rq_other = { ...it_("rq_other"), anchor: { sessionId: "someone-else" } };
+    st.d.turns[S] = { 7: { stopAt: 1 }, 9: { stopAt: 2 }, 11: { stopAt: 3 } };
+    const rec = { items: [it_("rq_same"), it_("rq_newer", { draft: "x" }), it_("rq_older", { status: "answered", draft: "kept here only" }), it_("rq_other"), it_("rq_inArch"), it_("rq_lost1")],
+      turns: { 3: { stopAt: 0 }, 7: { stopAt: 1 }, 9: { stopAt: 99 }, 10: { stopAt: 5 }, 11: { stopAt: 3, textHead: "head" } } };
+    A.deepEqual(st.coldLacks(S, rec), { items: 5, turns: 4 },
+      "held: the identical item alone; lacking: the one the store has later (no proof of descent), the older one, another session's, two not anywhere; turns: only 7 identical");
+    A.deepEqual(st.coldLacks(S, rec, { copies: new Map([["rq_inArch", [it_("rq_inArch")]], ["rq_lost1", [it_("rq_lost1", { updatedAt: 300 })]], ["rq_older", [{ ...it_("rq_older"), anchor: { sessionId: "x" } }]]]),
+      turnCopies: new Map([["3", [{ stopAt: 0 }]], ["10", [{ stopAt: 5 }]]]), heads: new Map([["11", "head"]]) }),
+      { items: 4, turns: 1 }, "an identical copy proves the archived one; a later copy does not, nor another session's; turns 3 and 10 by copy, 11 by its head; 9 differs");
+    A.deepEqual(st.coldLacks(sid(4), { items: [], turns: { 1: {} } }), { items: 0, turns: 1 }, "no record kept anywhere: every turn record lacks");
+    A.deepEqual(st.coldLacks(S, { items: [7, { id: 5 }] }), { items: 2, turns: 0 }, "an item with no id string proves nothing");
+    // trimThawed: an entry goes once its file is gone, or a day after the thaw.
+    const tt = new Store({ v: 1, items: {}, branches: {}, terminals: {}, turns: {}, ingested: [], pins: {}, forgotten: {}, sessions: {
+      [sid(1)]: warm(1, { coldThawed: [{ file: "a", at: NOW - 2 * DAY }, { file: "b", at: NOW - H }, { file: "c", at: NOW - H }] }), [sid(2)]: warm(2, { coldThawed: [{ file: "d", at: NOW }] }) } });
+    A.equal(tt.trimThawed(["a", "b", "d"], NOW, { keepMs: DAY }), true);
+    A.deepEqual(tt.d.sessions[sid(1)].coldThawed, [{ file: "b", at: NOW - H }], "a day old and gone: dropped; there and fresh: kept");
+    A.equal(tt.trimThawed(["b"], NOW, { keepMs: DAY }), true); A.equal(tt.d.sessions[sid(2)].coldThawed, undefined, "an emptied list goes");
+    A.equal(tt.trimThawed(["b"], NOW, { keepMs: DAY }), false, "nothing to trim: no change");
+    // A thaw lists its file; the newest COLD_THAWED_MAX kept; the same file again is one entry.
+    const t2 = mk(), { files: tf } = freeze(t2, t2.planFreeze(7, NOW));
+    t2.d.sessions[S0].coldThawed = Array.from({ length: COLD_THAWED_MAX }, (_, i) => ({ file: `old${i}`, at: i }));
+    t2.thaw(S0, tf[S0].record, tf[S0].file, NOW + 1);
+    A.equal(t2.d.sessions[S0].coldThawed.length, COLD_THAWED_MAX); A.deepEqual(t2.d.sessions[S0].coldThawed.at(-1), { file: tf[S0].file, at: NOW + 1 }, "the thaw's file last");
+    A.equal(t2.d.sessions[S0].coldThawed[0].file, "old1", "the oldest dropped");
+    A.deepEqual(t2.coldGarbage([tf[S0].file], NOW + 1 + 2 * H, G), [tf[S0].file], "the thawed file goes by name after the grace");
+    // cold_reset lists nothing: another file of that session is a read's to prove (it may hold what was lost).
+    const r3 = mk(), { files: rf } = freeze(r3, r3.planFreeze(7, NOW));
+    r3.coldFault(S0, "missing", NOW);
+    r3.apply({ v: 1, id: `cg${++cn}`, type: "cold_reset", session_id: S0, file: rf[S0].file, at: NOW + 1 });
+    const other = CFG.coldName(S0, NOW + 5, "zzzzzz");
+    A.equal(r3.d.sessions[S0].coldThawed, undefined, "a reset lists no file as thawed");
+    A.deepEqual(r3.coldGarbage([other, rf[S0].file], NOW + 30 * DAY, G), [], "after a reset: neither the lost file (coldLost) nor another of the session by name");
+    A.deepEqual(r3.coldUnproven([other], NOW + 30 * DAY, G).map((c) => c.name), [other], "...the other one is a read's to prove");
+    // A file merged into a session that came back warm counting from A1 again (a corrupt start; the manual recovery
+    // of Retention.md 10.8): its clashing items take the next handles, their own kept as handleWas.
+    const r4 = mk(), { files: f4 } = freeze(r4, r4.planFreeze(7, NOW));
+    delete r4.d.sessions[S0].cold; r4.d.sessions[S0].nextHandle = { A: 1, Q: 1, P: 1 };
+    r4.apply({ v: 1, id: `cg${++cn}`, type: "asks", at: NOW, session_id: S0, turn: 9, source: "tool", asks: [{ text: "New after the loss", kind: "do", level: "needed" }] });
+    A.equal(r4.itemsOf(S0)[0].handle, "A1");
+    r4.d.sessions[S0].cold = { file: f4[S0].file, at: NOW, n: {} };
+    A.deepEqual(r4.mixedCold(), [S0]);
+    A.equal(r4.thaw(S0, f4[S0].record, f4[S0].file, NOW + 1).ok, true);
+    const hs4 = r4.itemsOf(S0).map((it) => it.handle);
+    A.equal(new Set(hs4).size, hs4.length, `handles unique after the merge: ${hs4}`);
+    A.equal(r4.itemsOf(S0).find((it) => it.text === "New after the loss").handle, "A1", "the store's own item keeps its handle");
+    const moved = r4.itemsOf(S0).filter((it) => it.handleWas);
+    A.ok(moved.length >= 1 && moved.every((it) => it.handleWas !== it.handle && /^[AQ]\d+$/.test(it.handle)), "the file's clashing items renumbered, handleWas kept");
+    A.ok(Number(r4.d.sessions[S0].nextHandle.A) > Math.max(...hs4.filter((h) => h.startsWith("A")).map((h) => Number(h.slice(1)))), "nextHandle past them all");
+  }
+}
+const coldChecks = checks - phase1 - phase2 - phase3 - sev - prof - toolChecks - settleChecks - spaceChecks - pinChecks - retChecks;
+
+console.log(`OK: store, ${checks} checks (${phase1} phase 1, ${phase2} phase 2, ${phase3} phase 3, ${sev} severity and resume, ${prof} profiles, handoff and paste words, ${toolChecks} tool asks, ${settleChecks} blocking while working, closed by the agent, answered then settled, ${spaceChecks} spaces off and Clear all, ${pinChecks} pins, ${retChecks} retention${retSizes}, ${coldChecks} cold sessions${coldSizes}), 0 failure(s)`);

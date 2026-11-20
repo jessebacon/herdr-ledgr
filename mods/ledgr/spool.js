@@ -8,7 +8,10 @@
 // watchdog reads (writer.js PASS_STUCK_MS); abandon() gives a pass up, and an abandoned pass changes
 // nothing more, whenever its await settles, if ever.
 // Also the names under ledgr-data/archive/ and their create-only write (writeNew), which the writer's
-// housekeeping and its `restore` reads use (retention, 2026-11-19).
+// housekeeping and its `restore` reads use (retention, 2026-11-19). Phase 2 (cold sessions): writeNew also
+// writes past the text-file cap (a cold file over 1 MiB) and can remove a file it could not confirm (`drop`);
+// poke() runs a pass with nothing in the spool (the writer's thaws and held events); quarantine() also takes
+// a held event (cold/held/, its own `path`).
 import * as fs from "fs/promises";
 import { randomUUID } from "crypto";
 import { readTextFile, writeTextFile } from "herdr";
@@ -126,17 +129,57 @@ export function archivedRecord(text, sid, item) {
 // (readTextFile; text stays under the cap). Resolves null when the file holds exactly text, else the error's
 // text. ok() is asked right before the write (a run given up writes nothing more); each await waits at most
 // ms (within, with cx's timer); step(s) names each wait.
-export async function writeNew(path, text, { cx = null, ms = 20000, ok = null, step = null } = {}) {
+// Past the cap (Phase 2: a cold file over 1 MiB, which writeTextFile refuses): the folder is listed first and a
+// name already there fails the write as above; then fs.writeFile, which would replace a file, so the name must
+// be one nobody else writes (the cold files' <ms>-<rand6>), and the read-back is fs.readFile (no cap). Nothing
+// names such a file until its read-back matched, so a short write is at worst an unreferenced file.
+// drop (Phase 2): a file this call may have written and could not confirm (its read-back failed or differs,
+// or its write got no answer and may yet land) is removed, limited and errors ignored; a name that was
+// already taken never is (that file is not this call's). Without drop it stays (an archive file: harmless).
+export async function writeNew(path, text, { cx = null, ms = 20000, ok = null, step = null, drop = false } = {}) {
   const mark = (s) => { try { step?.(s); } catch { /* diagnostics only */ } };
-  if (overCap(text)) return `${base(path)} over the text-file cap, not written`;
+  const big = overCap(text);
+  let mine = false;   // this call may have written path
+  const fail = async (why) => {
+    if (drop && mine) { mark("removing"); await within(cx, ms, fs.unlink(path), `removing ${base(path)}`).catch(() => {}); }
+    return why;
+  };
   if (ok && !ok()) return "given up before the write";
-  try { mark("write"); await within(cx, ms, writeTextFile(path, text, null), `writing ${base(path)}`); }
-  catch (e) { return `${base(path)} not written: ${String(e?.message ?? e)}`; }
+  if (big) {
+    try { mark("listing"); if (await isThere(path, { cx, ms })) return `${base(path)} not written: a file of that name is there already`; }
+    catch (e) { return `${base(path)} not written: ${String(e?.message ?? e)}`; }
+    if (ok && !ok()) return "given up before the write";
+    try { mark("write"); mine = true; await within(cx, ms, fs.writeFile(path, text), `writing ${base(path)}`); }
+    catch (e) { return fail(`${base(path)} not written: ${String(e?.message ?? e)}`); }
+  } else {
+    try { mark("write"); await within(cx, ms, writeTextFile(path, text, null), `writing ${base(path)}`); mine = true; }
+    catch (e) { mine = Boolean(e?.timedOut); return fail(`${base(path)} not written: ${String(e?.message ?? e)}`); }
+  }
   let back;
-  try { mark("read back"); back = await within(cx, ms, readTextFile(path), `reading ${base(path)} back`); }
-  catch (e) { return `${base(path)} not read back: ${String(e?.message ?? e)}`; }
-  if (back !== text) return back === null ? `${base(path)} not there when read back` : `${base(path)} read back other text (${back.length} of ${text.length} characters)`;
+  try { mark("read back"); back = await within(cx, ms, big ? fs.readFile(path, "utf8") : readTextFile(path), `reading ${base(path)} back`); }
+  catch (e) { return fail(`${base(path)} not read back: ${String(e?.message ?? e)}`); }
+  if (back !== text) return fail(back === null ? `${base(path)} not there when read back` : `${base(path)} read back other text (${back.length} of ${text.length} characters)`);
   return null;
+}
+
+// Is there a file named path? Its folder listed (the one presence check both Herdr's fs and the tests' Node fs
+// have): true or false (a folder that is not there: false), or a rejection when the listing got no answer within
+// ms (within; error.timedOut) or failed for another reason (notFound false), which a caller takes as "not known
+// yet".
+export async function isThere(path, { cx = null, ms = 20000 } = {}) {
+  const cut = String(path).lastIndexOf("/"), dir = String(path).slice(0, cut), name = String(path).slice(cut + 1);
+  let names;
+  try { names = await within(cx, ms, fs.readdir(dir), `listing ${base(dir)}`); }
+  catch (e) { if (e?.timedOut || !notFound(e)) throw e; return false; }   // a folder not there: neither is the file
+  return (names ?? []).map(base).includes(name);
+}
+
+// An fs error that says the path is not there (Node's ENOENT; Herdr's fs reports the OS error in words: "No such
+// file or directory (os error 2)"), as opposed to one that says nothing about it (too many open files, an I/O
+// error, no permission): only this one makes a cold file "missing" (integration, 2026-11-19).
+export function notFound(e) {
+  if (e?.code === "ENOENT") return true;
+  return /\bENOENT\b|no such file or directory|os error 2\b|\bnot found\b/i.test(String(e?.message ?? e ?? ""));
 }
 
 // Events whose apply threw: spool/failed/<name>, with <name without .json>.error.txt beside it.
@@ -197,6 +240,16 @@ export class SpoolReader {
     this.pass = null;      // the running pass: {epoch, at (its start), step, since (the step's start)}
     this.done = 0;         // when the last pass ended (ms): the writer's progress
     this.abandoned = 0;    // passes given up since start
+    this.want = false;     // poke(): the next pass applies even an empty batch (Phase 2)
+  }
+
+  // A pass even when the spool holds nothing (retention Phase 2): the writer's cold work (sessions to bring
+  // back from cold/, held events to replay) is done by a pass, before its apply loop. Sets `want` and drains;
+  // during a running pass it rides that pass's `again` loop, and the next round of it applies with whatever the
+  // spool holds then, an empty batch included.
+  poke(cx) {
+    this.want = true;
+    return this.drain(cx);
   }
 
   // The running pass is about to wait in step s (one await, or one short loop of them).
@@ -236,10 +289,10 @@ export class SpoolReader {
         const names = await listSpool();
         if (!mine()) return;
         this.missing = names === null;
-        if (!names) break;
+        if (!names && !this.want) break;
         const batch = [];
         this.step(pass, "read");
-        for (const name of names.filter((n) => !this.skip.has(n)).slice(0, 500)) {
+        for (const name of (names ?? []).filter((n) => !this.skip.has(n)).slice(0, 500)) {
           const path = `${spoolDir()}/${name}`;
           const text = await readTextFile(path).catch(() => null);
           if (!mine()) return;
@@ -261,7 +314,8 @@ export class SpoolReader {
           this.retries.delete(name);
           batch.push({ name, ev, text });
         }
-        if (batch.length) {
+        if (batch.length || this.want) {
+          this.want = false;
           // false: this copy is not the writer, or store.json was not written; leave the files.
           this.step(pass, "apply");
           const r = await this.apply(batch, cx, pass);
@@ -280,7 +334,7 @@ export class SpoolReader {
           this.applied += gone;
           if (lost) break;
         }
-        if (names.length > 500) this.again = true;
+        if ((names?.length ?? 0) > 500) this.again = true;
       } while (this.again);
     } catch (e) {
       if (mine()) this.errors.push(String(e?.message ?? e));
@@ -299,7 +353,8 @@ export class SpoolReader {
   // An event whose apply threw: copied to spool/failed/<name> with the error and stack in
   // <name without .json>.error.txt, and only then unlinked (the writer never loses an event). A copy
   // that cannot be made leaves the file where it is, skipped by this copy until it restarts.
-  // mine(): false once the pass was abandoned (nothing more is written or unlinked).
+  // mine(): false once the pass was abandoned (nothing more is written or unlinked). A held event the writer
+  // replayed (Phase 2) carries its own `path` (cold/held/<folder>/<name>): that copy is the one unlinked.
   async quarantine(b, f, mine = () => true) {
     const dir = failedDir(), path = `${dir}/${b.name}`;
     await fs.mkdir(dir, { recursive: true }).catch(() => {});
@@ -315,7 +370,7 @@ export class SpoolReader {
     }
     await writeAtomic(`${dir}/${b.name.replace(/\.json$/, "")}.error.txt`, failedText(b, f));
     if (!mine()) return false;
-    await fs.unlink(`${spoolDir()}/${b.name}`).catch(() => {});
+    await fs.unlink(b.path ?? `${spoolDir()}/${b.name}`).catch(() => {});
     this.failed += 1;
     this.errors.push(`spool event ${b.name} failed (${f.error}); kept as spool/failed/${b.name}`);
     try { this.onFailed?.(b, f); } catch { /* health only */ }

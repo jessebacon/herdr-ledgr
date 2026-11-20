@@ -12,19 +12,26 @@
 // saveConfig): the panel's threshold menu and space switch, and the settings dialog (settings.js, a
 // Reader too). The archive (retention, 2026-11-19): loadArchive reads a session's archived items back from
 // ledgr-data/archive/ for the panel's Closed fold and the dialog (listing.js archiveRecords decides which
-// line counts). Not an engine file.
+// line counts). Cold sessions (retention Phase 2, 2026-11-19): a session nobody touched for
+// retention.coldDays keeps only its record in store.json (a stub with its counts); its items and turn records
+// are in ledgr-data/cold/<file>. Shown, its file is read here (wantCold: bounded, cached for the 12 most
+// recently used, tried again after 30 s or at once on Try again) and merged into this copy's own store
+// (mergeColdAll, store.js mergeCold), never the fallback writer's (that store is saved: the panel shows a clone
+// then, panel.js viewStore); nothing here brings a session back: the first act on it posts an event, and the
+// writer thaws it. Try again (coldRetry, cold_retry) and Use without its older items (coldReset, cold_reset)
+// are the two cold events a reader posts. Not an engine file.
 import { readTextFile, writeTextFile, watchFolder, agents, terminals, home } from "herdr";
 import * as fs from "fs/promises";
 import { randomUUID } from "crypto";
-import { DEFAULTS, loadConfig, dataDir, turnPath, storePath, configPath, liveHome } from "./config.js";
+import { DEFAULTS, loadConfig, dataDir, turnPath, storePath, configPath, liveHome, coldPath, coldDir, COLD_NAME, safeName } from "./config.js";
 import { Store, isAgentAsk, isClosed } from "./store.js";
 import { writeEvent, archiveDir, within, ARCHIVE_ITEMS, ARCHIVE_LEGACY } from "./spool.js";
 import { stageMessage, promptText, PASTE } from "./nav.js";
-import { FIXTURE_TURNS, demoArchive } from "./fixtures.js";
-import { archiveRecords, parseArchiveText } from "./listing.js";
+import { FIXTURE_TURNS, demoArchive, FIXTURE_COLD } from "./fixtures.js";
+import { archiveRecords, parseArchiveText, parseCold } from "./listing.js";
 import { liveStatus, transcriptPathOf } from "./branch.js";
 import { answersSheet, answersLeadIn, sheetOverCap } from "./confluence.js";
-import { itemWords as H, paneWords as P, sessionWords } from "./words.js";
+import { itemWords as H, paneWords as P, sessionWords, coldResetWords, coldRetryWords } from "./words.js";
 
 const squash = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
 // ledgr-data/archive/: a folder per session (spool.js archiveDir) of items files, and the legacy month files.
@@ -34,6 +41,15 @@ const ARCHIVE_SHAPES = { items: ARCHIVE_ITEMS, legacy: ARCHIVE_LEGACY };
 // A reading copy's archive read: at most this long (readArchiveWithin), then again after ARCHIVE_RETRY_MS.
 export const ARCHIVE_READ_MS = 10000;
 export const ARCHIVE_RETRY_MS = 15000;
+// Cold sessions (retention Phase 2): the records this copy keeps read (the most recently used), how long one
+// file's read may take (spool.js within, on the copy's own timer), when a read that failed is tried again on its
+// own, how long a typed answer whose item is not in the shown store is kept (its cold session may be loading),
+// and how long Use without its older items waits for its second click.
+export const COLD_CACHE = 12;
+export const COLD_READ_MS = 10000;
+export const COLD_LOAD_RETRY_MS = 30000;
+export const COLD_DRAFT_MS = 60000;
+export const COLD_ARM_MS = 4000;
 // A folder's names (Herdr may hand back paths: the last part), those matching re, in order; [] when the
 // folder does not exist (an empty archive, not an error).
 async function namesIn(dir, re) {
@@ -97,6 +113,14 @@ export class Reader {
     this.archives = new Map();     // session id -> {sig, all}: its archive as last read (loadArchive), the store's ids not left out yet
     this.legacyTexts = new Map();  // legacy month file name -> its text (never written again: read once per copy)
     this.archiveFiles = new Map(); // "<folder>/<items file name>" -> its lines parsed (written once: read once per copy)
+    // Cold sessions: file name -> {sid, file, loading, record, error, at, used} (wantCold), the COLD_CACHE most
+    // recently used; bumped on every change (coldGen: the panel's fallback clone follows it); Use without its
+    // older items armed ({sid, at}).
+    this.coldCache = new Map();
+    this.coldGen = 0;
+    this.coldResetAsk = null;
+    // A faulted session's other files in ledgr-data/cold/ ("<sid>\n<named file>" -> {names, at, loading}).
+    this.coldOtherCache = new Map();
   }
 
   // ── reading ──────────────────────────────────────────────────────────
@@ -119,6 +143,10 @@ export class Reader {
     return this.live;
   }
 
+  // The store this copy owns and may merge cold records into: its demo store, else store.json as it read it.
+  // Never a fallback writer's (panel.js: that one is saved; the panel shows a clone of it instead).
+  ownStore() { return this.demo && this.demoStore ? this.demoStore : this.live; }
+
   async reload() {
     const text = await fs.readFile(storePath(), "utf8").catch(() => null);
     if (text === null || text === this.liveText) return false;
@@ -126,6 +154,8 @@ export class Reader {
     try { st = Store.fromText(text); } catch { return false; }
     this.liveText = text;
     this.live = st;
+    this.mergeColdAll(st);
+    this.dropColdUnnamed(st);
     this.overlayLocal();
     this.bump();
     return true;
@@ -156,11 +186,17 @@ export class Reader {
       else if (a.action === "resume") { const x = this.live.d.sessions[a.sid]; if (x && x.resume?.state !== "resumed") x.resume = { at: a.at, state: "launching" }; }
       else if (a.action === "clear_questions") { const x = this.live.d.sessions[a.sid]; if (x) this.live.on_clear_questions({}, x, a.at); }
       else if (PIN_ACTS.has(a.action)) this.live[`on_${a.action}`]({ pin: a.pin, note: a.note }, a.at, {});
+      // Use without its older items (a faulted cold session): the store's own change, when it has it.
+      else if (a.action === "cold_reset") { const x = this.live.d.sessions[a.sid]; if (x && typeof this.live.on_cold_reset === "function") this.live.on_cold_reset({ session_id: a.sid, file: a.file }, x, a.at); }
       else this.live.act(a.item, a.action, a.arg, a.at);
     }
+    // A draft whose item is not in the store is kept while a cold session's file is being read here (its item
+    // may be in it) and for COLD_DRAFT_MS in any case (a dialog's closed record can name an item of a cold
+    // session this copy has not read).
+    const coldBusy = this.coldLoading();
     for (const [id, v] of this.drafts) {
       const it = this.live.item(id);
-      if (!it) { this.drafts.delete(id); continue; }
+      if (!it) { if (!coldBusy && now - (Number(v.at) || 0) >= COLD_DRAFT_MS) this.drafts.delete(id); continue; }
       if (it.draft === v.text && v.sent) this.drafts.delete(id); else it.draft = v.text;
     }
     if (this.localActs.length) this.bump();
@@ -249,7 +285,7 @@ export class Reader {
     it.draft = text;
     if (had !== Boolean(squash(text))) cx.notify();   // the Paste answer(s) buttons follow it
     if (this.demo) return;
-    const d = { text, sent: false, seq: (this.drafts.get(id)?.seq ?? 0) + 1 };
+    const d = { text, sent: false, seq: (this.drafts.get(id)?.seq ?? 0) + 1, at: Date.now() };
     this.drafts.set(id, d);
     const seq = d.seq;
     cx.timer.after(800, (cx) => {
@@ -526,6 +562,183 @@ export class Reader {
   demoArchiveOf(sid) {
     const st = this.viewStore(), a = demoArchive();
     return archiveRecords([...(a.sessions[sid] ?? []), ...a.legacy], { sessionId: sid, has: (id) => Boolean(st.item(id)), ...ARCHIVE_SHAPES });
+  }
+
+  // ── cold sessions (retention Phase 2, 2026-11-19) ────────────────────
+  // A cold session's state as this copy shows it: null (not cold), else {file, state, n, error?, held?}, state
+  // "fault" (the writer cannot read the file: s.cold.fault; never merged here), "ok" (merged into the shown
+  // store), "error" (this copy could not read it: tried again after COLD_LOAD_RETRY_MS, or at once on Try
+  // again) or "loading" (being read, or not yet asked for). n: the stub's counts.
+  coldOf(sid, st = this.viewStore()) {
+    const c = sid ? st?.d?.sessions?.[sid]?.cold : null;
+    if (!c || typeof c !== "object" || typeof c.file !== "string" || !c.file) return null;
+    const n = c.n && typeof c.n === "object" ? c.n : {};
+    if (c.fault && typeof c.fault === "object") {
+      return { file: c.file, state: "fault", n, error: c.fault.error == null ? null : String(c.fault.error), held: Math.max(0, Math.floor(Number(c.fault.held) || 0)) };
+    }
+    if (typeof st.isMerged === "function" && st.isMerged(sid)) return { file: c.file, state: "ok", n };
+    const e = this.coldCache.get(c.file);
+    if (e && !e.loading && e.error) return { file: c.file, state: "error", n, error: e.error, retryAt: e.at + COLD_LOAD_RETRY_MS };
+    return { file: c.file, state: "loading", n };
+  }
+
+  // Whether a shown cold session's file should be read now (from a timer: never from render): not merged,
+  // not faulted, and not read yet, read but not merged yet, or failed COLD_LOAD_RETRY_MS ago.
+  coldDue(sid, st = this.viewStore()) {
+    const c = this.coldOf(sid, st);
+    if (!c || c.state === "ok" || c.state === "fault") return false;
+    const e = this.coldCache.get(c.file);
+    if (!e || e.record) return true;
+    return !e.loading && Date.now() >= e.at + COLD_LOAD_RETRY_MS;
+  }
+
+  // Any cold file being read here (overlayLocal keeps drafts meanwhile).
+  coldLoading() { for (const e of this.coldCache.values()) if (e.loading) return true; return false; }
+
+  // Reads a cold session's file, from a timer or a handler (never from render): fs.readFile (no 1 MiB cap),
+  // within COLD_READ_MS on this copy's own timer, checked as the writer's thaw checks it (listing.js parseCold),
+  // kept in coldCache by file name and merged (coldLoaded). The demo reads fixtures.js FIXTURE_COLD, at once.
+  // A record already read is merged at once. Never a write, never an event: showing a session does not bring
+  // it back (the first act does, at the writer). force: read again now (Try again). Returns the state.
+  wantCold(sid, cx, { force = false } = {}) {
+    const st = this.viewStore(), s = sid ? st?.d?.sessions?.[sid] : null, file = s?.cold?.file;
+    if (typeof file !== "string" || !file) return null;
+    const now = Date.now();
+    let e = this.coldCache.get(file);
+    if (e?.record && e.sid === sid) { e.used = now; if (!(typeof st.isMerged === "function" && st.isMerged(sid))) this.coldLoaded(cx); return "ok"; }
+    if (e?.loading) return "loading";
+    if (e?.error && !force && now < e.at + COLD_LOAD_RETRY_MS) return "error";
+    e = { sid, file, loading: true, record: null, error: null, at: now, used: now };
+    this.coldCache.set(file, e);
+    this.coldGen++;
+    const done = (r, cx) => {
+      if (this.coldCache.get(file) !== e) return;      // dropped, or read again, meanwhile
+      e.loading = false;
+      e.at = Date.now();
+      if (r.record) e.record = r.record; else e.error = r.error ?? "unknown error";
+      this.trimColdCache();
+      this.coldLoaded(cx);
+      if (e.error) { try { cx.timer.after(COLD_LOAD_RETRY_MS + 50, (cx) => cx.notify()); } catch { /* the next render tries again */ } }
+    };
+    if (this.demo) {
+      const rec = FIXTURE_COLD[file];
+      done(rec ? parseCold(JSON.stringify(rec), sid, file, file) : { error: "not a file of the demo" }, cx);
+      return e.record ? "ok" : "error";
+    }
+    // Only a plain name of the writer's shape (config.js COLD_NAME), read in ledgr-data/cold/ and nowhere else.
+    if (file.includes("/") || file.includes("\\") || !COLD_NAME.test(file)) { done({ error: "the session names no cold file of ledgr's shape" }, cx); return "error"; }
+    cx.spawn(async (cx) => {
+      let r;
+      try {
+        const text = await within(cx, COLD_READ_MS, fs.readFile(coldPath(file), "utf8"), `reading cold/${file}`);
+        r = parseCold(text, sid, file, file);
+      } catch (err) { r = { error: err?.code === "ENOENT" ? "the file is missing" : String(err?.message ?? err) }; }
+      done(r, cx);
+    });
+    return "loading";
+  }
+
+  // A cold record arrived (or was read before): merged into this copy's own store, the acts and drafts posted
+  // here applied on top again, and a render; the copy's onCold hook first (the panel: a merge is no motion).
+  coldLoaded(cx) {
+    this.coldGen++;
+    this.mergeColdAll();
+    this.overlayLocal();
+    this.bump();
+    this.onCold?.(cx);
+    try { cx?.notify?.(); } catch { /* closing */ }
+  }
+
+  // Every cold session of `st` whose record this copy has read, merged in (store.js mergeCold: deep copies, the
+  // store's own ids and turns winning, s.cold unchanged; marked merged on that instance). Faulted sessions are
+  // never merged (they show the writer's words). Only a store this copy owns: never the fallback writer's live
+  // store, which is saved. Returns how many were merged.
+  mergeColdAll(st = this.ownStore()) {
+    if (!st || typeof st.coldSessions !== "function" || typeof st.mergeCold !== "function") return 0;
+    if (this.writer && st === this.writer.live) return 0;
+    let n = 0;
+    for (const sid of st.coldSessions()) {
+      const c = st.d.sessions[sid]?.cold;
+      if (!c?.file || c.fault || st.isMerged(sid)) continue;
+      const e = this.coldCache.get(c.file);
+      if (!e?.record || e.sid !== sid) continue;
+      if (st.mergeCold(sid, e.record, c.file)) { e.used = Date.now(); n++; }
+    }
+    return n;
+  }
+
+  // A record no stub of `st` names any more (its session came back, was forgotten, or froze again under a new
+  // name) is dropped from the cache; a read still going is left to finish (and dropped at the next reload).
+  dropColdUnnamed(st) {
+    if (this.demo || !st || typeof st.coldSessions !== "function") return;
+    const named = new Set(st.coldSessions().map((sid) => st.d.sessions[sid]?.cold?.file).filter(Boolean));
+    for (const [f, e] of this.coldCache) if (!named.has(f) && !e.loading) { this.coldCache.delete(f); this.coldGen++; }
+  }
+
+  // The other files of a faulted session in ledgr-data/cold/ (integration, 2026-11-19): names of the session's
+  // own shape (safeName(sid).<ms>-<rand6>.json) other than the one its stub names, newest first; one may hold what
+  // the missing file held, and the fault view says so before the person chooses Use without its older items.
+  // null until listed. The listing is from a timer (never from render), bounded, at most once a minute.
+  coldOthers(sid, file, cx) {
+    const k = `${sid}\n${file}`, e = this.coldOtherCache.get(k), now = Date.now();
+    if ((!e || (!e.loading && now - e.at > 60000)) && cx?.timer && !this.demo) {
+      const entry = { names: e?.names ?? null, at: now, loading: true };
+      this.coldOtherCache.set(k, entry);
+      cx.timer.after(0, (cx) => cx.spawn(async (cx) => {
+        let names = null;
+        try { names = await within(cx, COLD_READ_MS, fs.readdir(coldDir()), "listing cold/"); } catch { names = null; }
+        const mine = (names ?? []).map((n) => String(n).split("/").pop()).filter((n) => n !== file && n.match(COLD_NAME)?.[1] === safeName(sid));
+        entry.names = names === null ? entry.names : mine.sort().reverse();
+        entry.loading = false;
+        entry.at = Date.now();
+        try { cx.notify(); } catch { /* closing */ }
+      }));
+    }
+    return e?.names ?? null;
+  }
+
+  // The COLD_CACHE most recently used entries are kept (reads still going always).
+  trimColdCache() {
+    const done = [...this.coldCache.values()].filter((e) => !e.loading).sort((a, b) => b.used - a.used);
+    for (const e of done.slice(COLD_CACHE)) { this.coldCache.delete(e.file); this.coldGen++; }
+  }
+
+  // Try again: the file read again here, now; when the writer cannot read it either (s.cold.fault), one
+  // `cold_retry` spool event too ({session_id, file}), so the writer tries at once (its held events then
+  // apply). Nothing else; the session stays cold until something happens to it.
+  coldRetry(s, cx) {
+    const sid = s?.sessionId, c = sid ? this.viewStore().d.sessions[sid]?.cold : null;
+    if (!c?.file) return false;
+    const e = this.coldCache.get(c.file);
+    if (!e?.loading) { this.coldCache.delete(c.file); this.coldGen++; }
+    this.wantCold(sid, cx, { force: true });
+    const fault = Boolean(c.fault);
+    if (fault && !this.demo) this.post("cold_retry", { session_id: sid, file: c.file }, null, cx);
+    this.flash = coldRetryWords(c.file, fault);
+    cx.notify();
+    return true;
+  }
+
+  // Use without its older items, for a session the writer cannot read (s.cold.fault): the first click arms it
+  // for COLD_ARM_MS, the second posts one `cold_reset` spool event ({session_id, file}); the writer then keeps
+  // what is known of the lost file on the session (coldLost) and the session goes on, warm and empty, its kept
+  // events applied to it. Shown at once (overlayLocal, store.js on_cold_reset). "armed", "posted" or null.
+  coldReset(s, cx) {
+    const sid = s?.sessionId, c = sid ? this.viewStore().d.sessions[sid]?.cold : null;
+    if (!c?.file || !c.fault) return null;
+    const now = Date.now();
+    if (!(this.coldResetAsk?.sid === sid && now - this.coldResetAsk.at < COLD_ARM_MS)) {
+      const ask = this.coldResetAsk = { sid, at: now };
+      cx.timer.after(COLD_ARM_MS + 50, (cx) => { if (this.coldResetAsk === ask) { this.coldResetAsk = null; cx.notify(); } });
+      cx.notify();
+      return "armed";
+    }
+    this.coldResetAsk = null;
+    if (this.demo) { this.flash = `(demo) ${coldResetWords(sessionWords(s))} Nothing is saved.`; cx.notify(); return "posted"; }
+    this.post("cold_reset", { session_id: sid, file: c.file }, { action: "cold_reset", sid, file: c.file }, cx);
+    this.flash = coldResetWords(sessionWords(s));
+    cx.notify();
+    return "posted";
   }
 
   // pin_note, pin_archive, pin_restore, pin_delete: a spool event (session_id: the pin's session), shown

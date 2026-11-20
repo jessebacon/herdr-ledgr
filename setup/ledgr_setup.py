@@ -8,7 +8,12 @@
               Claude Code hooks, run `herdr-app check` and the offline tests, print a summary.
   check       the doctor: everything the preflight checks, plus whether the hooks fire, whether a
               writer holds the role and applies events, store.json's size and retention (the archive,
-              housekeeping's last run, the one-time copy), whether the Keychain item resolves.
+              housekeeping's last run, the one-time copy, the cold sessions and their held events),
+              whether the Keychain item resolves.
+  --thaw-all  writes retention.coldDays 0 to ledgr-data/config.json (after a backup; asks first unless
+              --yes) and waits up to 120 s until no session is cold (every session's items back in
+              store.json): the first step of a rollback to a build before cold sessions. Reads the
+              rest; exits 1 with what to do when sessions stay cold.
   uninstall   writes the current choices to <state>/last-install.json, then reverses hooks, key
               bindings, layout blocks and mods: it restores the files saved before ledgr first
               touched them when only ledgr's entries differ, and otherwise removes ledgr's entries
@@ -86,8 +91,23 @@ RECIPE_PARTS = ["What you see", "How it behaves", "Built from", "Watch out", "Do
 # a 14 the person sets later in Settings stays. RETENTION_DEFAULTS mirror mods/ledgr/config.js DEFAULTS and
 # bin/lib/ledgr_config.py (setup/tests checks them); --check reports them (retention_report).
 RETENTION_OLD = 14
-RETENTION_DEFAULTS = {"retention_days": 3, "turns": 12}
+RETENTION_DEFAULTS = {"retention_days": 3, "turns": 12, "coldDays": 7}
 STORE_CAP = 1024 * 1024                    # Herdr's writeTextFile refuses a larger file (writer.js writeLarge past it)
+# Retention Phase 2 (cold sessions): a session nobody touched for retention.coldDays moves its items and
+# turn records to ledgr-data/cold/<safe sid>.<ms>-<rand6>.json (written once by the writer; the session's
+# record stays in store.json with `cold`); an event for one whose file the writer cannot read is held in
+# cold/held/<safe sid>/ under its spool name until the session is read, reset or forgotten. --check reports
+# them (cold_report); --thaw-all writes retention.coldDays 0 and waits until no session is cold (the
+# rollback's first step). COLD_NAME is mods/ledgr/config.js COLD_NAME.
+COLD_NAME = re.compile(r"^(.+)\.(\d{13})-([0-9a-z]{6})\.json$")
+COLD_DAYS_MAX = 365
+THAW_WAIT_S, THAW_POLL_S, THAW_SAY_S = 120, 1.0, 15
+# --thaw-all's "no cold sessions" (integration, 2026-11-19): seen twice THAW_CONFIRM_S apart, and only once the writer
+# shows it has taken the 0 (its claim renewed after the write, out of housekeeping: a freeze run whose own read of
+# config.json came before the write may still commit and save), or no writer is alive (no claim renewed for
+# CLAIM_LIVE_S, or Herdr not running).
+THAW_CONFIRM_S, CLAIM_LIVE_S = 2.0, 300
+HELD_STALE_S = 3600                        # held events of a session that is not faulted: the writer replays them at its tick
 
 
 # ── small helpers ─────────────────────────────────────────────────────────────────────────────
@@ -2246,6 +2266,509 @@ def retention_report(ctx, st, cfg, now=None):
     return lines, problems
 
 
+# ── cold sessions (retention Phase 2) ─────────────────────────────────────────────────────────
+def cold_days_of(cfg):
+    """retention.coldDays as the mod reads it (mods/ledgr/config.js coldDaysOf): a number or a numeric
+    string; 0 kept (never; the writer brings every cold session back); any other value rounded half up and at
+    least 1; missing, not a number, negative or over 365: the default, 7."""
+    r = cfg.get("retention") if isinstance(cfg, dict) else None
+    v = r.get("coldDays") if isinstance(r, dict) else None
+    n = float("nan")
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        n = float(v)
+    elif isinstance(v, str) and v.strip():
+        try:
+            n = float(v)
+        except ValueError:
+            pass
+    if n != n or n in (float("inf"), float("-inf")) or n < 0 or n > COLD_DAYS_MAX:
+        return RETENTION_DEFAULTS["coldDays"]
+    return 0 if n == 0 else max(1, int(math.floor(n + 0.5)))
+
+
+def safe_name(sid):
+    """mods/ledgr/config.js safeName: every character outside A-Za-z0-9._- becomes _."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", str(sid))
+
+
+def read_store(ctx):
+    """store.json as a dict; {} when there is none; None when it cannot be read (mid-write, or not JSON)."""
+    p = os.path.join(ctx.data, "store.json")
+    if not os.path.exists(p):
+        return {}
+    try:
+        with open(p, encoding="utf-8") as fh:
+            d = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def cold_state(d):
+    """[(sid, session record, its cold record)] for every cold session in a store (a session with `cold`)."""
+    ss = d.get("sessions") if isinstance(d.get("sessions"), dict) else {}
+    return [(sid, s, s["cold"]) for sid, s in sorted(ss.items()) if isinstance(s, dict) and isinstance(s.get("cold"), dict)]
+
+
+def fault_words(name, err):
+    """"cold/<file>: <why>", or the writer's words alone when they name the file already (writer.js readCold)."""
+    err = err if isinstance(err, str) and err else "the file cannot be read"
+    return err if f"cold/{name}" in err else f"cold/{name}: {err}"
+
+
+def session_words(sid, s):
+    name = (s.get("sessionName") or s.get("repo") or "") if isinstance(s, dict) else ""
+    return f"{str(sid)[:8]}" + (f" ({name})" if isinstance(name, str) and name else "")
+
+
+def held_files(ctx):
+    """{safe sid: [(name, mtime)]} under ledgr-data/cold/held/ (events kept for a session whose file the writer
+    could not read)."""
+    root, out = os.path.join(ctx.data, "cold", "held"), {}
+    for d in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+        p = os.path.join(root, d)
+        if not os.path.isdir(p):
+            continue
+        fs_ = []
+        for n in sorted(os.listdir(p)):
+            if n.endswith(".json") and not n.startswith("."):
+                try:
+                    fs_.append((n, os.path.getmtime(os.path.join(p, n))))
+                except OSError:
+                    pass
+        if fs_:
+            out[d] = fs_
+    return out
+
+
+def cold_file(path):
+    """(record, None) or (None, why): a cold file read and checked as the writer checks its shape (store.js
+    coldRecordError's first checks: a JSON object, ledgr "ledgr-cold", an item list)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            rec = json.load(fh)
+    except FileNotFoundError:
+        return None, "missing"
+    except (OSError, ValueError) as ex:
+        return None, f"cannot be read ({str(ex)[:120]})"
+    if not isinstance(rec, dict) or rec.get("ledgr") != "ledgr-cold" or not isinstance(rec.get("items"), list):
+        return None, "not a cold file"
+    return rec, None
+
+
+def archive_copies(ctx, sid):
+    """A session's Phase 1 archive as the sweep's proof needs it (writer.js archiveCopies): items lines by id,
+    turns files' cut records by turn, moved heads by turn, each line only when it names this session."""
+    copies, turns, heads = {}, {}, {}
+    d = os.path.join(ctx.data, "archive", safe_name(sid))
+    for n in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        kind = "items" if re.match(r"^items-\d{1,16}-[a-z0-9]{1,16}\.jsonl$", n) else "turns" if re.match(r"^turns-\d{1,16}-[a-z0-9]{1,16}\.jsonl$", n) else None
+        if not kind:
+            continue
+        try:
+            with open(os.path.join(d, n), encoding="utf-8") as fh:
+                lines = fh.read().split("\n")
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(r, dict):
+                continue
+            if kind == "items":
+                if isinstance(r.get("id"), str) and isinstance(r.get("anchor"), dict) and r["anchor"].get("sessionId") == sid:
+                    copies.setdefault(r["id"], []).append(r)
+            elif r.get("sessionId") == sid and r.get("turn") is not None:
+                if isinstance(r.get("rec"), dict):
+                    turns.setdefault(str(r["turn"]), []).append(r["rec"])
+                elif isinstance(r.get("textHead"), str):
+                    heads[str(r["turn"])] = r["textHead"]
+    return copies, turns, heads
+
+
+def _js_text(o):
+    """JSON.stringify's text, for comparing two copies as store.js does."""
+    return json.dumps(o, ensure_ascii=False, separators=(",", ":"))
+
+
+def cold_lacks(d, sid, rec, copies=None, turn_copies=None, heads=None):
+    """What a cold file's record holds that store.json lacks for the session (store.js coldLacks): (items, turn
+    records). An item is held only when a copy of its id, of this session, is identical (never a later one: a
+    store put back from a backup and touched once is stamped later while holding less), in the store or in
+    `copies` (id -> [items]: the named cold file, the archive); a turn record only
+    when the store's record is identical, `turn_copies` (turn -> [records]) holds an identical one, or the store's
+    record is the file's without its head and `heads` (turn -> textHead) holds that head."""
+    copies, turn_copies, heads = copies or {}, turn_copies or {}, heads or {}
+    items = d.get("items") if isinstance(d.get("items"), dict) else {}
+
+    li = 0
+    for it in rec.get("items") or []:
+        if not (isinstance(it, dict) and isinstance(it.get("id"), str)):
+            li += 1
+            continue
+        cand = ([items[it["id"]]] if it["id"] in items else []) + list(copies.get(it["id"], []))
+        cand = [c for c in cand if isinstance(c, dict) and isinstance(c.get("anchor"), dict) and c["anchor"].get("sessionId") == sid]
+        if not any(_js_text(c) == _js_text(it) for c in cand):
+            li += 1
+    mine = (d.get("turns") or {}).get(sid) if isinstance(d.get("turns"), dict) else None
+    mine = mine if isinstance(mine, dict) else {}
+    lt = 0
+    for k, r in (rec.get("turns") if isinstance(rec.get("turns"), dict) else {}).items():
+        if k in mine and _js_text(mine[k]) == _js_text(r):
+            continue
+        if any(_js_text(c) == _js_text(r) for c in turn_copies.get(k, [])):
+            continue
+        if isinstance(r, dict) and isinstance(r.get("textHead"), str) and k in mine and heads.get(k) == r["textHead"]:
+            lean = {x: v for x, v in r.items() if x != "textHead"}
+            if _js_text(mine[k]) == _js_text(lean):
+                continue
+        lt += 1
+    return li, lt
+
+
+def cold_report(ctx, cfg, running=True, now=None):
+    """--check's cold-session lines and its problems (retention Phase 2). Read-only: store.json's cold
+    sessions (s.cold: {file, at, n, fault?}), the files in ledgr-data/cold/ (COLD_NAME), the held events in
+    cold/held/<safe sid>/, and retention.coldDays. Problems: a session the writer cannot read (faulted), with
+    its held events and what to do; a session that names a missing file; files that name sessions store.json
+    does not know (kept: the writer never deletes them); held events of a session that is not faulted that
+    the writer has not replayed for an hour while Herdr runs."""
+    now = now or time.time()
+    lines, problems = [], []
+    days = cold_days_of(cfg)
+    r = cfg.get("retention") if isinstance(cfg, dict) else None
+    given = isinstance(r, dict) and "coldDays" in r
+    shown = (f"{days}" if given and r.get("coldDays") == days and not isinstance(r.get("coldDays"), bool) else
+             f"{json.dumps(r.get('coldDays'))} (read as {days})" if given else f"{days} (the default)")
+    shown += " (never: the writer brings every cold session back)" if days == 0 else ""
+    d = read_store(ctx)
+    if d is None:
+        lines.append(f"  cold            store.json could not be read; retention.coldDays {shown}")
+        return lines, problems
+    cold = cold_state(d)
+    cdir = os.path.join(ctx.data, "cold")
+    files = {}
+    for n in sorted(os.listdir(cdir)) if os.path.isdir(cdir) else []:
+        if COLD_NAME.match(n):
+            try:
+                files[n] = os.path.getsize(os.path.join(cdir, n))
+            except OSError:
+                pass
+    ss = d.get("sessions") if isinstance(d.get("sessions"), dict) else {}
+    forgotten = d.get("forgotten") if isinstance(d.get("forgotten"), dict) else {}
+    lost = [(sid, s, s["coldLost"]) for sid, s in sorted(ss.items()) if isinstance(s, dict) and isinstance(s.get("coldLost"), dict)]
+    # The files a record names (cold.file, and coldLost.file: a session used without its older items keeps its
+    # old file for good), the sessions each safe name stands for (store.js coldGarbage: one session, recorded or
+    # forgotten, else the sweep keeps the file), and the rest: thawed or superseded files the sweep deletes in time.
+    named = {c.get("file") for _, _, c in cold} | {x.get("file") for _, _, x in lost}
+    by_safe = {}
+    for x in list(ss) + list(forgotten):
+        by_safe.setdefault(safe_name(x), set()).add(x)
+    unknown = [n for n in files if n not in named and COLD_NAME.match(n).group(1) not in by_safe]
+    # The rest no record names (integration, 2026-11-19: the writer deletes a cold file only when it is provably
+    # redundant). By name: a file its session lists as thawed (coldThawed), or a forgotten session's; a faulted
+    # session's other files are said with its problem; every other one is read here as the writer reads it: all
+    # of it held in store.json (or the session's named file, or its archive) -> the writer deletes it once it is a
+    # day old; anything store.json lacks, or a file that cannot be read -> kept for good, a problem ("recoverable").
+    loose, recover, others = [], [], {}
+    for n_ in files:
+        if n_ in named or n_ in unknown:
+            continue
+        sids = by_safe.get(COLD_NAME.match(n_).group(1)) or set()
+        if len(sids) != 1:
+            continue                                  # a safe name two sessions share: the writer keeps it
+        sid = next(iter(sids))
+        s = ss.get(sid)
+        thawed = isinstance(s, dict) and any(isinstance(e, dict) and e.get("file") == n_ for e in (s.get("coldThawed") or []))
+        if not isinstance(s, dict) or thawed:
+            loose.append(n_)                          # forgotten, or thawed: the writer deletes it in time
+            continue
+        if isinstance((s.get("cold") or {}).get("fault"), dict):
+            others.setdefault(sid, []).append(n_)
+            continue
+        rec, why = cold_file(os.path.join(cdir, n_))
+        if why:
+            recover.append((sid, s, n_, None, why))
+            continue
+        copies, tcopies = {}, {}
+        cf = (s.get("cold") or {}).get("file")
+        if isinstance(cf, str) and cf != n_:
+            nrec, _ = cold_file(os.path.join(cdir, cf))
+            if nrec:
+                for it in nrec["items"]:
+                    if isinstance(it, dict) and isinstance(it.get("id"), str):
+                        copies.setdefault(it["id"], []).append(it)
+                for k, r in (nrec.get("turns") if isinstance(nrec.get("turns"), dict) else {}).items():
+                    tcopies.setdefault(k, []).append(r)
+        li, lt = cold_lacks(d, sid, rec, copies, tcopies)
+        if li or lt:
+            ac, at, ah = archive_copies(ctx, sid)
+            for k, v in ac.items():
+                copies.setdefault(k, []).extend(v)
+            for k, v in at.items():
+                tcopies.setdefault(k, []).extend(v)
+            li, lt = cold_lacks(d, sid, rec, copies, tcopies, ah)
+        if li or lt:
+            recover.append((sid, s, n_, (li, lt), None))
+        else:
+            loose.append(n_)
+    n = {k: sum(int(c.get("n", {}).get(k) or 0) for _, _, c in cold if isinstance(c.get("n"), dict)) for k in ("items", "blocking", "q")}
+    if cold or files:
+        lines.append(f"  cold            {len(cold)} session{'' if len(cold) == 1 else 's'} cold in ledgr-data/cold/ "
+                     f"({len(files)} file{'' if len(files) == 1 else 's'}, {kb(sum(files.values()))}"
+                     + (f"; {len(loose)} thawed, forgotten or redundant cop{'y' if len(loose) == 1 else 'ies'} the writer deletes in time" if loose else "")
+                     + f"); retention.coldDays {shown}")
+        if cold:
+            lines.append(f"                  they hold {n['items']} item{'' if n['items'] == 1 else 's'}: {n['blocking']} open blocking "
+                         f"ask{'' if n['blocking'] == 1 else 's'}, {n['q']} open question{'' if n['q'] == 1 else 's'} (the panel's OLDER SESSIONS)")
+    else:
+        lines.append(f"  cold            none; retention.coldDays {shown}"
+                     + ("" if days == 0 else f" (a session nobody touches for {days} day{'' if days == 1 else 's'} moves to ledgr-data/cold/)"))
+    items = d.get("items") if isinstance(d.get("items"), dict) else {}
+    turns = d.get("turns") if isinstance(d.get("turns"), dict) else {}
+    in_store = set()
+    for it in items.values():
+        if isinstance(it, dict) and isinstance(it.get("anchor"), dict):
+            in_store.add(it["anchor"].get("sessionId"))
+    mixed = [sid for sid, _, _ in cold if sid in in_store or turns.get(sid)]
+    if mixed:
+        lines.append(f"  ! {len(mixed)} cold session{'' if len(mixed) == 1 else 's'} also hold{'s' if len(mixed) == 1 else ''} items or turn "
+                     "records in store.json (an older build wrote them): the writer merges them at its next start or tick")
+    held = held_files(ctx)
+    faulted = {safe_name(sid) for sid, _, c in cold if isinstance(c.get("fault"), dict)}
+    if held:
+        nh = sum(len(v) for v in held.values())
+        lines.append(f"  held events     {nh} kept in ledgr-data/cold/held/ for {len(held)} session{'' if len(held) == 1 else 's'} "
+                     "(applied once each session's file is read again, it is used without its older items, or it is forgotten)")
+    for sid, s, c in cold:
+        f = c.get("fault") if isinstance(c.get("fault"), dict) else None
+        name = c.get("file")
+        if f:
+            nh = len(held.get(safe_name(sid), [])) or int(f.get("held") or 0)
+            oth = sorted(others.get(sid, []), reverse=True)
+            also = (f". Another file of this session is on disk: cold/{oth[0]}" + (f" and {len(oth) - 1} more" if len(oth) > 1 else "")
+                    + ": it may hold what is missing, and it stays whatever you choose") if oth else ""
+            there = "is there but could not be read" in str(f.get("error") or "")
+            what = ("The file is there but could not be read: check its permissions and the disk, then choose Try again on that session "
+                    if there else "Put the file back if you have it and choose Try again on that session ")
+            problems.append(f"session {session_words(sid, s)} is cold and the writer cannot read its file ({fault_words(name, f.get('error'))}; "
+                            f"tried {int(f.get('tries') or 0)} time(s), last {ago((f.get('at') or 0) / 1000)}); {nh} new event{'' if nh == 1 else 's'} "
+                            f"kept in ledgr-data/cold/held/{safe_name(sid)}/. {what}"
+                            f"in ledgr's panel; or choose Use without its older items (the held events then apply to it), or Forget{also}")
+        elif not isinstance(name, str) or name not in files:
+            problems.append(f"session {session_words(sid, s)} names cold/{name}, which is "
+                            + ("missing" if isinstance(name, str) and COLD_NAME.match(name) else "not a cold file's name")
+                            + ": its earlier items cannot come back from it. Put the file back if you have it; at the session's next event "
+                              "the writer reports it and ledgr's panel offers Try again, Use without its older items, and Forget")
+    if lost:
+        lines.append(f"  {'used without':<16}{len(lost)} session{'' if len(lost) == 1 else 's'} used without {'its' if len(lost) == 1 else 'their'} "
+                     "older items (its cold file could not be read): " + "; ".join(f"{session_words(sid, s)} (cold/{x.get('file')}, {ago((x.get('at') or 0) / 1000)})" for sid, s, x in lost[:3])
+                     + ("; …" if len(lost) > 3 else "") + ". Each file stays in ledgr-data/cold/")
+    for sid, s, n_, lack, why in recover:
+        if why:
+            problems.append(f"cold/{n_} (session {session_words(sid, s)}) {why}, and store.json does not name it: the writer keeps it for good, "
+                            "never deletes it")
+        else:
+            problems.append(f"cold/{n_} (session {session_words(sid, s)}) holds {lack[0]} item{'' if lack[0] == 1 else 's'} and {lack[1]} turn "
+                            f"record{'' if lack[1] == 1 else 's'} store.json lacks as they are there, and does not name it (a store.json set aside as "
+                            "corrupt or put back from an older copy, or a session used without its older items; or simply an older version of items "
+                            "store.json still has, from a freeze that never finished): the writer keeps it for good. To bring its items back, see "
+                            "docs/design/Retention.md 10.8 (recoverable files)")
+    if unknown:
+        problems.append(f"{len(unknown)} file{'' if len(unknown) == 1 else 's'} in ledgr-data/cold/ name{'s' if len(unknown) == 1 else ''} "
+                        f"sessions store.json does not know ({', '.join(unknown[:3])}{', …' if len(unknown) > 3 else ''}): kept, the writer never "
+                        "deletes them. Each holds a session's items; a store.json restored from an older copy, or one the writer had to start "
+                        "empty (a store.corrupt-*.json beside it), would explain it")
+    stale = [(k, v) for k, v in held.items() if k not in faulted and running and any(now - m > HELD_STALE_S for _, m in v)]
+    for k, v in stale:
+        problems.append(f"{len(v)} held event{'' if len(v) == 1 else 's'} in ledgr-data/cold/held/{k}/ wait{'s' if len(v) == 1 else ''} for a "
+                        "session that is not faulted, the oldest for " + span(now - min(m for _, m in v)) + ": the writer replays them at its "
+                        "tick, so it is not running or cannot; relaunch Herdr. ledgr-data/log/writer.log names the step")
+    return lines, problems
+
+
+def herdr_running(ctx):
+    """Whether Herdr's window answers `herdr-app status` (read-only)."""
+    rc, out, _ = ctx.herdr("status", timeout=10) if ctx.herdr_app else (1, "", "")
+    try:
+        return rc == 0 and json.loads(out) is not None
+    except ValueError:
+        return False
+
+
+def write_cold_days(ctx, value):
+    """Writes retention.coldDays = value into ledgr-data/config.json the installer's way (a backup first, the
+    file's own style, a final newline); a missing file is made from the hooks' defaults, as apply_config does.
+    Returns (the value read before, the backup's path or None)."""
+    p = os.path.join(ctx.data, "config.json")
+    cfg, style, raw = load_json(p)                     # raises ValueError on invalid JSON
+    if cfg is None:
+        try:
+            sys.path.insert(0, os.path.join(ctx.mods, MOD, "bin", "lib"))
+            os.environ.setdefault("LEDGR_DATA", ctx.data)
+            import ledgr_config  # noqa: E402  (the hooks' defaults)
+            cfg = json.loads(json.dumps(ledgr_config.DEFAULT_CONFIG))
+        except Exception:
+            cfg = {}
+    if not isinstance(cfg, dict):
+        raise ValueError("config.json is not a JSON object")
+    before = cfg["retention"].get("coldDays") if isinstance(cfg.get("retention"), dict) else None
+    new = json.loads(json.dumps(cfg))
+    new["retention"] = dict(new["retention"] if isinstance(new.get("retention"), dict) else {}, coldDays=value)
+    bak = None
+    if raw is not None:
+        ctx.backup(p)
+        bak = os.path.join(ctx.backup_dir, ctx.rel(p)) if ctx.backup_dir else None
+    write_atomic(p, dump(new, style))
+    return before, bak
+
+
+def writer_claim_of(ctx):
+    """The writer's claim as Herdr last saved it (shared.json, key ledgr.writer), or None."""
+    p = os.path.join(ctx.home, "shared.json")
+    try:
+        sh, _, _ = load_json(p) if os.path.exists(p) else (None, None, None)
+    except ValueError:
+        return None                                    # caught mid-write: not known this time
+    w = sh.get("ledgr.writer") if isinstance(sh, dict) else None
+    return w if isinstance(w, dict) and w.get("id") else None
+
+
+def writer_settled(claim, since, now=None):
+    """Whether no freeze begun before `since` can still make a session cold: no writer alive (no claim, or one not
+    renewed for CLAIM_LIVE_S), or a claim renewed after `since` whose writer is not in its housekeeping (freezing
+    runs there, and its commit and save come right after its own read of config.json)."""
+    now = now or time.time()
+    if not claim:
+        return True
+    at = (claim.get("at") or 0) / 1000
+    if now - at > CLAIM_LIVE_S:
+        return True
+    step = str((claim.get("pass") or {}).get("step") or "") if isinstance(claim.get("pass"), dict) else ""
+    return at > since and not step.startswith("housekeeping")
+
+
+def cmd_thaw_all(ctx, args):
+    """./install.sh --thaw-all: every cold session back into store.json, and none moved out again, before a
+    rollback to a build that does not know cold files (one that shows a cold session with no items). Writes
+    retention.coldDays 0 (the writer then thaws every session it can read, within a second through its config
+    watch, else at its next tick) and polls store.json every THAW_POLL_S for up to THAW_WAIT_S until no session
+    has `cold`. Exit 0 then; 1 when sessions stay cold, with what to do: a writer that is not running, or
+    sessions whose file the writer cannot read (they never thaw by themselves: the person chooses Try again,
+    Use without its older items, or Forget). Nothing else is written; the value stays 0."""
+    head("ledgr: bring every session back into store.json")
+    p = os.path.join(ctx.data, "config.json")
+    try:
+        cfg, _, _ = load_json(p)
+    except ValueError as ex:
+        say(f"  X ledgr-data/config.json is not valid JSON ({ex}); fix or move it, then run ./install.sh --thaw-all again")
+        return 1
+    cfg = cfg if isinstance(cfg, dict) else {}
+    d = read_store(ctx)
+    cold = cold_state(d) if d else []
+    say(f"  store.json      {'none (nothing is cold)' if d == {} else 'could not be read' if d is None else f'{len(cold)} session' + ('' if len(cold) == 1 else 's') + ' cold'}")
+    ret = cfg.get("retention") if isinstance(cfg.get("retention"), dict) else {}
+    t_write = time.time()
+    if ret.get("coldDays") == 0 and not isinstance(ret.get("coldDays"), bool):
+        say("  config.json     retention.coldDays is 0 already (the writer brings every cold session back and moves none out)")
+        try:
+            t_write = os.path.getmtime(p)
+        except OSError:
+            pass
+    else:
+        if not ctx.yes and not sys.stdin.isatty():
+            say("  X not a terminal: run ./install.sh --thaw-all --yes to write retention.coldDays 0 without the question")
+            return 2
+        ask = Asker(ctx.yes)
+        if not ask.yesno("Set retention.coldDays to 0 in ledgr-data/config.json?",
+                         "The writer then brings every session it moved to ledgr-data/cold/ back into store.json and moves none out "
+                         "again; the value stays 0 until you set the days again in ledgr's Settings. Nothing else changes.", True):
+            say("  Nothing changed.")
+            return 1
+        try:
+            before, bak = write_cold_days(ctx, 0)
+        except (ValueError, OSError) as ex:
+            say(f"  X ledgr-data/config.json not written: {ex}")
+            return 1
+        t_write = time.time()
+        say(f"  config.json     retention.coldDays {json.dumps(before) if before is not None else '(the default, 7)'} -> 0"
+            + (f"; the file before: {tilde(bak)}" if bak else ""))
+    if d == {}:
+        say("\n  no cold sessions: nothing to wait for (retention.coldDays stays 0)")
+        return 0
+    running = herdr_running(ctx)
+    sh, _, _ = load_json(os.path.join(ctx.home, "shared.json")) if os.path.exists(os.path.join(ctx.home, "shared.json")) else (None, None, None)
+    w = (sh or {}).get("ledgr.writer") if isinstance(sh, dict) else None
+    w = w if isinstance(w, dict) and w.get("id") else None
+    say("  writer          " + (f"held by {w.get('by')} (claimed {ago((w.get('at') or 0) / 1000)})" if w and running else
+                              "Herdr is not running: no writer moves anything until it runs (open Herdr now; this waits)" if not running else
+                              "no claim (show the ledgr panel, or add the host block, so a writer runs)"))
+    t0, last, said, confirm, settled_said, confirmed = time.time(), None, 0.0, None, False, False
+    say(f"  waiting         up to {THAW_WAIT_S} s for the writer (it reads config.json within a second, else at its next tick)")
+    while True:
+        d = read_store(ctx)
+        el = time.time() - t0
+        if d is not None:
+            cold = cold_state(d)
+            stuck = [x for x in cold if isinstance(x[2].get("fault"), dict)]
+            if not cold:
+                # None cold now; it counts once the writer has taken the 0 (or none runs), seen twice THAW_CONFIRM_S apart.
+                if not running or writer_settled(writer_claim_of(ctx), t_write):
+                    if confirm is None:
+                        confirm = time.time() + THAW_CONFIRM_S
+                    elif time.time() >= confirm:
+                        confirmed = True
+                        break
+                elif not settled_said:
+                    say("  writer          none cold yet; waiting for the writer to show it has taken the new value "
+                        "(a freeze run it began before may still be saving)")
+                    settled_said = True
+                if el >= THAW_WAIT_S:
+                    break
+                time.sleep(THAW_POLL_S)
+                continue
+            confirm = None
+            if cold != last and (last is None or len(cold) != len(last)) or el - said >= THAW_SAY_S:
+                say(f"  cold            {len(cold)} session{'' if len(cold) == 1 else 's'}"
+                    + (f", {len(stuck)} the writer cannot read" if stuck else "") + f" ({int(el)} s)")
+                said, last = el, cold
+            if len(stuck) == len(cold):
+                break                                  # what is left never thaws by itself
+        if el >= THAW_WAIT_S:
+            break
+        time.sleep(THAW_POLL_S)
+    head("Result")
+    if d is None:
+        say(f"  X store.json could not be read after {int(time.time() - t0)} s; run ./install.sh --thaw-all again (retention.coldDays is 0)")
+        return 1
+    if not cold and not confirmed:
+        say(f"  X no session is cold, but the writer has not shown it took retention.coldDays 0 within {int(time.time() - t0)} s (a freeze run it "
+            "began before may still be saving): run ./install.sh --thaw-all again in a minute (retention.coldDays is 0 now)")
+        return 1
+    if not cold:
+        say("  no cold sessions: every session's items are back in store.json; retention.coldDays stays 0.")
+        say("  To roll back now: check out the older build and run its ./install.sh. After upgrading again, set the days in "
+            "ledgr's Settings (Idle sessions move out of store.json after N days).")
+        return 0
+    stuck = [x for x in cold if isinstance(x[2].get("fault"), dict)]
+    rest = [x for x in cold if x not in stuck]
+    if rest:
+        say(f"  X {len(rest)} session{'' if len(rest) == 1 else 's'} still cold after {int(time.time() - t0)} s: show the ledgr panel or relaunch "
+            "Herdr so a writer runs, then run ./install.sh --thaw-all again (retention.coldDays is 0 now; nothing else changed)")
+    for sid, s, c in stuck:
+        f = c["fault"]
+        nh = len(held_files(ctx).get(safe_name(sid), [])) or int(f.get("held") or 0)
+        say(f"  X session {session_words(sid, s)} cannot come back: the writer cannot read its file ({fault_words(c.get('file'), f.get('error'))}); "
+            f"{nh} event{'' if nh == 1 else 's'} held for it")
+    if stuck:
+        say("    In ledgr's panel, open each and choose Try again (after putting the file back), Use without its older items, or Forget; "
+            "then run ./install.sh --thaw-all again. An older build shows such a session with no items, and its held events stay in "
+            "ledgr-data/cold/held/ until a build that knows them runs.")
+    return 1
+
+
 def cmd_check(ctx, args):
     st = State(ctx)
     f = preflight(ctx)
@@ -2332,6 +2855,10 @@ def cmd_check(ctx, args):
     for ln in rlines:
         say(ln)
     bad += rproblems
+    clines, cproblems = cold_report(ctx, cfg, f["running"])
+    for ln in clines:
+        say(ln)
+    bad += cproblems
     if prov in ("anthropic", "openai-compatible"):
         okk = f["security"] and kc_exists(ctx, prov)
         say(f"  Keychain        service ledgr, account {prov}: {'resolves' if okk else 'MISSING'}")
@@ -2636,6 +3163,8 @@ def main(argv):
     ap.add_argument("--answers-out", metavar="FILE", help="uninstall: where to write the current choices")
     ap.add_argument("--purge-data", action="store_true", help="uninstall --yes: also delete ledgr-data/")
     ap.add_argument("--check", action="store_true", help="same as the check command")
+    ap.add_argument("--thaw-all", action="store_true",
+                    help="write retention.coldDays 0 and wait until every session is back in store.json (before a rollback); with --yes, ask nothing")
     args = ap.parse_args(argv)
     if args.check:
         args.command = "check"
@@ -2670,6 +3199,8 @@ def main(argv):
         flags["agents"] = []
     ctx = make_ctx(args)
     try:
+        if args.thaw_all:
+            return cmd_thaw_all(ctx, args)
         if args.command == "check":
             return cmd_check(ctx, args)
         if args.command == "uninstall":

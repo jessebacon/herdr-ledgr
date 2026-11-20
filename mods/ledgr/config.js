@@ -57,7 +57,11 @@ export const DEFAULTS = {
   retention_days: 3,
   // retention.turns: the turn records store.json keeps per session (the newest by turn number); older ones
   // go to an archive file. Each carries the turn's uuid, its extraction result and a head of its text.
-  retention: { turns: 12 },
+  // retention.coldDays (2026-11-19, Phase 2; coldDaysOf): a session nobody touched for this many days moves its
+  // items and turn records to a file of its own, ledgr-data/cold/<sid>.<ms>-<rand6>.json, and comes back the
+  // moment an event needs it; 0 = never (and the writer brings every moved session back). The settings dialog
+  // writes it (0 to 60).
+  retention: { turns: 12, coldDays: 7 },
 };
 
 export const LIMITS = {
@@ -107,6 +111,28 @@ export function retentionDays(v) {
   return Math.min(RETENTION_DAYS.max, Math.max(RETENTION_DAYS.min, Math.round(n)));
 }
 export const retentionDaysOf = (cfg) => retentionDays(cfg?.retention_days);
+
+// ── cold sessions (retention Phase 2, 2026-11-19) ───────────────────────
+// retention.coldDays as every reader takes it (the writer's freeze, the settings row, the doctor): a whole
+// number of days, 0 kept (never freeze; the writer brings every cold session back), any other positive value
+// rounded and at least 1; a number or a numeric string; missing, not a number, negative or over 365: the
+// default, 7.
+export const COLD_DAYS = { def: 7, max: 365 };
+export function coldDaysOf(cfg) {
+  const v = cfg?.retention?.coldDays;
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() ? Number(v) : NaN;
+  if (!Number.isFinite(n) || n < 0 || n > COLD_DAYS.max) return COLD_DAYS.def;
+  return n === 0 ? 0 : Math.max(1, Math.round(n));
+}
+// ledgr-data/cold/: one file per cold session, <safeName(sid)>.<ms>-<rand6>.json (ms: 13 digits, the record's
+// `at`; rand6: six of [0-9a-z]), each written once by the writer and never again; held/<safeName(sid)>/ keeps,
+// under the spool file's own name, an event that waits for a session whose file could not be read. Only the
+// writer writes or deletes under cold/; the reading copies and bin/lib read the file the stub names.
+export const coldDir = () => `${dataDir()}/cold`;
+export const coldPath = (file) => `${coldDir()}/${file}`;
+export const heldDir = (sid) => `${coldDir()}/held/${safeName(sid)}`;
+export const COLD_NAME = /^(.+)\.(\d{13})-([0-9a-z]{6})\.json$/;
+export const coldName = (sid, at, rand6) => `${safeName(sid)}.${at}-${rand6}.json`;
 // Remote-style addresses (vps/t7) are written as vps__t7 (spec 2.5).
 export const terminalFile = (t) => `${terminalsDir()}/${String(t).replace(/\//g, "__")}.json`;
 export const binDir = () => `${appHome()}/mods/ledgr/bin`;

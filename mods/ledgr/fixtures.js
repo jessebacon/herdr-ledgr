@@ -22,6 +22,11 @@
 // demoArchive holds them as archive files (Ask 16, answered by you; Ask 17, not needed in the first file and
 // closed by the agent in a newer one, which wins; Question 1, cleared), so Closed ends with "archived (3)"
 // and its rows open read-only with Reopen. reader.js loadArchive reads these in the demo, never a file.
+// Cold sessions (retention Phase 2, 2026-11-19): one more session, "nightly report backfill", idle nine days and
+// cold: store.json would keep only its record (a stub with `cold` {file, at, n}) and one pin; its items and turn
+// records are FIXTURE_COLD[DEMO_COLD_FILE], the cold file reader.js wantCold reads in the demo instead of
+// ledgr-data/cold/. So the session menu ends with "OLDER SESSIONS (1)", and the session opens: its file read,
+// its lanes as usual (a blocking ask, a decide with options, a suggestion, a parked question, one closed).
 // Drawn when props().demo, FORCE_DEMO (config.js) or `herdr-app do ledgr.demo`. Never saved,
 // never published to shared(), never written to ledgr-data.
 import { passageHash } from "./store.js";
@@ -31,6 +36,7 @@ const SID2 = "22222222-demo-4aaa-8bbb-000000000002";
 const SID3 = "33333333-demo-4aaa-8bbb-000000000003";
 const SIDB = "44444444-demo-4aaa-8bbb-000000000004";
 const SIDF = "55555555-demo-4aaa-8bbb-000000000005";   // a forgotten session: only its pin is left
+const SIDC = "66666666-demo-4aaa-8bbb-000000000006";   // a cold session: its record and its pin in the store, the rest in FIXTURE_COLD
 
 const T17 = `I checked the migration output against the staging database for shop-api.
 
@@ -74,7 +80,16 @@ const T6 = `The read replica \`orders-ro\` lags about four seconds behind the pr
 
 Should the nightly report read from the replica or the primary? The replica keeps the load off the primary; the primary is always current. The report's queries are listed in \`reports/nightly.sql\`.`;
 
-export const FIXTURE_TURNS = { [`${SID}:17`]: T17, [`${SID}:12`]: T12, [`${SID}:14`]: T14, [`${SIDB}:1`]: TB1, [`${SID2}:4`]: T4_CODEX, [`${SID}:6`]: T6 };
+// Turn 6 of the cold session (FIXTURE_COLD): the message its asks came from.
+const TC6 = `The backfill script is ready: it rebuilds six months of nightly reports from the raw events.
+
+It needs read access to the reporting replica, and I do not have credentials for it. Send the read-only credentials for the reporting replica when you can; I cannot start the backfill without them.
+
+Choose the backfill window: this weekend, or next weekend after the quarter closes. Running it during the week would slow the live reports.
+
+You may also want to archive the old nightly CSVs in \`reports/out/\` at some point.`;
+
+export const FIXTURE_TURNS = { [`${SID}:17`]: T17, [`${SID}:12`]: T12, [`${SID}:14`]: T14, [`${SIDB}:1`]: TB1, [`${SID2}:4`]: T4_CODEX, [`${SID}:6`]: T6, [`${SIDC}:6`]: TC6 };
 
 export function demoData(now = Date.now()) {
   const min = 60e3, day = 86400e3;
@@ -154,8 +169,9 @@ export function demoData(now = Date.now()) {
     [SID]: { sessionName: "shop-api migration", repo: "shop-api", cwd: "/Users/example/src/shop-api", agent: "claude-code", profile: null, configDir: null },
     [SID2]: { sessionName: "release notes", repo: "shop-web", cwd: "/Users/example/src/shop-web", agent: "codex", profile: null, configDir: null },
     [SIDF]: { sessionName: "billing retries spike", repo: "billing", cwd: "/Users/example/src/billing", agent: "claude-code", profile: null, configDir: null },
+    [SIDC]: { sessionName: "nightly report backfill", repo: "reports", cwd: "/Users/example/src/reports", agent: "claude-code", profile: null, configDir: null },
   };
-  const TERM = { [SID]: "t21", [SID2]: "t27", [SIDF]: "t19" };
+  const TERM = { [SID]: "t21", [SID2]: "t27", [SIDF]: "t19", [SIDC]: "t23" };
   const pins = {};
   const pin = (id, handle, sid, turn, text, o = {}) => {
     pins[id] = { id, handle, sessionId: sid, text, note: o.note ?? null,
@@ -172,6 +188,8 @@ export function demoData(now = Date.now()) {
   const pD = pin("pn_demo-pin-000d", "P3", SID, 12, "Decide whether to keep the stale release branch or delete it after tagging.", { ago: 2 * 24 * 60 - 5, note: "settled at turn 13: kept until tagging" });
   Object.assign(pins[pD], { status: "archived", archivedAt: now - 24 * 60 * min, updatedAt: now - 24 * 60 * min });
   pin("pn_demo-pin-000e", "P1", SIDF, 7, "Retries are capped at two per request; the third failure surfaces to the caller at once.", { ago: 9 * 24 * 60 });
+  // The cold session's pin: pins never go cold (search finds it; its session's lane shows it before its file is read).
+  pin("pn_demo-pin-000f", "P1", SIDC, 6, "It needs read access to the reporting replica, and I do not have credentials for it.", { ago: 9 * 24 * 60 + 20 });
   const QT = "If release/5.4 is stale, do the release notes still need writing before the cutover?";
   const q9 = q({ handle: "Q9", turn: 15, kind: "question", text: QT, status: "answered", askedAtTurn: 16, askedVia: "pins", pins: [pA, pC], ago: 28,
     pinsAsked: { turn: 16, at: now - 27 * min, promptId: null, answeredAt: now - 25 * min } });
@@ -193,6 +211,10 @@ export function demoData(now = Date.now()) {
       [SID3]: sess(SID3, { agent: "claude-code", terminal: "t25", sessionName: "flaky test hunt", cwd: "/Users/example", repo: null, turn: 9, state: "ended", updatedAt: now - day }),
       [SIDB]: sess(SIDB, { agent: "claude-code", terminal: "t28", sessionName: "Q3: Why does the load test still fail if the…", cwd: "/Users/example/src/shop-api",
         repo: "shop-api", turn: 1, state: "idle", parentSessionId: SID, parentItem: q3, anchorTurn: 14, forkTurn: 18, depth: 1, branchId: "br_demo_q3_7c1e", updatedAt: now - 20 * min }),
+      // Cold (retention Phase 2): the record and its counts; its items and turn records are FIXTURE_COLD's.
+      [SIDC]: sess(SIDC, { agent: "claude-code", terminal: "t23", sessionName: "nightly report backfill", cwd: "/Users/example/src/reports", repo: "reports", turn: 6,
+        state: "idle", startedAt: now - 12 * day, updatedAt: now - 9 * day, touchedAt: now - 9 * day, seenAt: now - 9 * day, promptAt: now - 9 * day - 30 * min,
+        lastStopAt: now - 9 * day, nextHandle: { A: 5, Q: 2, P: 2 }, cold: { file: DEMO_COLD_FILE, at: DEMO_COLD_AT, n: demoColdRecord(now).n } }),
     },
     // Manifest and preamble are computed by the panel (enterDemo), as the writer does at launch.
     branches: {
@@ -224,6 +246,55 @@ export function demoData(now = Date.now()) {
 }
 
 export const DEMO_SESSION = SID;
+// The demo's cold session and its file (a name of config.js COLD_NAME's shape: <safe sid>.<13-digit ms>-<rand6>.json).
+export const DEMO_COLD_SESSION = SIDC;
+const DEMO_COLD_AT = 1794700000000;
+export const DEMO_COLD_FILE = `${SIDC}.${DEMO_COLD_AT}-c0ld0a.json`;
+
+// The cold session's file as the writer would have written it (CONTRACT-phase2 "The cold file"): its items in
+// order, its turn records, the counts its stub carries. Ask 1 blocking (a provide), Ask 2 a decide with options,
+// Ask 3 optional (below the threshold), Question 1 parked, Ask 4 closed by the agent.
+export function demoColdRecord(now = Date.now()) {
+  const min = 60e3, day = 86400e3, t0 = now - 9 * day;
+  let seq = 0;
+  const add = (o) => {
+    const quote = o.quote ?? null, at = t0 - (o.ago ?? 0) * min;
+    const it = { id: o.id, key: o.id, handle: o.handle, direction: o.direction, kind: o.kind, status: o.status ?? "open", level: o.level, text: o.text,
+      origin: o.direction === "human_to_agent" ? "capture" : "extract_block", terminal: "t23", createdAt: at, updatedAt: at, seq: seq++, createdTurn: o.turn,
+      anchor: { sessionId: SIDC, turn: o.turn, uuid: null, quote, quoteSource: quote ? (o.direction === "human_to_agent" ? "clipboard" : "block") : undefined,
+        hash: passageHash(quote || o.text), settled: true },
+      ...(o.extra ?? {}) };
+    if (!it.level) delete it.level;
+    return it;
+  };
+  const items = [
+    add({ id: "rq_demo_c1", handle: "A1", direction: "agent_to_human", kind: "provide", level: "blocking", turn: 6, text: "Send the read-only credentials for the reporting replica",
+      quote: "Send the read-only credentials for the reporting replica when you can; I cannot start the backfill without them." }),
+    add({ id: "rq_demo_c2", handle: "A2", direction: "agent_to_human", kind: "decide", level: "needed", turn: 6, text: "Choose the backfill window",
+      quote: "Choose the backfill window: this weekend, or next weekend after the quarter closes.",
+      extra: { options: ["This weekend", "Next weekend, after the quarter closes"], recommended: "Next weekend, after the quarter closes" } }),
+    add({ id: "rq_demo_c3", handle: "A3", direction: "agent_to_human", kind: "do", level: "optional", turn: 6, text: "Consider archiving the old nightly CSVs in reports/out/",
+      quote: "You may also want to archive the old nightly CSVs" }),
+    add({ id: "rq_demo_c4", handle: "Q1", direction: "human_to_agent", kind: "question", turn: 5, text: "Does the backfill read the replica or the primary?", ago: 40 }),
+    add({ id: "rq_demo_c5", handle: "A4", direction: "agent_to_human", kind: "confirm", level: "needed", turn: 4, text: "OK to delete the stale report cache?", status: "resolved", ago: 90,
+      extra: { resolvedBy: "agent", resolvedNote: "closed by the agent at turn 5", resolvedTurn: 5, resolvedAt: t0 - 60 * min } }),
+  ];
+  const turns = {
+    4: { stopAt: t0 - 100 * min, asks: { source: "block", count: 1, at: t0 - 100 * min } },
+    5: { stopAt: t0 - 50 * min, asks: { source: "block", count: 0, at: t0 - 50 * min } },
+    6: { stopAt: t0, textHead: TC6.slice(0, 400), asks: { source: "block", count: 3, at: t0 } },
+  };
+  const open = items.filter((it) => it.status === "open"), asks = open.filter((it) => it.direction === "agent_to_human");
+  const lv = (l) => asks.filter((it) => it.level === l && it.promoted !== true).length;
+  const n = { q: open.length - asks.length, qNew: 0, blocking: asks.filter((it) => it.level === "blocking").length, needed: lv("needed"), optional: lv("optional"),
+    promoted: asks.filter((it) => it.level !== "blocking" && it.promoted === true).length, answered: items.filter((it) => it.status === "answered").length,
+    closed: items.filter((it) => it.status === "resolved" || it.status === "dismissed").length, items: items.length, turns: Object.keys(turns).length };
+  const session = { sessionId: SIDC, agent: "claude-code", terminal: "t23", sessionName: "nightly report backfill", cwd: "/Users/example/src/reports", repo: "reports",
+    turn: 6, state: "idle", nextHandle: { A: 5, Q: 2, P: 2 } };
+  return { ledgr: "ledgr-cold", v: 1, sessionId: SIDC, at: DEMO_COLD_AT, session, items, turns, n };
+}
+// The demo's cold files by name, as reader.js wantCold reads them in the demo (no file is read).
+export const FIXTURE_COLD = { [DEMO_COLD_FILE]: demoColdRecord() };
 // The demo item `ledgr.demo-detail` opens the dialog on when no handle is given (a blocking decide).
 export const DEMO_DETAIL = "A15";
 

@@ -71,6 +71,10 @@
 //   The archive (retention, 2026-11-19): archived (the panel's: CLOSED open, the shown session's archived
 //   rows shown or hidden, as a click on "archived (N) · show"; open:<handle> reaches an archived row once
 //   they are read); the dialog's detail:reopen (Reopen on an archived record: one restore event).
+//   Cold sessions (retention Phase 2, 2026-11-19), the panel's, bound to no key: older-sessions (the session
+//   menu, its OLDER SESSIONS fold opened or closed), cold-retry (Try again on the shown cold session), cold-reset
+//   (Use without its older items: twice, arm then post); a handle command (open:<handle> and the rest) on a cold
+//   session not read yet waits for its file.
 //   The settings dialog (2026-11-10): settings (the panel's gear: the dialog opens, an open detail dialog
 //   closes first; the host opens it when the panel is not shown), demo-settings (the dialog with the
 //   defaults and sample spaces, nothing saved). The dialog's own: settings:close,

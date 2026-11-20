@@ -30,7 +30,19 @@
 //     a slow writer ("not taken yet", then "reopened" when it comes late), an item archived while its dialog is
 //     open (read from the archive once, shown archived), an archived line that says open (no answer box), a
 //     read that never answers (bounded, said, read again), a herdr: session's folder (safeName), the panel's
-//     own store-wins filter before any re-read, each items file read once.
+//     own store-wins filter before any re-read, each items file read once;
+//   cold sessions (retention Phase 2, 2026-11-19): the demo's cold session (its stub, its counts, its file);
+//     parseCold and the words; pinsTarget takes a stub; Reader over real files in the scratch ledgr-data/cold/
+//     (read once, bounded, merged into the copy's own store with s.cold kept, merged again from the cache after
+//     a reload, acts shown on merged items, the record dropped once no stub names it, a draft kept while a
+//     cold file is read, errors and Try again, the 12-record cache, a name not of the writer's shape refused);
+//     a faulted session (never merged, Try again posts cold_retry, two clicks post cold_reset); Phase 1's
+//     archive leaving out merged ids; fallback mode (a clone, never the writer's store: the contract's risk 3);
+//     the panel (OLDER SESSIONS with countsOf at three thresholds, Reading…, the older pill, no footer, then
+//     the lanes; no `seen` posted; the error and fault views, the status line, Forget); the dialog (Reading…,
+//     never Gone, then the late record path, its lane, an act naming the cold session; the error and fault
+//     words); the demo (OLDER SESSIONS (1), its rows, its dialog, pin search finding its pin); across the seam,
+//     builder A's live-shape fixture (fixture_cold.mjs) frozen by store.js and listed by the panel.
 // reader.js and listing.js are Builder A's: when one is not in the mod yet, a stub with the contract of
 // Detail.md 5.2 stands in, and the summary line says so.
 //   node tests/test_detail.mjs
@@ -1419,13 +1431,436 @@ try {
   fs.rmSync(ARCH, { recursive: true, force: true });
   fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText);
 
+  // ── cold sessions (retention Phase 2, 2026-11-19) ──────────────────────
+  // A session nobody touched for retention.coldDays keeps only its record in store.json (a stub with `cold`
+  // {file, at, n}); its items and turn records are in ledgr-data/cold/<file>. The demo's "nightly report
+  // backfill" (fixtures.js DEMO_COLD_SESSION) is one, its file FIXTURE_COLD[DEMO_COLD_FILE]: here written to the
+  // scratch ledgr-data/cold/ for the live copies, read from the fixture in the demo.
+  const CSID = FX.DEMO_COLD_SESSION, CF = FX.DEMO_COLD_FILE, COLDDIR = path.join(APP, "ledgr-data/cold"), coldRec = FX.FIXTURE_COLD[CF];
+  const C1 = "rq_demo_c1", C2 = "rq_demo_c2", C3 = "rq_demo_c3", CQ = "rq_demo_c4", C5 = "rq_demo_c5";
+  const CFG_M = await import(`${dir}/config.js`), PG = await import(`${dir}/pinning.js`);
+  const writeCold = (rec = coldRec, name = CF) => { fs.mkdirSync(COLDDIR, { recursive: true }); fs.writeFileSync(path.join(COLDDIR, name), typeof rec === "string" ? rec : JSON.stringify(rec)); };
+  const spoolOf = (type) => H().writes.filter(([p]) => p.includes("/spool/") && p.includes(`-${type}-`)).map(([, t]) => JSON.parse(t));
+  const touch = (d) => { d.sessions[SID].updatedAt = Date.now() + Math.random(); };
+  const AG = { [`${APP}/AGENTS.md`]: "x" };
+
+  // The fixture: a stub in the demo store (its counts, its pin), a file of the writer's shape; the counts the
+  // stub carries are the file's items' own (store.js countsOf before and after a merge, at all three thresholds).
+  { const st = new Store(FX.demoData()), stub = st.d.sessions[CSID];
+    A.ok(CFG_M.COLD_NAME.test(CF), "the demo's file name has the writer's shape (config.js COLD_NAME)"); A.equal(CF, CFG_M.coldName(CSID, stub.cold.at, "c0ld0a"), "...coldName(sid, at, rand6)");
+    A.equal(st.isCold(CSID), true, "the demo has a cold session"); A.equal(st.itemsOf(CSID).length, 0, "its items are not in the store");
+    A.equal(st.coldSessions().length, 1); A.deepEqual(stub.cold.n, coldRec.n, "the stub's counts are its file's");
+    A.equal(st.pinsIn(CSID).length, 1, "its pin stays in the store"); A.ok(FX.FIXTURE_TURNS[`${CSID}:6`].includes(coldRec.items[0].anchor.quote), "Ask 1's passage is in its turn 6");
+    A.ok(LSm.parseCold(JSON.stringify(coldRec), CSID, CF, CF).record, "the file passes the thaw's check");
+    const before = {};
+    for (const th of ["blocking", "needed", "optional"]) { st.threshold = th; before[th] = st.countsOf(CSID); }
+    A.deepEqual([before.blocking.open, before.needed.open, before.optional.open], [2, 3, 4], "open at blocking, needed, optional: from the stub");
+    A.deepEqual({ q: before.needed.q, a: before.needed.a, b: before.needed.b }, { q: 1, a: 2, b: 1 });
+    A.equal(st.mergeCold(CSID, JSON.parse(JSON.stringify(coldRec)), CF), true); A.equal(st.isMerged(CSID), true);
+    for (const th of ["blocking", "needed", "optional"]) { st.threshold = th; const c = st.countsOf(CSID); A.deepEqual({ q: c.q, a: c.a, b: c.b, open: c.open }, { q: before[th].q, a: before[th].a, b: before[th].b, open: before[th].open }, `merged, at ${th}: the same counts from the items`); } }
+
+  // parseCold: the thaw's checks, in words.
+  { const ok = JSON.stringify(coldRec);
+    A.ok(LSm.parseCold(ok, CSID, CF).record); A.equal(LSm.parseCold(ok, CSID, CF).record.items.length, 5);
+    for (const [text, sid, named, why] of [["", CSID, null, /empty/], ["{ nope", CSID, null, /not JSON/], ["[1]", CSID, null, /not a cold file/],
+      [JSON.stringify({ ...coldRec, ledgr: "x" }), CSID, null, /not a cold file/], [JSON.stringify({ ...coldRec, v: 2 }), CSID, null, /version 2/],
+      [ok, "someone-else", null, /'s, not someone-else/], [ok, CSID, "other.json", /names another file/], [JSON.stringify({ ...coldRec, items: {} }), CSID, null, /no item list/]])
+      A.match(LSm.parseCold(text, sid, CF, named).error ?? "", why, `refused: ${why}`); }
+
+  // The words.
+  { const D9 = 9 * DAY + 3600e3;
+    A.equal(W.idleWords(D9), "idle 9 d"); A.equal(W.idleWords(D9, true), "idle 9 days"); A.equal(W.idleWords(3 * 3600e3), "idle 3 h"); A.equal(W.idleWords(1 * DAY, true), "idle 1 day");
+    A.equal(W.idleWords(5 * 60e3), "idle 5 min"); A.equal(W.idleWords(0), "idle 1 min");
+    A.equal(W.olderSessionsWords(3), "OLDER SESSIONS (3) ›"); A.equal(W.olderSessionsWords(3, true), "OLDER SESSIONS (3) ▾");
+    A.equal(W.coldCountWords({ open: 3, b: 1 }), "3 open, 1 blocking"); A.equal(W.coldCountWords({ open: 0, b: 0 }), "nothing open");
+    A.equal(W.coldLoadingWords(D9, { open: 3, b: 1 }), "Reading this session's items (idle 9 days; kept in ledgr-data/cold/)… 3 open, 1 blocking.", "the panel's line, with the counts");
+    A.equal(W.coldLoadingWords(), "Reading this session's items (kept in ledgr-data/cold/)…", "the dialog's");
+    A.ok(W.coldErrorWords("the file is missing", CF).includes("Nothing is lost") && W.coldErrorWords("x", CF).includes(`ledgr-data/cold/${CF}: x`), "an error here: the file, why, nothing lost");
+    A.match(W.coldFaultWords({ error: "the file is missing", held: 2, file: CF }), /cannot read this session's older items \(ledgr-data\/cold\/.+: the file is missing\)\. 2 new events kept: they apply/);
+    A.match(W.coldFaultWords({ error: "x", held: 1, file: CF }), /1 new event kept: it applies/);
+    A.equal(W.coldResetConfirm(5), "Go on without its 5 older items? Click again"); A.equal(W.coldResetConfirm(1), "Go on without its 1 older item? Click again");
+    A.match(W.coldLostWords({ file: CF, at: Date.now() - 2 * DAY, n: { items: 5 }, error: "the file is missing" }), /^5 older items could not be read \(ledgr-data\/cold\/.+: the file is missing\); you chose to go on without them 2 days ago\.$/);
+    A.equal(W.coldFaultsLine([]), null);
+    A.match(W.coldFaultsLine([{ sid: CSID, held: 2 }], () => "nightly report backfill"), /^ledgr cannot read the older items of nightly report backfill \(2 new events kept\): show it from OLDER SESSIONS/);
+    A.match(W.olderPillTip(CF), new RegExp(`ledgr-data/cold/${CF.replace(/\./g, "\\.")}`), "the pill's tooltip names the file"); }
+
+  // pinsTarget takes a stub: a question parked with pins in a cold session parks there (the writer thaws it).
+  { const stub = JSON.parse(storeText).sessions[CSID], pt = PG.pinsTarget({ session: CSID, records: [], stored: stub });
+    A.deepEqual(pt.add && { s: pt.add.session_id, a: pt.add.agent, n: pt.add.session_name, c: pt.add.cwd, r: pt.add.repo, t: pt.add.turn, st: pt.add.stored, term: pt.add.terminal },
+      { s: CSID, a: "claude-code", n: "nightly report backfill", c: "/Users/example/src/reports", r: "reports", t: 6, st: true, term: null }, "pinsTarget builds the box's record from the stub"); }
+
+  // Reader over real files: shown, its file is read (bounded, once), merged into the copy's own store (s.cold
+  // kept), merged again from the cache after a reload; acts shown at once on merged items; the record dropped
+  // once no stub names its file; nothing written but the act's spool event.
+  fs.rmSync(COLDDIR, { recursive: true, force: true });
+  fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText);
+  writeCold();
+  reset({ files: AG });
+  { const cx = mkcx(), rd = new Reader(cx, {}); await rd.reload();
+    A.equal(rd.live.isCold(CSID), true); A.equal(rd.live.isMerged(CSID), false); A.equal(rd.live.itemsOf(CSID).length, 0, "store.json: a stub");
+    A.equal(rd.coldOf(CSID).state, "loading", "not read yet"); A.equal(rd.coldDue(CSID), true); A.equal(rd.coldOf(SID), null, "a warm session: not cold");
+    const rev0 = rd.rev;
+    A.equal(rd.wantCold(CSID, cx), "loading"); A.equal(rd.wantCold(CSID, cx), "loading"); A.equal(cx.tasks.length, 1, "asked twice: one read");
+    A.equal(rd.coldDue(CSID), false, "being read: not due");
+    await until(cx, () => rd.live.isMerged(CSID));
+    A.equal(rd.coldOf(CSID).state, "ok"); A.ok(rd.rev > rev0, "a render asked for");
+    A.deepEqual(rd.live.itemsOf(CSID).map((it) => it.id).sort(), coldRec.items.map((it) => it.id).sort(), "its items, merged into the copy's own store");
+    A.deepEqual(rd.live.item(C2), coldRec.items[1], "each as the file holds it"); A.deepEqual(Object.keys(rd.live.d.turns[CSID]).sort(), ["4", "5", "6"], "its turn records");
+    A.deepEqual(rd.live.d.sessions[CSID].cold, JSON.parse(storeText).sessions[CSID].cold, "the stub's cold left as it is");
+    rd.live.item(C2).text = "changed in memory"; A.equal(coldRec.items[1].text, "Choose the backfill window", "a deep copy: the cached record unchanged");
+    fs.rmSync(path.join(COLDDIR, CF));
+    storeWith(touch); await rd.reload();
+    A.equal(rd.live.isMerged(CSID), true, "a new store.json: merged again from the cache (the file is gone: not read again)"); A.equal(rd.live.item(C2).text, "Choose the backfill window");
+    // An act on a merged item: shown at once, and again after a reload (merge first, then overlayLocal); its
+    // event names the cold session (the writer thaws it), and nothing is written under cold/.
+    rd.act(C1, "resolve", null, cx); A.equal(rd.live.item(C1).status, "resolved", "Done on a merged item: shown at once");
+    storeWith(touch); await rd.reload(); A.equal(rd.live.item(C1).status, "resolved", "...still, after a reload");
+    await drain(cx);
+    const acts = spoolOf("act"); A.equal(acts.length, 1); A.deepEqual({ s: acts[0].session_id, i: acts[0].item, a: acts[0].action }, { s: CSID, i: C1, a: "resolve" }, "the act names the cold session");
+    A.ok(H().writes.every(([p]) => p.includes("/spool/")), "nothing written but spool events (never under cold/, never store.json)");
+    A.equal(H().shared["ledgr.writer"], undefined, "...and nothing claimed");
+    // The writer thawed it: no stub names the file, the record leaves the cache.
+    storeWith((d) => { delete d.sessions[CSID].cold; for (const it of coldRec.items) d.items[it.id] = it; d.turns[CSID] = coldRec.turns; });
+    await rd.reload(); A.equal(rd.coldCache.has(CF), false, "no stub names the file: the record dropped"); A.equal(rd.coldOf(CSID), null, "warm again");
+    A.equal(rd.live.item(C1).status, "resolved", "the act still shown until store.json has it"); }
+
+  // A typed answer whose item is not in the store: kept while a cold file is read here, and 60 s in any case.
+  writeCold(); fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText); reset({ files: AG });
+  { const cx = mkcx(), rd = new Reader(cx, {}); await rd.reload(); const old = Date.now() - 5 * 60e3;
+    rd.drafts.set(C2, { text: "Next weekend", sent: false, seq: 1, at: old }); rd.drafts.set("rq_gone_x", { text: "x", sent: true, seq: 0, at: old });
+    rd.wantCold(CSID, cx); A.equal(rd.coldLoading(), true);
+    rd.overlayLocal();
+    A.ok(rd.drafts.has(C2), "a draft for a cold item still loading: kept (older than 60 s)"); A.ok(rd.drafts.has("rq_gone_x"), "...any such draft, while a cold read is going");
+    await until(cx, () => rd.live.isMerged(CSID));
+    A.equal(rd.live.item(C2).draft, "Next weekend", "read: the draft on its item");
+    rd.overlayLocal(); A.ok(!rd.drafts.has("rq_gone_x"), "no read going and older than 60 s: a draft whose item is nowhere goes");
+    rd.drafts.set("rq_gone_y", { text: "y", sent: true, seq: 0, at: Date.now() }); rd.overlayLocal(); A.ok(rd.drafts.has("rq_gone_y"), "a young one stays (60 s)");
+    A.equal(RD.COLD_DRAFT_MS, 60000); }
+
+  // Unreadable here: missing, bad; said, tried again after 30 s or at once on Try again (no event: the writer has
+  // no trouble with it); a read that gets no answer is bounded; the cache keeps the 12 most recently used.
+  fs.rmSync(COLDDIR, { recursive: true, force: true }); reset({ files: AG });
+  { const cx = mkcx(), rd = new Reader(cx, {}); await rd.reload(); const s = () => rd.live.d.sessions[CSID];
+    rd.wantCold(CSID, cx); await until(cx, () => rd.coldOf(CSID).state === "error");
+    A.equal(rd.coldOf(CSID).error, "the file is missing"); A.equal(rd.live.itemsOf(CSID).length, 0);
+    A.equal(rd.coldDue(CSID), false, "not again before 30 s"); A.equal(rd.wantCold(CSID, cx), "error", "asked again: the error, no read");
+    A.ok(cx.timers.some(([ms]) => ms === RD.COLD_LOAD_RETRY_MS + 50), "a render asked for after 30 s"); A.equal(RD.COLD_LOAD_RETRY_MS, 30000);
+    rd.coldCache.get(CF).at -= RD.COLD_LOAD_RETRY_MS; A.equal(rd.coldDue(CSID), true, "30 s later: due again");
+    for (const [bad, why] of [["{ nope", /not JSON/], [JSON.stringify({ ...coldRec, sessionId: "someone-else" }), /the file is session someone-else's/], [JSON.stringify({ ...coldRec, v: 2 }), /version 2/]]) {
+      writeCold(bad); rd.coldRetry(s(), cx); await until(cx, () => rd.coldOf(CSID).state === "error");
+      A.match(rd.coldOf(CSID).error, why, `a bad file: ${why}`); A.equal(rd.live.isMerged(CSID), false, "nothing merged");
+    }
+    A.equal(spoolOf("cold_retry").length, 0, "Try again for a file only this copy could not read: no event");
+    writeCold(); rd.coldRetry(s(), cx); A.equal(rd.flash, W.coldRetryWords(CF, false)); await until(cx, () => rd.live.isMerged(CSID));
+    A.equal(rd.coldOf(CSID).state, "ok", "Try again: read now, merged");
+    // The cache: the 12 most recently used; a read still going is never dropped.
+    for (let i = 0; i < 14; i++) rd.coldCache.set(`x${i}.json`, { sid: `s${i}`, file: `x${i}.json`, loading: false, record: {}, at: 0, used: i });
+    rd.trimColdCache(); A.equal(rd.coldCache.size, RD.COLD_CACHE, "12 kept"); A.ok(rd.coldCache.has(CF) && !rd.coldCache.has("x0.json") && rd.coldCache.has("x13.json"), "the most recently used"); }
+  // A stub naming something that is not a cold file of the writer's shape (a hand-edited store): nothing read.
+  { const d = JSON.parse(storeText); d.sessions[CSID].cold.file = "../store.1794700000000-abcdef.json"; fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), JSON.stringify(d));
+    const cx = mkcx(), rd = new Reader(cx, {}); await rd.reload();
+    A.equal(rd.wantCold(CSID, cx), "error"); A.equal(cx.tasks.length, 0, "no read started");
+    A.match(rd.coldOf(CSID).error, /names no cold file of ledgr's shape/, "a path, not a name: refused");
+    fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText); }
+  { const cx = mkcx(); cx.timer.after = (ms, f) => { if (ms === RD.COLD_READ_MS) { f(cx); return { cancel() {} }; } cx.timers.push([ms, f]); return { cancel() {} }; };
+    writeCold(); const rd = new Reader(cx, {}); await rd.reload();
+    rd.wantCold(CSID, cx); await until(cx, () => rd.coldOf(CSID)?.state === "error");
+    A.match(rd.coldOf(CSID).error, /^reading cold\/.+: no answer in /, "a read that gets no answer: bounded (COLD_READ_MS), said"); A.equal(RD.COLD_READ_MS, 10000); }
+
+  // The writer cannot read it (s.cold.fault): never merged; Try again reads here and posts cold_retry; Use
+  // without its older items posts cold_reset on its second click only.
+  const faultText = (() => { const d = JSON.parse(storeText); d.sessions[CSID].cold.fault = { at: Date.now() - 60e3, error: "the file is missing", tries: 3, held: 2 }; return JSON.stringify(d); })();
+  writeCold(); fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), faultText); reset({ files: AG });
+  { const cx = mkcx(), rd = new Reader(cx, {}); await rd.reload(); const s = rd.live.d.sessions[CSID];
+    const c = rd.coldOf(CSID); A.equal(c.state, "fault"); A.equal(c.held, 2); A.equal(c.error, "the file is missing"); A.equal(c.file, CF);
+    A.equal(rd.coldDue(CSID), false, "faulted: not read on its own");
+    rd.wantCold(CSID, cx); await until(cx, () => !rd.coldLoading()); A.equal(rd.live.isMerged(CSID), false, "faulted: never merged, even when this copy can read it");
+    rd.coldRetry(s, cx); await drain(cx, 0);
+    const rt = spoolOf("cold_retry"); A.equal(rt.length, 1, "Try again: one cold_retry");
+    A.deepEqual({ type: rt[0].type, s: rt[0].session_id, f: rt[0].file }, { type: "cold_retry", s: CSID, f: CF }); A.equal(rd.flash, W.coldRetryWords(CF, true));
+    A.equal(rd.coldReset(s, cx), "armed"); await drain(cx, 0); A.equal(spoolOf("cold_reset").length, 0, "one click: armed, nothing posted");
+    const armedTimer = cx.timers.filter(([ms]) => ms === RD.COLD_ARM_MS + 50).at(-1); A.ok(armedTimer, "the arm lapses after COLD_ARM_MS"); armedTimer[1](cx); A.equal(rd.coldResetAsk, null);
+    A.equal(rd.coldReset(s, cx), "armed", "lapsed: the next click arms again");
+    A.equal(rd.coldReset(s, cx), "posted"); await drain(cx, 0);
+    const rs = spoolOf("cold_reset"); A.equal(rs.length, 1, "the second: one cold_reset");
+    A.deepEqual({ type: rs[0].type, s: rs[0].session_id, f: rs[0].file }, { type: "cold_reset", s: CSID, f: CF }); A.equal(rd.flash, W.coldResetWords("nightly report backfill"));
+    const after = rd.live.d.sessions[CSID];
+    A.equal(after.cold, undefined, "shown at once (store.js on_cold_reset): warm, without its older items"); A.equal(after.coldLost?.file, CF, "...what was lost kept on the record");
+    A.equal(rd.coldOf(CSID), null); A.equal(rd.coldReset(after, cx), null, "nothing more to reset");
+    A.equal(rd.coldReset(rd.live.d.sessions[SID], cx), null, "not for a warm session"); }
+  writeCold(); fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText); reset({ files: AG });
+  { const cx = mkcx(), rd = new Reader(cx, {}); await rd.reload(); A.equal(rd.coldReset(rd.live.d.sessions[CSID], cx), null, "not for a cold session the writer can read"); }
+
+  // Phase 1's archive leaves out the ids the shown store holds, merged cold items included.
+  { fs.rmSync(ARCH, { recursive: true, force: true }); fs.mkdirSync(path.join(ARCH, CSID), { recursive: true });
+    const arch = (it, o = {}) => JSON.stringify({ ...it, ...o });
+    fs.writeFileSync(path.join(ARCH, CSID, "items-1794600000000-cccccc.jsonl"), [arch(coldRec.items[4]), arch(coldRec.items[4], { id: "rq_demo_c9", handle: "A0" })].join("\n") + "\n");
+    writeCold(); reset({ files: AG }); const cx = mkcx(), rd = new Reader(cx, {}); await rd.reload();
+    A.deepEqual((await rd.loadArchive(CSID)).map((r) => r.id).sort(), [C5, "rq_demo_c9"], "not merged: both archived lines");
+    rd.wantCold(CSID, cx); await until(cx, () => rd.live.isMerged(CSID));
+    A.deepEqual((await rd.loadArchive(CSID)).map((r) => r.id), ["rq_demo_c9"], "merged: the id its cold file holds is the store's (the store wins)");
+    fs.rmSync(ARCH, { recursive: true, force: true }); }
+
+  // Fallback mode (the panel runs the writer): a cold record is never merged into the writer's store, which the
+  // writer saves (risk 3). The panel shows a clone of the writer's saved text, merged, rebuilt when that text
+  // changes, and the writer's own store once the session is warm again.
+  writeCold(); fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText); reset({ files: AG });
+  { const { pn, cx } = await mkPanel();
+    const wlive = Store.fromText(storeText), w0 = wlive.toText();
+    pn.writer = { id: "fb-1", live: wlive, storeText, amWriter: () => true, holds: () => true, started: true, retired: false, track() {}, tick() {}, applyConfig() {}, release() {}, retire() {}, note: null };
+    A.equal(pn.fallback(), true); A.equal(pn.viewStore(), wlive, "nothing cold read yet: the writer's own store");
+    pn.held = CSID; draw(pn, cx);
+    A.ok(UI().ids.has("cold-reading"), "Reading… on the writer's store");
+    await until(cx, () => Boolean(pn.coldCache.get(CF)?.record));
+    const v = pn.viewStore();
+    A.notEqual(v, wlive, "a cold record read: a clone is shown, not the writer's store"); A.equal(v.isMerged(CSID), true); A.equal(v.itemsOf(CSID).length, coldRec.items.length);
+    A.equal(wlive.itemsOf(CSID).length, 0, "the writer's store holds no item of the cold session"); A.equal(wlive.isMerged(CSID), false, "...is not marked merged");
+    A.equal(wlive.toText(), w0, "...and is exactly as it was (it would be saved)");
+    A.equal(pn.mergeColdAll(wlive), 0, "mergeColdAll refuses the writer's store");
+    A.equal(pn.viewStore(), v, "the same clone while the writer's text stays");
+    draw(pn, cx); A.ok(UI().ids.has(`row-${C1}`) && UI().ids.has(`row-${CQ}`), "its rows drawn from the clone");
+    A.equal(wlive.toText(), w0, "drawing changed nothing in the writer's store");
+    const t2 = JSON.stringify({ ...JSON.parse(storeText), houseAt: 5 }); pn.writer.storeText = t2; pn.writer.live = Store.fromText(t2);
+    const v2 = pn.viewStore(); A.notEqual(v2, v, "the writer saved: a new clone"); A.equal(v2.isMerged(CSID), true); A.equal(pn.writer.live.itemsOf(CSID).length, 0);
+    pn.typeDraft(C2, "This weekend", cx); A.equal(pn.writer.live.item(C2), null, "a typed answer: on the clone, never the writer's store");
+    const t3 = JSON.stringify(((d) => { delete d.sessions[CSID].cold; for (const it of coldRec.items) d.items[it.id] = it; return d; })(JSON.parse(storeText)));
+    pn.writer.storeText = t3; pn.writer.live = Store.fromText(t3);
+    A.equal(pn.viewStore(), pn.writer.live, "warm again (thawed by the writer): the writer's own store"); }
+
+  // The panel: the session menu's OLDER SESSIONS (counts from the stub, idle, folded unless the shown session is
+  // cold), the cold session shown (Reading…, its pins, no footer, the older pill), then its lanes as usual; no
+  // `seen` posted for it; unreadable here (Try again); the writer cannot read it (Try again, Use without, Forget,
+  // the status line).
+  const menuIndex = (id) => (UI().ids.get("lg-menu")?._kids ?? []).findIndex((k) => k?._id === id);
+  writeCold(); fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText); reset({ files: AG });
+  { const { pn, cx } = await mkPanel();
+    pn.menu = true; draw(pn, cx);
+    A.equal(texts(UI().ids.get("lg-older")).join(""), W.olderSessionsWords(1, false), "OLDER SESSIONS (1) ›: folded while a warm session is shown");
+    A.ok(!UI().ids.has(`lg-s-${CSID}`), "folded: its row not drawn"); A.ok(UI().ids.has(`lg-s-${SID}`), "the warm sessions as before");
+    click("lg-older", cx); draw(pn, cx);
+    A.equal(texts(UI().ids.get("lg-older")).join(""), W.olderSessionsWords(1, true), "a click opens it");
+    const rowT = () => texts(UI().ids.get(`lg-s-${CSID}`));
+    A.ok(rowT().includes("nightly report backfill") && rowT().includes("3 open") && rowT().includes("◆ 1") && rowT().includes("idle 9 d"), `its row: name, 3 open, ◆ 1, idle 9 d (${rowT().join("|")})`);
+    A.ok(menuIndex(`lg-s-${CSID}`) > menuIndex("lg-older") && menuIndex("lg-older") > 0, "listed under the fold, at the bottom, out of the agent groups and ENDED");
+    for (const [th, n] of [["blocking", "2 open"], ["optional", "4 open"], ["needed", "3 open"]]) { pn.cfg = { ...pn.cfg, extract: { ...pn.cfg.extract, threshold: th } }; draw(pn, cx); A.ok(rowT().includes(n), `at ${th}: ${n} (countsOf)`); }
+    A.equal(pn.live.itemsOf(CSID).length, 0, "the menu's counts read nothing: still a stub");
+    // Shown: Reading… with its counts, its pin, no footer, the older pill; nothing posted.
+    click(`lg-s-${CSID}`, cx);
+    let r = draw(pn, cx);
+    A.equal(texts(UI().ids.get("cold-reading")).join(""), W.coldLoadingWords(Date.now() - pn.live.d.sessions[CSID].touchedAt, pn.live.countsOf(CSID)), "Reading this session's items (idle 9 days; …)… 3 open, 1 blocking.");
+    A.ok(UI().ids.has("pin-pn_demo-pin-000f"), "its pins show at once (they are in the store)"); A.ok(!UI().ids.has("fold-closed"), "no footer while it is read");
+    A.ok(UI().ids.has("lg-older-pill") && texts(UI().ids.get("lg-older-pill")).includes("older"), "the header's older pill");
+    A.ok(!UI().ids.has("lane-mine") && !UI().ids.has("lane-asks"), "no lanes yet");
+    await until(cx, () => pn.live.isMerged(CSID)); r = draw(pn, cx);
+    for (const id of [C1, C2, C3, CQ]) A.ok(UI().ids.has(`row-${id}`), `merged: its row ${id}`);
+    A.ok(r.all.includes("OLDER THAN A DAY (4)"), "its open items (all older than a day: it went cold for that) under OLDER THAN A DAY, open on its own");
+    A.ok(UI().ids.has("fold-closed") && texts(UI().ids.get("fold-closed")).join("").includes("closed (1)"), "the footer counts the merged items");
+    A.ok(texts(UI().ids.get("fold-older")).join("").includes("older than a day (4) ▾"), "...its OLDER THAN A DAY fold open");
+    A.equal(pn.folds.older, false, "the person's own fold for every other session unchanged");
+    click("fold-older", cx); r = draw(pn, cx); A.ok(!UI().ids.has(`row-${C1}`) && pn.olderShut.has(CSID), "a click shuts it for this session");
+    click("fold-older", cx); r = draw(pn, cx); A.ok(UI().ids.has(`row-${C1}`), "...and opens it again");
+    A.ok(UI().ids.has("lg-older-pill"), "still marked older (read, not brought back)"); A.equal(pn.fx.size, 0, "a merge is not a motion");
+    A.ok(!UI().ids.has("cold-reading"));
+    A.equal(H().writes.length, 0, "showing it wrote nothing (no event: not brought back)");
+    pn.menu = true; draw(pn, cx); A.equal(texts(UI().ids.get("lg-older")).join(""), W.olderSessionsWords(1, true), "the fold open while the shown session is cold");
+    A.ok(rowT().includes("3 open"), "merged: the same count from its items"); }
+  // A typed answer the dialog hands back (its closed record) for an item of a cold session this panel has not read:
+  // kept (60 s, and while a cold read is going), then on its item once the panel reads the file.
+  writeCold(); fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText); reset({ files: AG });
+  { const { pn, cx } = await mkPanel();
+    H().shared["ledgr.detail"] = { open: null, closed: { overlay: "ov-x", opener: "another-panel", at: Date.now() + 1, drafts: { [C2]: "This weekend" } } };
+    draw(pn, cx); A.equal(pn.drafts.get(C2)?.text, "This weekend", "an answer for an item of a cold session not read here: kept");
+    pn.overlayLocal(); A.ok(pn.drafts.has(C2), "...across a reload of the store");
+    pn.held = CSID; draw(pn, cx); await until(cx, () => pn.live.isMerged(CSID));
+    A.equal(pn.live.item(C2).draft, "This weekend", "read: the answer on its item"); }
+  // A surfaced cold session shown: its `seen` posted, the one act that does not bring it back (store.js coldOf(ev)
+  // leaves it out), so the host button quiets; any other act needs it warm.
+  { const d = JSON.parse(storeText); d.sessions[CSID].surfaced = true; d.sessions[SID].surfaced = true; d.sessions[SID].lastStopAt = Date.now(); fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), JSON.stringify(d)); }
+  writeCold(); reset({ files: AG });
+  { const { pn, cx } = await mkPanel(); pn.held = CSID; draw(pn, cx); await drain(cx); draw(pn, cx); await drain(cx);
+    const seen = spoolOf("act").filter((e) => e.action === "seen");
+    A.deepEqual(seen.map((e) => e.session_id), [CSID], "a cold session shown, surfaced: its seen, once");
+    A.equal(pn.live.coldNeeded(seen).size, 0, "...which needs no thaw (store.js)"); A.equal(pn.live.coldNeeded([{ ...seen[0], id: "x1", action: "resolve", item: C1 }]).size, 1, "...where any other act does");
+    pn.held = SID; draw(pn, cx); await drain(cx);
+    A.deepEqual(spoolOf("act").filter((e) => e.action === "seen").map((e) => e.session_id), [CSID, SID], "a warm one: its seen, as before"); }
+  // Unreadable here: why, nothing lost, Try again.
+  fs.rmSync(COLDDIR, { recursive: true, force: true }); fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText); reset({ files: AG });
+  { const { pn, cx } = await mkPanel(); pn.held = CSID; draw(pn, cx);
+    await until(cx, () => pn.coldOf(CSID)?.state === "error"); draw(pn, cx);
+    A.equal(texts(UI().ids.get("cold-error")).join(""), W.coldErrorWords("the file is missing", CF)); A.ok(UI().ids.has("cold-retry"), "Try again"); A.ok(!UI().ids.has("cold-reset"), "no Use without: the writer has no trouble with it");
+    A.ok(!UI().ids.has("fold-closed"), "no footer"); A.ok(pn.entries.some((e) => e.key === "cold:retry"), "Try again is an entry of the cursor (Enter)");
+    writeCold(); pn.cursor = "cold:retry"; pn.focusList(); pn.listKey("enter", cx); await until(cx, () => pn.live.isMerged(CSID)); draw(pn, cx);
+    A.ok(UI().ids.has(`row-${C1}`), "Enter on Try again: read, its lanes"); A.equal(spoolOf("cold_retry").length, 0); }
+  // The writer cannot read it: its words, the events it keeps, the three actions; the status line names it.
+  writeCold(); fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), faultText); reset({ files: AG, shared: { "ledgr.writer": { id: "w-1", by: "host", at: Date.now() } } });
+  { const { pn, cx } = await mkPanel(); pn.held = CSID; let r = draw(pn, cx);
+    A.equal(texts(UI().ids.get("cold-fault")).join(""), W.coldFaultWords({ error: "the file is missing", held: 2, file: CF }), "the writer's words and the 2 events kept");
+    for (const b of ["cold-retry", "cold-reset", "cold-forget"]) A.ok(UI().ids.has(b), `${b}`);
+    A.ok(r.all.includes(W.coldFaultsLine([{ sid: CSID, held: 2 }], () => "nightly report backfill")), "the status line names it");
+    await drain(cx); A.equal(pn.live.isMerged(CSID), false, "not read on its own, never merged");
+    pn.menu = true; pn.olderOpen = true; draw(pn, cx); A.ok(texts(UI().ids.get(`lg-s-${CSID}`)).includes("can't read"), "its menu row: can't read");
+    pn.menu = false; draw(pn, cx);
+    click("cold-retry", cx); await drain(cx, 0); A.deepEqual(spoolOf("cold_retry").map((e) => [e.session_id, e.file]), [[CSID, CF]], "Try again: cold_retry");
+    draw(pn, cx); A.ok(UI().ids.has("cold-fault"), "still the writer's words until it reads the file");
+    click("cold-reset", cx); r = draw(pn, cx); A.equal(texts(UI().ids.get("cold-reset")).join(""), W.coldResetConfirm(5), "one click: armed, asks again");
+    await drain(cx, 0); A.equal(spoolOf("cold_reset").length, 0);
+    click("cold-reset", cx); await drain(cx, 0);
+    A.deepEqual(spoolOf("cold_reset").map((e) => [e.session_id, e.file]), [[CSID, CF]], "the second click: cold_reset {session_id, file}");
+    r = draw(pn, cx);
+    A.ok(!UI().ids.has("cold-fault") && UI().ids.has("lane-asks"), "shown at once: the session goes on, warm, its lanes empty");
+    A.ok(texts(UI().ids.get("cold-lost")).join("").startsWith("5 older items could not be read (ledgr-data/cold/"), "what was lost, said above its lanes (coldLost)");
+    A.ok(!UI().ids.has("lg-older-pill") && !r.all.includes("cannot read the older items"), "no older pill, nothing on the status line"); }
+  writeCold(); fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), faultText); reset({ files: AG });
+  { const { pn, cx } = await mkPanel(); pn.held = CSID; draw(pn, cx);
+    click("cold-forget", cx); await drain(cx, 0); A.equal(spoolOf("forget").length, 0, "Forget: one click arms it");
+    draw(pn, cx); A.equal(texts(UI().ids.get("cold-forget")).join(""), "Forget it and its branches");
+    click("cold-forget", cx); await drain(cx, 0); A.deepEqual(spoolOf("forget").map((e) => e.session_id), [CSID], "the second: forget (no file read: the writer needs none)");
+    A.equal(pn.live.d.sessions[CSID], undefined, "shown at once: gone"); }
+  // Integration (2026-11-19, the review's blocker): another file of a faulted session on disk is named in its words
+  // (Reader coldOthers: listed from a timer), before the person chooses Use without its older items.
+  writeCold(); fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), faultText); reset({ files: AG });
+  { const other = CFG_M.coldName(CSID, 1794999999999, "zz0001");
+    writeCold(coldRec, other);
+    const { pn, cx } = await mkPanel(); pn.held = CSID; draw(pn, cx);
+    await until(cx, () => (pn.coldOthers(CSID, CF, null) ?? []).length > 0); draw(pn, cx);
+    const words = texts(UI().ids.get("cold-fault")).join("");
+    A.ok(words.includes(`Another file of this session is in ledgr-data/cold/ (${other}): it may hold what is missing`), `the fault view names the other file: ${words}`);
+    A.deepEqual(pn.coldOthers(CSID, CF, null), [other], "...only the session's own other files, not the named one");
+    A.equal(W.coldFaultWords({ error: "x", held: 0, file: CF }).includes("Another file"), false, "none: no such sentence");
+    fs.rmSync(path.join(COLDDIR, other), { force: true }); }
+  // The commands: older-sessions, cold-retry, cold-reset (twice).
+  writeCold(); fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), faultText); reset({ files: AG });
+  { const { pn, cx } = await mkPanel();
+    pn.command("older-sessions", cx); A.equal(pn.menu, true); A.equal(pn.olderOpen, true, "older-sessions: the menu, the fold opened");
+    pn.command("older-sessions", cx); A.equal(pn.olderOpen, false, "...and closed");
+    pn.command("cold-retry", cx); A.match(pn.flash, /not an older one/, "a warm session shown: said");
+    pn.held = CSID; pn.command("cold-reset", cx); pn.command("cold-reset", cx); await drain(cx, 0); A.equal(spoolOf("cold_reset").length, 1, "cold-reset twice: posted once"); }
+  // Integration (2026-11-19): open:<handle> (and the other handle commands) on a cold session this panel has not
+  // read yet: its file is read first and the command runs then, never "No A1 in this session"; the writer unable
+  // to read it: said, with what to do. A pin's handle needs no file.
+  writeCold(); fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText); reset({ files: AG });
+  { const { pn, cx } = await mkPanel(); pn.held = CSID;
+    const h = coldRec.items.find((it) => it.id === C1).handle, n0 = H().overlays.length;
+    A.equal(pn.live.isMerged(CSID), false, "not read yet");
+    pn.command(`open:${h}`, cx);
+    A.equal(pn.flash, W.coldWaitWords(h), "open: on a cold item not read yet: Reading…, never No A1"); A.ok(!/^No /.test(pn.flash));
+    await until(cx, () => pn.live.isMerged(CSID)); await drain(cx, 0);
+    A.equal(H().overlays.length, n0 + 1, "...then the dialog opens on it");
+    const sp = H().overlays.at(-1)[1].props; A.deepEqual({ s: sp.session, k: sp.kind, i: sp.id }, { s: CSID, k: "ask", i: C1 }, "on that item, in its cold session");
+    A.equal(pn.flash, "", "the Reading… words cleared"); A.equal(pn.coldThen, null);
+    A.equal(H().writes.filter(([p]) => !p.includes("/spool/")).length, 0, "nothing written but spool events");
+    pn.command("open:A99", cx); A.equal(pn.flash, "No A99 in this session.", "merged: a handle it does not hold is said as before"); }
+  writeCold(); fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText); reset({ files: AG });
+  { const { pn, cx } = await mkPanel(); pn.held = CSID;
+    pn.command(`act:${coldRec.items.find((it) => it.id === C1).handle}:resolve`, cx);
+    await until(cx, () => pn.live.isMerged(CSID)); await drain(cx, 0);
+    const acts = spoolOf("act").filter((e) => e.action === "resolve");
+    A.deepEqual(acts.map((e) => [e.session_id, e.item]), [[CSID, C1]], "act:<handle>:resolve on a cold item: read, then one act naming it (the writer thaws)"); }
+  writeCold(); fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), faultText); reset({ files: AG });
+  { const { pn, cx } = await mkPanel(); pn.held = CSID; const n0 = H().overlays.length;
+    pn.command("open:A1", cx); A.equal(pn.flash, W.coldUnreadWords("A1"), "the writer cannot read it: said, with what to do");
+    await drain(cx); A.equal(H().overlays.length, n0, "no dialog"); A.equal(pn.coldThen, null, "nothing kept"); A.equal(pn.live.isMerged(CSID), false); }
+
+  // Across the seam, on the live store's shape (builder A's fixture_cold.mjs: 42 sessions, 20 idle a week with
+  // something to move): store.js freezes them (planFreeze, commitFreeze; the files written here as the writer
+  // would); the panel's session menu lists exactly those under OLDER SESSIONS (20), each with the counts and the
+  // idle clock it had warm; shown, one is read from its file and counts the same from its items.
+  if (fs.existsSync(path.join(HERE, "fixture_cold.mjs"))) {
+    const { liveShape } = await import(path.join(HERE, "fixture_cold.mjs"));
+    const now = Date.now(), { data, sids } = liveShape({ now }), st = new Store(data);
+    st.threshold = "needed";
+    const before = Object.fromEntries(Object.keys(st.d.sessions).map((sid) => [sid, st.countsOf(sid)])), idle = Object.fromEntries(Object.keys(st.d.sessions).map((sid) => [sid, st.touchedAt(sid)]));
+    const done = st.planFreeze(7, now).map((x) => ({ ...x, file: CFG_M.coldName(x.sid, x.record.at, "abc123") }));
+    const frozen = st.commitFreeze(done, now);
+    A.deepEqual([...frozen].sort(), [...sids.cold].sort(), "store.js froze the 20 sessions idle a week with something to move");
+    fs.rmSync(COLDDIR, { recursive: true, force: true }); fs.mkdirSync(COLDDIR, { recursive: true });
+    for (const x of done) fs.writeFileSync(path.join(COLDDIR, x.file), JSON.stringify(x.record));
+    fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), st.toText()); reset({ files: AG });
+    const { pn, cx } = await mkPanel(); pn.held = sids.active[0]; pn.menu = true; pn.olderOpen = true; draw(pn, cx);
+    A.equal(texts(UI().ids.get("lg-older")).join(""), W.olderSessionsWords(20, true), "OLDER SESSIONS (20)");
+    let rowsOk = 0;
+    for (const sid of sids.cold) {
+      const tx = texts(UI().ids.get(`lg-s-${sid}`)), c = before[sid];
+      const want = [...(c.open ? [`${c.open} open`] : []), ...(c.b ? [`◆ ${c.b}`] : []), W.idleWords(Date.now() - idle[sid])];
+      if (want.every((w) => tx.includes(w)) && menuIndex(`lg-s-${sid}`) > menuIndex("lg-older")) rowsOk++;
+      else A.fail(`${sid}: ${tx.join("|")} lacks ${want.join(", ")}`);
+    }
+    A.equal(rowsOk, 20, "each row: its counts as they were warm (countsOf from the stub), ◆ when blocking, its idle clock");
+    A.ok([...sids.active, ...sids.empty].every((sid) => menuIndex(`lg-s-${sid}`) >= 0 && menuIndex(`lg-s-${sid}`) < menuIndex("lg-older")), "the 22 others above the fold, as before");
+    A.equal(pn.live.d.items && Object.keys(pn.live.d.items).length, Object.keys(st.d.items).length, "nothing read for the menu");
+    const big = sids.cold[0]; pn.held = big; pn.menu = false; draw(pn, cx);
+    await until(cx, () => pn.live.isMerged(big)); draw(pn, cx);
+    A.equal(pn.live.itemsOf(big).length, done.find((x) => x.sid === big).record.items.length, "shown: its 34 items read from its file");
+    A.deepEqual(pn.live.countsOf(big), before[big], "...counting as they did warm");
+    A.ok(pn.live.itemsOf(big).filter((it) => it.status === "open").every((it) => UI().ids.has(`row-${it.id}`)), "...each open one a row (OLDER THAN A DAY, open on its own)");
+    A.equal(JSON.parse(fs.readFileSync(path.join(APP, "ledgr-data/store.json"), "utf8")).sessions[big].cold.file, done.find((x) => x.sid === big).file, "store.json untouched: still cold");
+    fs.rmSync(COLDDIR, { recursive: true, force: true }); fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText);
+  } else stubs.push("fixture_cold.mjs missing: the live-shape seam check skipped");
+
+  // The dialog on an item of a cold session: "Reading this session's items…", never Gone; then the item as usual
+  // (the late record path: its answer box), its lane from the merged items; an act posts for the cold session.
+  writeCold(); fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText);
+  reset({ files: AG, agents: agentsLive, terminals: [{ address: "t21", state: "live" }], panes: [{ terminal: "t21" }] });
+  { H().props = { view: "detail", session: CSID, kind: "ask", id: C2, demo: false, overlay: "ov-1", opener: "panel-1" };
+    const cx = mkcx(), d = new Detail({}, cx), asked = [];
+    d.transcriptOk = () => true;   // its pane is gone: the Resume check would ask Herdr's fs.exists, which Node has not
+    d.wantCold = (sid) => { asked.push(sid); return "loading"; };   // held back: the read starts below
+    await drain(cx);
+    A.deepEqual(asked, [CSID], "its start asks for the cold session's file");
+    let r = draw(d, cx);
+    A.ok(r.all.includes(W.coldLoadingWords()), "Reading this session's items…"); A.ok(!r.all.includes(W.DETAIL_GONE) && !texts(UI().ids.get("dt-head")).includes("Gone"), "never Gone");
+    A.ok(!UI().ids.has("dt-cold-retry"), "no Try again while it is read");
+    delete d.wantCold; draw(d, cx);
+    await until(cx, () => { draw(d, cx); return d.live.isMerged(CSID) && d.preparedFor === C2; }); r = draw(d, cx);
+    A.ok(UI().ids.has(`dt-answer-${C2}`) && d.answerFor === C2, "read: the item as usual, its answer box made (late record path)");
+    A.ok(r.all.includes("Choose the backfill window") && r.all.includes("Next weekend, after the quarter closes"), "its text and options");
+    A.deepEqual(LSm.laneOf(d.viewStore(), "ask", d.viewStore().item(C2), { threshold: "needed" }), { lane: "older", ids: [C1, C2, C3, CQ] }, "its lane, from the merged items: OLDER THAN A DAY");
+    A.equal(pos(), "2 of 4", "the header says where it stands");
+    A.equal(d.step(1, cx), true); A.equal(d.target.id, C3); A.equal(d.step(-1, cx) && d.step(-1, cx), true); A.equal(d.target.id, C1, "⌘↑ twice: Ask 1");
+    d.step(1, cx); draw(d, cx); click(`dt-done-${C2}`, cx); await drain(cx);
+    const acts = spoolOf("act").filter((e) => e.action === "resolve"); A.deepEqual(acts.map((e) => [e.session_id, e.item]), [[CSID, C2]], "Done: its act names the cold session (the writer brings it back)");
+    A.ok(H().writes.every(([p]) => p.includes("/spool/")), "nothing else written"); }
+  // Unreadable here: said, with Try again (which reads it); the writer cannot read it: its words.
+  fs.rmSync(COLDDIR, { recursive: true, force: true }); fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText); reset({ files: AG });
+  { H().props = { view: "detail", session: CSID, kind: "ask", id: C1, demo: false, overlay: "ov-1", opener: "panel-1" };
+    const cx = mkcx(), d = new Detail({}, cx); d.transcriptOk = () => true; await until(cx, () => d.coldOf(CSID)?.state === "error");
+    let r = draw(d, cx); A.ok(r.all.includes(W.coldErrorWords("the file is missing", CF)), "the error, nothing lost"); A.ok(UI().ids.has("dt-cold-retry"), "Try again");
+    A.ok(!texts(UI().ids.get("dt-head")).includes("Gone"));
+    writeCold(); click("dt-cold-retry", cx); await until(cx, () => { draw(d, cx); return d.preparedFor === C1; }); draw(d, cx); A.ok(UI().ids.has(`dt-answer-${C1}`), "Try again: read, the item shown"); }
+  writeCold(); fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), faultText); reset({ files: AG });
+  { H().props = { view: "detail", session: CSID, kind: "ask", id: C1, demo: false, overlay: "ov-1", opener: "panel-1" };
+    const cx = mkcx(), d = new Detail({}, cx); d.transcriptOk = () => true; await drain(cx);
+    const r = draw(d, cx); A.ok(r.all.includes(W.coldFaultWords({ error: "the file is missing", held: 2, file: CF })), "the writer cannot read it: its words");
+    A.equal(d.live.isMerged(CSID), false, "never merged"); click("dt-cold-retry", cx); await drain(cx, 0); A.equal(spoolOf("cold_retry").length, 1, "Try again: cold_retry"); }
+  fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText);
+
+  // The demo: OLDER SESSIONS (1); the session shown: its file is the fixture's, read at once; Enter opens its
+  // dialog, which reads the fixture too; pin search finds the cold session's pin.
+  fs.rmSync(COLDDIR, { recursive: true, force: true }); reset();
+  { H().props = { view: "panel", demo: true }; const cx = mkcx(), pn = new Panel({}, cx); await drain(cx);
+    pn.menu = true; draw(pn, cx); A.equal(texts(UI().ids.get("lg-older")).join(""), "OLDER SESSIONS (1) ›", "the demo: OLDER SESSIONS (1)");
+    click("lg-older", cx); draw(pn, cx); click(`lg-s-${CSID}`, cx); draw(pn, cx);
+    A.ok(UI().ids.has("cold-reading"), "shown: Reading… for a moment");
+    await drain(cx); draw(pn, cx);
+    for (const id of [C1, C2, C3, CQ]) A.ok(UI().ids.has(`row-${id}`), `the demo's cold row ${id}`);
+    A.equal(pn.demoStore.isCold(CSID), true, "still cold (read, not brought back)");
+    pn.cursor = `item:${C1}`; pn.focusList(); pn.listKey("enter", cx);
+    const sp = H().overlays.at(-1)[1].props; A.deepEqual({ s: sp.session, k: sp.kind, i: sp.id, d: sp.demo }, { s: CSID, k: "ask", i: C1, d: true }, "Enter: its dialog");
+    pn.setPinQuery("credentials"); draw(pn, cx); A.ok(UI().ids.has(`pins-g-${CSID}`) && UI().ids.has("pin-pn_demo-pin-000f"), "pin search finds the cold session's pin"); }
+  reset();
+  { H().props = { view: "detail", session: CSID, kind: "ask", id: C1, demo: true, overlay: "ov-1", opener: "panel-1" };
+    const cx = mkcx(), d = new Detail({}, cx);
+    A.ok(d.resolve(d.viewStore()), "the demo dialog: the fixture read at once (herdr-app check renders it)");
+    let r; A.doesNotThrow(() => { r = draw(d, cx); }); A.ok(r.all.includes("Send the read-only credentials for the reporting replica"), "its text");
+    A.ok(r.all.includes("I cannot start the backfill without them"), "its message from FIXTURE_TURNS"); }
+
   // The source: no stage method of its own, copies only copy.
   const src = fs.readFileSync(path.join(MOD, "detail.js"), "utf8");
   A.ok(!/^ {2}(async )?stage\(/m.test(src), "detail.js defines no stage method (Reader's is the one door)");
   A.ok(!src.includes("stageIntoPrompt(") && !src.includes("stageMessage("), "detail.js never calls nav.js's paste itself");
   A.ok(!fs.readFileSync(path.join(MOD, "views.js"), "utf8").includes("terminal.paste"), "views.js runs nothing");
 
-  console.log(`OK: detail, ${checks} checks (props, spec, passage, verbatim, close rules, kept Conclude, words, fixtures, main.js, views, the dialog in every demo case and its flows, the multi-line answer box and ⌘Enter, next and previous, its links, the archive (loadArchive over real files, the CLOSED line and rows, the read-only dialog and Reopen; the review's: a slow writer, archived while open, a bounded read and its retry, a herdr: session's folder)${DTS ? "; element methods checked against gpui-kit.d.ts" : "; gpui-kit.d.ts not found: element methods unchecked"}${stubs.length ? `; stub ${stubs.join(" and ")} (Builder A's, not in the mod yet)` : ""}), 0 failure(s)`);
+  console.log(`OK: detail, ${checks} checks (props, spec, passage, verbatim, close rules, kept Conclude, words, fixtures, main.js, views, the dialog in every demo case and its flows, the multi-line answer box and ⌘Enter, next and previous, its links, the archive (loadArchive over real files, the CLOSED line and rows, the read-only dialog and Reopen; the review's: a slow writer, archived while open, a bounded read and its retry, a herdr: session's folder); cold sessions (the demo's, Reader over real files, faults, the fallback clone, the panel's menu and views, the live shape across store.js's freeze, the dialog)${DTS ? "; element methods checked against gpui-kit.d.ts" : "; gpui-kit.d.ts not found: element methods unchecked"}${stubs.length ? `; stub ${stubs.join(" and ")} (Builder A's, not in the mod yet)` : ""}), 0 failure(s)`);
 } catch (e) {
   console.log(String(e?.stack ?? e).split("\n").slice(0, 8).join("\n"));
   console.log(`FAIL: detail, after ${checks} checks${stubs.length ? ` (stub ${stubs.join(" and ")})` : ""}`);

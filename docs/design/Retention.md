@@ -2,7 +2,9 @@
 
 Date: 2026-11-19. Status: Phase 1 built the same day by three builders working in parallel against one
 contract, integrated in the main tree on top of commit c1c7775, uncommitted; the offline suites pass;
-the live check (8.3) is pending. Phase 2 (cold files for idle sessions, 10) is designed and not built.
+the live check (8.3) is pending. Phase 2 (cold sessions: an idle session's items and turn records in a file
+of its own, 10) built the same day by four builders against a second contract and integrated on top of
+Phase 1, uncommitted; the offline suites pass; its live check (10.12) is pending.
 An outside review's fixes of the same day are folded in as built behaviour. Builds on `Herdr ledger mod design.md`
 (Phases 1 to 3, the store and the writer), `Detail.md` (the list and the dialog), and the build notes
 in `docs/build-notes/` (`BUILD-NOTES-mod.md` for the writer, `BUILD-NOTES-detail.md` 17 for the reading
@@ -39,6 +41,7 @@ The maintainer's words, 2026-11-19: "now scope the retention work for the store"
 | Settings | One row, "Closed items stay in the list", 1 to 30 days | 6.4 |
 | Old configs | Existing installs hold 14 (the old default was written into every new config.json): the installer moves it to 3 once, recorded in install-state | 7.2 |
 | Doctor | `--check` reports the store against the cap and the threshold, the values, the last run, the archive and the copy; 14 not moved is a problem | 7.3 |
+| Phase 2: cold sessions | A session idle more than `retention.coldDays` (7) moves its items and turn records to `cold/<safe sid>.<ms>-<rand6>.json`, its record staying as a stub with its counts; it comes back before any event of it applies; showing it reads the file | 10 |
 
 ## 1. Why
 
@@ -572,17 +575,540 @@ file in Herdr (the typings say so; `writeNew` relies on it); that `fs.readFile` 
 - The demo's first archive file has Ask 17 dismissed 5 days ago, younger than the 7-day floor would
   archive; the newer file's line wins, so nothing shows it.
 
-## 10. Phase 2, planned
 
-Not built. Cold files for sessions idle a week: a session nobody has touched for that long leaves
-`store.json` whole (its items, open ones included, its turn records and its branches) for a file of its
-own, and comes back when it is shown or an event is written for it. That reaches what Phase 1 cannot:
-open items of old sessions.
+## 10. Phase 2: cold sessions
 
-What Phase 1 provides for it: one guarded run per generation (`house`, `houseTry`), with the trigger
-computed once in `houseKick`, so Phase 2's steps can follow Phase 1's on the tick; `spool.js` `writeNew`,
-the create-only write with read-back; one `safeName` for every folder named after a session; `retention`
-as a nested object both merges fill in; `restore` among the own events; `applySlim` keeping `stopAt`,
-`asks.at` and `retry.at` (the idle clock) and no removal or restore setting an `updatedAt` it does not
-otherwise change; `loadArchive` leaving out the ids `viewStore()` holds, so items merged back from a cold
-file count as in the store; and `d.retention.v === 1` set only once the first run has finished.
+Built 2026-11-19, the same day as Phase 1, by four builders working in parallel against one contract (A
+the store, B the writer and the spool, C the reading copies, D the Python readers, the installer and the
+doctor), integrated on top of Phase 1, uncommitted; the offline suites pass; the live check (10.12) is
+pending. The build notes are `BUILD-NOTES-mod.md` 20 (the store and the writer) and
+`BUILD-NOTES-detail.md` 18 (the reading copies).
+
+Phase 1 cannot reach open items. A session nobody has touched for a week still carries its open asks
+and its turn records in every save. Phase 2 moves such a session's items and turn records into a file of
+its own, keeps the session's record (with its counts) in the store, and brings the session back the
+moment anything happens to it. Showing it does not bring it back: the reading copies read its file.
+
+| Topic | Decision | Section |
+|---|---|---|
+| What goes cold | A session idle more than `retention.coldDays` (default 7; 0 = never, and every cold session comes back) that holds items or turn records | 10.2 |
+| What moves, what stays | Its items and turn records move; its record stays whole as the stub, plus `cold: {file, at, n, fault?}`; pins, branches, terminals, `nextHandle` and Phase 1's `archived` stay | 10.1 |
+| Open blocking asks | Do not keep a session warm: it goes cold, its counts kept on the stub and shown (◆ in the session menu, the chip) | 10.2 |
+| The file | `cold/<safe sid>.<ms>-<rand6>.json`, one JSON document, written once (create-only, read back) before the store names it; never rewritten | 10.3, 10.4 |
+| Back | Before a pass applies an event that needs the session, the writer reads the file and puts everything back, the store's copy winning; showing a cold session reads its file and does not thaw it | 10.5 |
+| A file that cannot be read | The session is faulted; its events are held in `cold/held/<safe sid>/` until Try again works, the person uses it without its older items, or forgets it | 10.6 |
+| Deleting files | Only the writer's hourly sweep, only a file provably redundant for the `store.json` on disk: by name, one the session's record lists as thawed (an hour on) or a forgotten session's (a day on); any other only after a read shows the store holds all of it (a day on). Anything else stays for good | 10.8 |
+| The list | OLDER SESSIONS (N) folded at the bottom of the session menu; a dim "older" pill; "Reading…" then the usual lanes | 10.9 |
+| Settings | "Idle sessions move out of store.json", 0 ("never") to 60 days | 10.9 |
+| Rollback | `./install.sh --thaw-all` first; `store.json` stays `v: 1` | 10.11 |
+
+### 10.1 What goes cold, what stays
+
+| Store part | Phase 2 | Why |
+|---|---|---|
+| The session's items | move, whole, in `itemsOf(sid)` order | the bulk |
+| `turns[sid]` | move, whole (at most 12 records, slimmed by Phase 1) | read only for that session |
+| `sessions[sid]` | stays whole as the stub, plus `cold`, `touchedAt`, `thawedAt`, `coldLost` | twenty-odd places read it (the menu, the header, the capture box, the MCP server, Resume, the pins, Forget, `depthOf`); kept whole, none of them changes and an older build round-trips it |
+| `pins`, `branches`, `terminals` | stay | pins are permanent and searched in memory; branches are cross-session; a cold session keeps its mapping |
+| `forgotten`, `ingested`, `diag`, `houseAt`, `retention` | stay | not per session |
+| `archive/` (Phase 1) | untouched | `session.archived` stays on the stub, so `archived (N) · show` works on a cold session |
+
+The stub's fields:
+
+```
+s.cold = { file, at, n: { q, qNew, blocking, needed, optional, promoted, answered, closed, items, turns },
+           fault?: { at, error, tries, held } }     // only while the writer cannot read the file
+s.touchedAt   // the idle clock carried: set at the freeze (the clock it had), by every event of a warm
+              // session (pin ops and `seen` aside), by a thaw and by a reset
+s.thawedAt    // set by a thaw and by a reset
+s.coldThawed  // [{file, at}]: the files this record's thaws read back (the newest 8), the sweep's proof (10.8)
+s.coldLost    // {file, at, frozenAt, n, error}: set by cold_reset ("Use without its older items")
+```
+
+`n` counts by level, so every threshold is computed from it (`store.js` `countsOf`): `q` open parked
+questions, `qNew` those created at or after the last prompt (the chip's "collecting"), `blocking` open
+blocking asks (promoted or not), `needed` and `optional` open asks of those levels not promoted,
+`promoted` open promoted asks below blocking, `answered`, `closed`, and the totals `items` and `turns`.
+`countsOf` and `chips()` read the stub's `n` for a cold session that is not merged; `chips()` before and
+after a freeze are equal apart from `o` (how the asks arrived).
+
+### 10.2 What goes cold
+
+**The idle clock** (`store.js` `touchedAt(sid)`) is the latest of the record's `touchedAt`, `updatedAt`,
+`thawedAt`, `promptAt`, `lastStopAt`, `resume.at`, `resume.resumedAt` and `lastClear.at`; every item's
+`updatedAt`; every turn record's `stopAt`, `asks.at` and `retry.at` (Phase 1's slimming keeps all three).
+It does not read `seenAt`: a session only looked at is not in use, and the panel posts `seen` whenever it
+shows a surfaced session (a cold session's menu row said "idle 1 min" after a look, and a session shown
+every day never went cold). For the same reason an act `seen` does not move `touchedAt`. At the freeze
+the stub keeps the clock it had in `touchedAt`, because its items and turn records, which the clock read,
+leave with the file. A session is idle when `now - touchedAt(sid) > coldDays × 86 400 000`.
+
+**Never cold** (the store's rules, `freezeBlocker`): `coldDays` 0, or Phase 1's first run not finished
+(`d.retention.v !== 1`); a session not recorded, forgotten or already cold; one with neither items nor turn
+records (nothing to move, no file); an id that makes no file name of its own (empty, beginning with `.`, or a
+safe name another recorded or forgotten session shares); an item `deferred` (to the next session or to a time:
+both wake by scanning warm items); an item `rejoin_pending` or with `rejoin`; a branch launching,
+launched, running or concluded on either side; a resume launching or launched; a turn whose extraction
+re-run is requested or running.
+
+**Never cold** (the writer's rules, `writer.js` `canFreeze`, asked at the plan and again at the commit): an
+agent in a live pane mapped to the session (`terminals()` lists its terminal live and the store maps that
+terminal to it); the open detail dialog shows it (`shared("ledgr.detail").open.session`: its typed answer
+lives in that copy); the running pass names it (`passSids`); it is to be brought back (`wantThaw`);
+`retention.coldDays` is 0 in the config the writer holds.
+
+**Not a reason to stay warm**: open blocking asks (the maintainer's default: the counts are kept and
+shown); a draft (it is part of the item and goes into the file); answered items; being shown or held in
+the panel (the writer cannot see that, and nothing is lost: the panel reads the file).
+
+### 10.3 The files
+
+The cold file: `ledgr-data/cold/<safeName(sid)>.<ms>-<rand6>.json` (`config.js` `coldName`, `COLD_NAME =
+/^(.+)\.(\d{13})-([0-9a-z]{6})\.json$/`; `ms` is the record's `at`), one JSON document with no
+indentation:
+
+```json
+{"ledgr": "ledgr-cold", "v": 1, "sessionId": "<sid>", "at": 1795100000000,
+ "session": {"...": "the record as it was at the freeze, for repair only"},
+ "items": ["...the session's items exactly as in the store, in itemsOf(sid) order..."],
+ "turns": {"<turn>": {"...": "the turn record exactly as in the store"}},
+ "n": {"...": "the counts the stub carries"}}
+```
+
+Every reader checks a file the same way before using any of it (`store.js` `coldRecordError`; Python's
+`ledgr_extract.cold_record_error` word for word): a JSON object, `ledgr` `"ledgr-cold"`, `v` 1,
+`sessionId` the session's, an item list whose every item is an object of that session with an id (never
+`__proto__`), turn records a map of objects. A file of 1 MiB or less is written with
+`writeTextFile(path, text, null)` (create-only); a larger one with `fs.writeFile` to its new name after a
+listing shows the name free, and read back with `fs.readFile`; nothing names a file until its read-back
+matched. Every reader reads with `fs.readFile` or Python's `open` (no cap).
+
+A held event: `ledgr-data/cold/held/<safeName(sid)>/<the spool file's own name>`, the spool file's exact
+text. The name keeps its time prefix, so a replay runs in name order. The hooks' 7-day prune of the spool
+never reaches it; only a replay that applied it deletes it.
+
+`snapshot.json` gains `cold: {"<sid>": {"file": "<name>", "fault": "<the writer's error>" | null}}`; a
+cold session's items are not in its `items`. Readers that do not know the map ignore it.
+
+### 10.4 The freeze, and what is on disk after a run given up
+
+`writer.js` `freezeRun`, from the tick's housekeeping only (`houseKick(cx, {tick: true})`, `coldHouse`:
+the held folders listed, the freeze, then the sweep), at most once an hour (`COLD_EVERY_MS`; in memory, so
+the first tick after a relaunch runs one), after Phase 1's run when both are due, never inside a start or
+a pass, never holding a pass back. Skipped while starting, at `coldDays` 0, before Phase 1's first run,
+and on a `config.json` not read as it is (its defaults could freeze where the person said never).
+
+1. The plan, synchronously: `store.js` `planFreeze(days, now, {canFreeze, max: COLD_RUN_MAX})`, oldest idle
+   first, each entry `{sid, record, sig}` (the record made of copies; `sig` the items and turn records as
+   one text). It changes nothing.
+2. `cold/` made (bounded, step `freeze: making cold/`).
+3. Per planned session, none begun after `COLD_RUN_MS` (60 s): its name (`coldName` with a fresh rand6), the
+   record's text written through `spool.js` `writeNew` (create-only, read back, a file not confirmed
+   removed: `drop`), step `freeze <sid8>`.
+4. `config.json` read again (step `freeze: config.json`): a `coldDays` 0 written meanwhile (Settings
+   "never", `./install.sh --thaw-all`) makes `canFreeze` refuse every session.
+5. Synchronously, still this generation's: `store.js` `commitFreeze(written, now, {canFreeze})` checks each
+   session again (recorded, warm, the store's and the writer's rules, its record, items, turn records and
+   counts exactly as planned, the file named for it with the record's `at`) and only then, in one step,
+   carries the idle clock onto the stub, deletes the items and `d.turns[sid]` and sets `cold`. The files
+   not committed are unlinked at once (bounded; a failure is left to the sweep).
+6. One save; one `writer.log` line (10.13).
+
+On disk after a run given up at any await (the watchdog, a takeover): nothing names a file before step 5,
+so a file that landed, or lands late, is an unreferenced orphan; after step 5 the commit lives in a store
+the restart does not use, and `store.json` on disk still has the sessions warm. The orphan stays until the
+sweep has read it, a day on, and found every item of it in the store, the session's named file or its
+archive (10.8). A save that fails leaves memory ahead of disk; the next save writes the
+stubs. A drain that applied an event between the plan and the commit changed that session's `sig`, so it
+stays warm and its file is removed.
+
+### 10.5 Back in a pass, and what is on disk after a pass given up
+
+**Which events need a session warm** (`store.js` `coldOf(ev)`, `coldNeeded(events)`): an event needs its
+own session (`session_id`, else `session`, else `request.anchor.sessionId`) when that session is cold;
+`branch_started` also its `parent_session_id`, `pins_asked` also its `for_session`. None for the four pin
+events, `forget` and `cold_reset` (`COLD_FREE`), for an act `seen` (it marks the stub's chip seen and
+nothing else: showing a cold session posts it and must not thaw it), for an event of a forgotten session,
+and for an event already in `ingested`. `apply()` throws `ColdError` rather than apply an event to a cold
+session (a `coldNeeded` gap then lands in `spool/failed`, kept and visible); `test_store.mjs` enumerates
+every `on_*` handler against this table, so a new handler without a decision fails it. A `cold_retry` never
+throws: one whose read failed is recorded and dropped.
+
+**The pass** (`applyBatch`, then `applyPass`):
+
+1. `passSids` = every session the batch names, warm or cold (`canFreeze` keeps them warm while the pass
+   runs).
+2. The held folders whose session is not faulted (back, reset, forgotten) are read (`replayFolders`,
+   `heldIn`): their events join the pass ahead of the batch's own, in name order; a held event whose spool
+   file is in the batch too is one event, applied once.
+3. `coldPhase`: every cold session the events need, plus `wantThaw` in the first round, at most
+   `COLD_THAW_MAX` (50) per pass, is read (`readCold`, step `apply: cold <sid8>`). A faulted session is read
+   only when its retry is due (`COLD_RETRY_MS`, 10 min) or the batch carries its `cold_retry`. The result:
+   - **transient** (the read, or the listing that tells missing from unreadable, got no answer within the
+     save limit): when an event needs the session, the pass returns false and every spool file stays; the
+     third such read in a row for the session (`COLD_TIMEOUT_MAX`) is an error instead, so a file that never
+     answers cannot hold every session's events; when only wanted, the pass goes on and reads no other
+     wanted session (the tick tries again);
+   - **error** (any other read error; unparseable; wrong format, version or session): `store.js`
+     `coldFault`; the session is faulted (its events held, every other session's applied in the same pass),
+     and `writer.log` says so once per error. A listing words it: "cold/<file> is missing" only when the
+     listing shows it is not there, "cold/<file> is there but could not be read (<why>)" when it is (no
+     permission, an I/O error), so the words never invite "Use without its older items" for a file that is
+     there; the tick's retry and Try again read it again;
+   - **record**: `store.js` `thaw(sid, record, file, now)` (the store's items and turn records win over the
+     file's; a branch mark whose branch is gone dropped; `nextHandle` raised past the file's and every
+     handle the session holds, and an item of the file whose handle the store's own items of the session
+     hold renumbered past them, its own kept as `handleWas`; `cold` deleted; `thawedAt = touchedAt = now`;
+     the file added to the record's `coldThawed`), then its held events join.
+4. Each event that needs a faulted session is held (`holdEvent`, step `apply: hold <name>`): the spool
+   file's text copied under its own name, create-only, read back (a copy already there with the same text
+   counts; a broken one never confirmed is replaced once). A copy that cannot be made: the pass returns
+   false and the spool keeps the file. A held event leaves the apply list, the stub's `fault.held` grows by
+   one, and the reader still unlinks the spool file after the save (the held copy is its keeper now).
+5. With no await between this check and the apply loop, no event may still need a cold session; a session
+   frozen during the awaits (which `passSids` prevents) or one past `COLD_THAW_MAX` sends the pass round
+   again, at most twice, else it returns false and pokes the next pass. Phase 1's `restore` gets its
+   archived record here, in each round (`attachRestores`).
+6. The apply loop and the save as before. `snapshot.json` follows in the save; when the pass brought a
+   session back and the snapshot write failed, it is tried once more.
+7. After the save (`coldDone`): the replayed held copies are unlinked (a replayed event that threw goes to
+   `spool/failed` first, through the reader's quarantine, with its held path); emptied held folders are
+   removed; the sessions brought back leave `wantThaw`; a pass is poked when more is wanted.
+
+The thaw never deletes the cold file: the sweep does, an hour later, so the `snapshot.json` this save
+writes, and a reading copy mid-read, never point at a missing file.
+
+On disk after a pass given up at any await: its thaw lived only in memory of an old generation; the
+restart reads `store.json`, where the stub still names the file, and thaws again at the next event. A held
+copy made before the save stays beside its spool file: the next pass finds the same text, counts it as
+held, and the spool file goes after that pass's save (or it replays and applies once; `ingested` skips a
+second apply). Held events are never recorded in `ingested` before they apply, so the cap of 1,000 cannot
+evict anything that matters.
+
+### 10.6 Faulted, held, reset: what the person sees
+
+A session is **faulted** when the writer could not read its file (`s.cold.fault = {at, error, tries,
+held}`). Its events, and any event that also needs it, are **held**: they leave the spool, so nothing
+waits and the watchdog sees no stall. The tick tries the file again every 10 minutes. What follows is the
+person's choice:
+
+- **Try again** (`cold_retry {session_id, file}`, from the panel's button, `ledgr.cold-retry`, or Enter on
+  its line): the writer reads the file at once; once it can, the session comes back and its held events
+  replay in name order, once.
+- **Use without its older items** (`cold_reset {session_id, file}`, two clicks, `ledgr.cold-reset` twice):
+  only on a faulted stub that still names that file. `s.coldLost = {file, at, frozenAt, n, error}`, `cold`
+  deleted; the session is warm and empty of what the file held (its `nextHandle`, pins, branches and
+  `archived` stay, so no handle is handed out twice), and its held events replay into it. The file stays
+  on disk: a record names it, so the sweep never deletes it.
+- **Forget** (two clicks): the stub and its descendants go; no file is read, so a lost file cannot stop
+  it; the held events replay and are dropped as forgotten; the file goes a day later (10.8).
+
+Where it shows:
+
+- The panel: the session's own view says "The ledgr writer cannot read this session's older items
+  (ledgr-data/cold/<file>: <why>). N new events kept: they apply once the file can be read, or once you go
+  on without its older items or forget the session.", with the three actions; when another file of the
+  session is in `cold/`, it adds "Another file of this session is in ledgr-data/cold/ (<name>): it may hold
+  what is missing; ./install.sh --check says what it holds, and Use without its older items leaves it
+  there." (`Reader.coldOthers`); its menu row says "can't read"; the status line names it ("ledgr cannot read the older items of <session> (N new events kept):
+  show it from OLDER SESSIONS for Try again"). After a reset, a dim line above its lanes says what was lost
+  and when the person chose to go on without it.
+- The dialog on one of its items: the same words (the other files too) and Try again, never "Gone".
+- The MCP server: `declare_asks` and `resolve_asks` stay `ok`, send their events (the writer holds them),
+  add `cold: {file, fault, error}` and `writer: "held"` (only when it finds its event's copy in
+  `cold/held/`), and two lines: "ledgr cannot read this session's earlier items (cold/<file>: <why>); what
+  you sent is kept and applied once that is fixed (the user's panel offers Try again)." and "Tell the user
+  in your reply, and list these items there."; `open_asks` says which asks it could not list
+  (`bin/mcp/README.md`, Cold sessions).
+- The doctor (`./install.sh --check`): each faulted session as a problem, with its error, its tries, its
+  held events, what to do, and any other file of the session on disk.
+
+A file this reading copy alone cannot read (the writer has had no reason to try yet) shows its error,
+"Nothing is lost", and Try again, which reads it here again and posts nothing.
+
+### 10.7 The tick
+
+`coldTick` runs before the tick's drain and before a start's first drain, and pokes a pass
+(`SpoolReader.poke`: a pass even with an empty spool) when: `coldDays` is 0 and a session not faulted is
+cold (all of them into `wantThaw`); a faulted session's retry is due; a held folder's session is not
+faulted (back, reset, forgotten: it replays); the store holds a "mixed" session (cold, with items or turn
+records beside the stub that an older build wrote: `store.js` `mixedCold`; brought back, the store's copy
+winning). `applyConfig` with `coldDays` 0 pokes at once, so Settings "never" brings every session back
+within a second through the config watch, else at the next tick.
+
+### 10.8 The sweep
+
+A cold file is deleted only when it is provably redundant. That a record no longer names it is not proof:
+`store.json` can go back in time. When the writer cannot parse `store.json` at a start, it keeps the text as
+`store.corrupt-<ms>.json` and starts empty; a person can put back an older copy by hand; and a session used
+without its older items gives up the file its stub named while another of its files may be on disk. In each
+case a session can come back warm with none of a file's items, and that file then holds the only copy.
+
+`writer.js` `coldSweep`, after the freeze in the hourly cold run: `cold/` listed; `store.json` read again
+(bounded): when it is not the text this writer last read or wrote (replaced by hand while Herdr runs),
+nothing is saved or removed that run, and the note and `writer.log` say so; when memory is ahead of it (a thaw
+or a freeze not saved, or the chips' diagnostics `publish()` adds after every save) it saves first, then
+decides only if memory is exactly the text written; otherwise no sweep that run.
+Never deleted: a file a record names (`cold.file` or `coldLost.file`), a name that is not a cold file's, one
+whose safe name matches no session or more than one (recorded or forgotten), anything in `cold/held/`. Then:
+
+1. **By name** (`store.js` `coldGarbage`, synchronously): a file the session's own record lists as thawed
+   (`coldThawed`), an hour (`COLD_GRACE_MS`) after the thaw: its items came back into this store's history,
+   so a store that holds the record holds them, the store's own copies having won; and a file of a session
+   this store forgot, a day (`COLD_KEEP_MS`) after the Forget.
+2. **By content**, at most `COLD_CHECK_MAX` (4) files a run, oldest first (`store.js` `coldUnproven`): any other
+   unnamed file of one recorded session that is not faulted (a faulted session keeps every file: one may be
+   what repairs it), written more than a day ago. The writer reads it (`readCold`, bounded, step `cold sweep:
+   reading <name>`) and compares it with `store.json` as read from disk when the run decided (never the live
+   store), with the session's named cold file (read too) and with its Phase 1 archive files (`archiveCopies`:
+   items lines, cut turn records and moved heads, each line only when it names this session). The version is
+   the proof (`store.js` `coldLacks`): an item counts as held only when a copy of it, of this session, is
+   identical to the file's, never a later one (a store put back from a backup and touched once, Done or
+   Promote, is stamped later while holding less: the draft and the resolution the file kept); a turn record only when an identical one is in
+   the store or the turns archive, or the store's is the file's without its head and the archive holds that
+   head. Nothing lacking: deleted. Anything lacking, or a file that cannot be read or is not a cold record:
+   kept for good. `writer.log` says so once
+   ("cold sweep: cold/<file> holds N item(s) and M turn record(s) store.json lacks (session <sid8>): kept, never
+   deleted; …"), the writer does not read it again while it runs, and `./install.sh --check` lists it as a
+   problem with the session, the file and what `store.json` lacks.
+
+After the deletions, `trimThawed` drops a thawed entry once its file is gone or a day after the thaw (a file
+still there then is the read's to prove). A file no record names is never named again (a freeze makes a new
+name), and the start's sweep of `.large` copies rules out an older `store.json` coming back through a late
+move.
+
+**Recoverable files: bringing their items back.** Nothing does it on its own; it is a manual step, and it uses
+the path an older build's re-upgrade already takes. With Herdr quit (no writer runs), back up
+`ledgr-data/store.json`, then, in the record of the session the doctor names, add
+`"cold": {"file": "<the file's name>", "at": <the 13 digits in its name>, "n": {}}`. Do this only for a warm
+session (a cold one names its own file: let an event bring it back first); for a session the store no longer
+has, add a record `"<sid>": {"sessionId": "<sid>", "turn": 0, "cold": {…}}`. At the next start the writer
+reads the file and brings it back like any cold session, the store's own items and turn records winning over
+the file's (a session holding items now comes back at once as a "mixed" one; one holding none at its next
+event, or at once with Settings "never"). A session that came back after the loss counts its handles from A1
+again; an item of the file whose handle the session's own items hold takes the next free one, its own kept
+as `handleWas`, so no handle is held twice. The file then follows the thawed rule
+above.
+
+### 10.9 The reading copies
+
+Details in `BUILD-NOTES-detail.md` 18 and `Detail.md`. The panel lists cold sessions under a folded
+**OLDER SESSIONS (N)** at the bottom of the session menu, out of the agent groups and ENDED (open while the
+shown session is one of them, then as the person clicks it; `ledgr.older-sessions`): each row with its
+pill, its name, "N open" and "◆ b" from the stub's counts, and a dim "idle 9 d", or "can't read" when the
+writer cannot read its file. Shown, a cold session's file is read (`Reader.wantCold`: from a timer,
+bounded by 10 s, the 12 most recently used records kept, a failure tried again after 30 s) and merged
+into the copy's own store (`store.js` `mergeCold`: copies beside the stub, `cold` unchanged, never in
+`toText()` or `snapshot()`; never into the fallback writer's store, which the panel then shows as a clone
+of the text the writer saved). Meanwhile one line: "Reading this session's items (idle 9 days; kept in
+ledgr-data/cold/)… 3 open, 1 blocking." Merged, its lanes show as usual, its OLDER THAN A DAY fold open on
+its own (it stays open a day after the session comes back, so the first act's thaw folds nothing away);
+the header carries a dim "older" pill whose tooltip names the file. A command naming one of its items by
+handle (`ledgr.open:A3` and the rest) waits for the read and then runs. The dialog on an item of a cold
+session says "Reading this session's items…", never Gone. The first act on any of its items posts its
+event as usual, and the writer brings the session back. Settings: one row, "Idle sessions move out of
+store.json", 0 ("never") to 60 days, path `retention.coldDays`, written through `Reader.saveConfig`
+(never a spool event). The demo has one cold session, so `ledgr.demo` shows OLDER SESSIONS (1).
+
+### 10.10 The Python readers, the installer and the doctor
+
+`bin/lib/ledgr_extract.session_items(sid)` is how every Python reader (the extractor's `recorded_asks` and
+`tool_asks`, every MCP tool) reads a session's items: from `snapshot.json`, or, when its `cold` map names
+the session, from the file, filtered as `store.js` `snapshot()` filters (`snapshot_copy`: open, answered,
+deferred, `rejoin_pending`, dismissed within 7 days; a quote over 200 UTF-16 units, `draft` and `pins`
+dropped); a read that fails reads `snapshot.json` once more first. So a resumed cold session's agent sees
+the same `open_asks` as a warm one, with no wait. `setup/ledgr_setup.py`: `--check`'s `cold_report` (the
+store's size, "N sessions cold in ledgr-data/cold/ (size, files; K thawed, forgotten or redundant copies
+the writer deletes in time); retention.coldDays D", the held events; problems: each faulted session with
+what to do and its other files on disk, a stub naming a missing file, files naming sessions the store does
+not know, every other unnamed file the writer will never delete (it holds what `store.json` lacks, or cannot
+be read: the doctor reads it as the writer does, `cold_file`, `cold_lacks`, `archive_ids`), held events of a
+session that is not faulted waiting over an hour while Herdr runs), and `./install.sh --thaw-all` (10.11).
+
+### 10.11 Rollback and versioning
+
+`store.json` keeps `v: 1`. `Store.fromText` throws on any other `v`, and an older writer then keeps the
+text aside as `store.corrupt-<ms>.json` and starts empty, so its first save would replace the ledger with
+an empty one: a version an older build sets aside is no marker. What an older build does with cold
+sessions: it keeps the stubs (unknown fields survive), shows them with no items, may add new items or
+turn records beside a stub (new ids, handles from `nextHandle`), and its Forget removes a stub (the sweep's
+rule a then deletes the file). Nothing in a cold file is lost: on the re-upgrade the writer finds the
+mixed sessions and brings them back, the store's copy winning.
+
+The procedure, before installing a build older than Phase 2:
+
+1. `./install.sh --thaw-all` (with `--yes` when there is no terminal). It backs up `config.json`, writes
+   `retention.coldDays: 0` and polls `store.json` every second for up to 120 s until no session is cold:
+   "no cold sessions". The writer must be running (Herdr open, the ledgr host block or the panel shown). It
+   says so only once the writer shows it has taken the 0 (its claim in Herdr's `shared.json` renewed after the
+   write and out of housekeeping, or no writer alive) and it has seen none cold twice, two seconds apart: a
+   freeze whose own read of `config.json` came just before the write still commits and saves.
+2. A session it lists as unable to come back (faulted) needs Try again (after putting its file back), Use
+   without its older items, or Forget in the panel first; then run `--thaw-all` again.
+3. Only then install the older build. Files left in `cold/` are inert for it.
+4. After upgrading again, set the days in Settings: `--thaw-all` leaves `retention.coldDays` at 0.
+
+What happens if the first step is skipped (replayed on the Phase 1 `store.js`, 2026-11-19): nothing is lost,
+handles stay unique and turn records merge on the re-upgrade, but two things go wrong meanwhile. An answer typed
+to a cold ask in the older build (`[A1]` in the prompt, or the answer sheet) finds no item there and is dropped
+without a word. And an ask the agent raises again in the older build is a new item beside the stub, so after
+the re-upgrade it sits as a duplicate beside the original from the file.
+
+### 10.12 Tests, the dry run and the live check
+
+The offline suites: `test_store.mjs` (the freeze's rules one by one, the idle clock field by field and its
+carry at the freeze, `seen` off the clock, `commitFreeze` refusing every change, `coldNeeded` against every
+handler, the round trip, `mergeCold`, faults and resets, `coldGarbage`, the live-shape fixture
+`fixture_cold.mjs`: 0.81 MB to 0.61 MB, 20 sessions, 219 KB in files, the largest 38.8 KB);
+`test_writer.mjs` sections 30 to 52 (the writer's runs, thaws, holds, replays, faults, the sweep in both
+"memory ahead of disk" orders, takeovers and given-up runs at each await, a 1.2 MiB file; 52, the review's
+findings: a corrupt store's restart, a store put back from an older copy and a reset each keeping the only
+copy, with a self-mutation that switches the content test off; an orphan proven redundant through the store
+and the archive; dot-led ids; errors other than "not found" holding nothing; one wanted read a pass; the two
+guards the review found masked); `test_list.mjs`,
+`test_detail.mjs`, `test_settings.mjs` (the reading copies); `test_mcp.py` and `setup/tests`;
+`test_no_keystrokes.py` rule 15 (only `writer.js` and `spool.js` write, unlink, make or remove anything
+under `cold/`; the reading copies and the Python readers only read a cold file); and
+`tests/test_seams.mjs`, across the seams: the writer's freeze of the live-shape fixture listed by the
+panel under OLDER SESSIONS with the counts each had warm, a session read from exactly the file the writer
+wrote, the panel's Done thawing it at the writer, the panel then showing it warm with the same rows and
+handles; a lost file holding the next event byte for byte, the MCP server's `declare_asks` and
+`open_asks` and the doctor saying so against the real files, the panel's Try again replaying the held
+events in name order, once; a session with archived items going cold and its Reopen from the archive
+thawing it first, the archived count kept; `retention.coldDays` 0 through the settings dialog's writer
+during and after a run; Python's `snapshot_copy`, `cold_record_error` and the doctor's `cold_days_of`
+equal to `store.js` and `config.js` on shared fixtures, and `session_items` on the writer's real files equal
+to what `snapshot()` would hold warm; a corrupt store's restart through the real writer, the file kept and
+listed by the doctor; `./install.sh --thaw-all` against the real writer and its claim in `shared.json`; and,
+when `LEDGR_OLD_BUILD` names a Phase 1 build's modules, that build taking a store with stubs and the
+re-upgrade merging it.
+
+The dry run on a copy of the live `store.json` and `config.json` (2026-11-19, offline, read-only on the
+live side, counts and sizes only), with the real `store.js`: the store had grown to 1.95 MB. Phase 1 at 3
+days: 1.01 MB (387 items archived, 485 turn records cut). Phase 2 at 7 days, a session whose terminal the
+store maps to it treated as live: 15 sessions cold, 0.84 MB, 181 KB in files, the largest 39.5 KB (34
+items, 12 turn records), none near 1 MiB, 4 with open blocking asks; with every mapped terminal treated as
+gone, 21 sessions and 0.78 MB (the live result lies between, by which terminals are live). Of the 30
+sessions idle over a week, 9 had nothing to move and 6 were mapped to a terminal; `freezeBlocker` refused
+none; nothing threw. Every session thawed back gave the store again item for item, turn record for turn
+record and handle for handle; the only differences were `thawedAt`, `touchedAt` and `coldThawed` on the 15 records
+(159 bytes each) and the key order of `d.items` and `d.turns` (what came back is at the end of each map).
+The live `config.json` still says `retention_days` 14 and Phase 1 has not run on the live store; at 14
+days the same run gives 1.49 MB after Phase 1 and 1.12 MB after Phase 2 (the largest file 95.5 KB), so the
+installer's move of 14 to 3 (7.2) is what brings the store under the cap.
+
+The live check, after the install (test items in throwaway sessions only):
+
+1. Phase 1's first run has finished (`d.retention.v` 1); the first tick after it runs the cold run:
+   `writer.log` says "cold: N session(s) moved out of store.json into cold/ (…)"; `cold/` holds one file
+   per such session; `store.json` is smaller; `snapshot.json` has the `cold` map; the claim showed
+   `housekeeping: freeze <sid8>` steps.
+2. `./install.sh --check`: the cold lines, no problem.
+3. The panel: OLDER SESSIONS (N) with counts and idle days; show one: "Reading…", then its lanes;
+   `store.json` still names it cold; the older pill; `ledgr.open:<handle>` on an unread one waits and
+   opens.
+4. Done on one of its items: `writer.log` "cold: 1 session(s) back from cold/ (…)", the session warm,
+   its rows and handles as before, its OLDER THAN A DAY fold open; an hour later the sweep removes its
+   file ("cold sweep: …").
+5. In a resumed cold session, `open_asks` lists its asks.
+6. The fault, in a throwaway session only: move its cold file aside, act on it: the panel's fault view,
+   the status line, `--check`'s problem; put it back, Try again: the held events apply once.
+7. Settings "Idle sessions move out of store.json": never brings every session back within a second;
+   set it to 7 again.
+8. `ledgr.demo`: OLDER SESSIONS (1), its session opens.
+9. `herdr-app status`: no mod errors.
+
+Not tried live: `writeTextFile(path, text, null)` refusing an existing file and `fs.readFile` and
+`fs.writeFile` past 1 MiB (both from the typings); `terminals()` naming live terminals as `canFreeze`
+reads them, and whether Herdr reuses terminal addresses; `shared("ledgr.detail").open` going stale after a
+dialog crash (it would keep one session warm, harmlessly).
+
+### 10.13 writer.log
+
+- `cold: N session(s) moved out of store.json into cold/ (F file(s), B bytes, the largest L); store.json
+  X -> Y characters`, with what changed meanwhile (kept warm, their files removed), what was left for
+  the next run (`COLD_RUN_MS`) and files not written.
+- `cold: <sid8>'s cold/<file> cannot be read (<why>); its events are kept in cold/held/<folder>/ until Try
+  again, Use without its older items, or Forget (tried again every 10 min)`: once per error.
+- `cold: N session(s) back from cold/ (<sid8>: I item(s), T turn record(s)[, Try again]; …); N held
+  event(s) replayed[ (k threw: spool/failed)]; N event(s) held for <sid8>`.
+- `cold sweep: N file(s) no session needs removed from cold/ (…)`.
+- `cold sweep: cold/<file> holds N item(s) and M turn record(s) store.json lacks (session <sid8>): kept, never
+  deleted; ./install.sh --check lists it, and Retention.md 10.8 says how to bring it back`, or `cold sweep:
+  cold/<file> could not be read (<why>): kept, never deleted`: once per file per writer.
+- `cold: cold/held/<folder>/<name> does not parse; kept there, not replayed`.
+
+### 10.14 Known limits
+
+- The gain is modest: on the contract's measurement the store went from about 0.86 MB after Phase 1 to
+  about 0.65 MB; on today's dry run from 1.01 MB to between 0.84 and 0.78 MB. Most of what stays is the
+  open asks of active sessions, those below the threshold above all. The next lever is not cold storage.
+- A faulted session's events wait for the person (Try again, Use without its older items, Forget); the
+  panel, the MCP server and the doctor all say so. `./install.sh --thaw-all` cannot finish while one is
+  faulted, and says what to do.
+- While a session's file cannot be read, the MCP server cannot link a repeat to the earlier ask it repeats:
+  `repeat_of` is noted as ignored; once the session is back, the writer still merges a repeat with the same
+  text, but a reworded one arrives as a new ask.
+- The stub's `fault.held` can be one short after a crash between a new hold and its save (the next pass
+  finds the copy already there and counts nothing); it is display only: the files are what replays.
+- A `snapshot.json` the writer could not write after a thaw (tried twice) still names the session cold:
+  the extractor and the MCP server read it from its file, which stays at least an hour, without what that
+  pass applied, until the next save; the MCP server then reports the event applied with handles pending,
+  never held.
+- An older build installed without `--thaw-all` shows cold sessions with no items, and its new items sit
+  beside the stubs until the re-upgrade merges them; nothing is lost.
+- Tier-3 `herdr:<t>` sessions: `track` skips a cold one, so status turns on its terminal are not counted
+  until an event brings it back.
+- `pinUseWords` says "used in Q3" instead of "sent in Q3 at turn N" for a question of a cold session.
+- Session records accumulate (about 800 B each with `cold`); finished branch records too. A roll-up is for
+  later.
+- Bringing every session back (`coldDays` 0) can put the store over 1 MiB again (`writeLarge`), by
+  design.
+- A `store.json` restored by hand from an old backup can name a file the sweep has deleted: the session is
+  then faulted and its events held; nothing new is lost.
+- A corrupt `store.json` at a start, or one put back from an older copy, leaves the cold sessions it lost in
+  files the sweep keeps for good ("recoverable"); their items come back only by the manual step of 10.8. A
+  session used without its older items keeps any other file of its own the same way.
+- Recoverable and unreadable files are read again by each writer once after it starts (at most four a run),
+  and never deleted. Because only an identical copy proves an item, an orphan of a freeze given up whose items
+  changed afterwards is one of them: kept for good, though it may only hold older versions.
+- A session looked at every day still goes cold (the clock does not read `seenAt`); showing it reads its
+  file.
+- In fallback mode, while a cold record is merged, the panel parses a clone of the writer's text whenever
+  that text changes.
+
+### 10.15 Where the build differs from the contract
+
+- The idle clock does not read `seenAt`, and an act `seen` neither thaws a session nor moves its clock
+  (the contract listed `seenAt` among the clock's fields).
+- `commitFreeze` carries the idle clock onto the stub; the contract did not, so a stub read only its own
+  record's times and counted idle days from too early.
+- The sweep's rule (c): a file whose session was thawed after it gets only the grace. As the contract
+  wrote it, a file older than a day whose session was just thawed matched the second half of the rule
+  (`touchedAt > ms` and the file older than `keepMs`) and would have been deleted at once.
+- The sweep saves first when memory is ahead of disk, then decides from the text written. As the contract
+  wrote it (skip unless memory equals disk), it would never have run: `publish()` adds the chips'
+  diagnostics to memory after every pass's save.
+- The third review (same day): an item is proved only by an identical copy, never a later `updatedAt`; the
+  cost, accepted, is that an orphan of a freeze given up whose items changed afterwards stays for good (the
+  doctor lists it, saying it may simply hold an older version of items the store still has).
+- The second review (same day): only a read with no answer is transient, and the third in a row for a session
+  faults it; any other read error faults the session with words that say the file is there; the sweep's proof
+  is the version of each item and turn record (an id or a turn number proves nothing, "older than the oldest
+  kept" neither), lines of another session prove nothing, and the sweep reads `store.json` again before it
+  saves or decides.
+- The sweep's rules as a whole (the outside review's blocker): the contract's rules (b) and (c) deleted a file
+  by name whenever no record named it and its session had moved on, which loses the only copy once
+  `store.json` has gone back in time. By name only a file the record lists as thawed (`coldThawed`, new) or a
+  forgotten session's goes; any other only after a read proves `store.json` holds all of it.
+- Only "not found" (confirmed by a listing) makes a file missing; any other read error is transient. A
+  wanted read that times out stops the pass's other wanted reads. An id whose safe name begins with "." is
+  never frozen; one frozen before is still read under its own name, and its held folder survives a restart.
+- `--thaw-all` waits for the writer's evidence and sees none cold twice before it says "no cold sessions".
+- The cold run is hourly (`COLD_EVERY_MS`), not every tick; `canFreeze` also refuses a session in
+  `wantThaw` and every session while `coldDays` is 0, and the freeze reads `config.json` again before its
+  commit.
+- The MCP server says `held` only when it finds its event's copy in `cold/held/`, never from a
+  `snapshot.json` that still names the session cold.
+- A handle command on a cold session not read yet waits for the read; the OLDER THAN A DAY fold stays open
+  a day after a thaw.

@@ -57,8 +57,9 @@ DEFAULT_CONFIG = {
                                       # this many days, then move to ledgr-data/archive/<sid>/ (still read
                                       # and reopened from the panel's Closed fold); a dismissed one never
                                       # before 7 days. The settings dialog writes it (1 to 30). Was 14
-    "retention": {"turns": 12},       # the mod's: turn records store.json keeps per session, the newest;
+    "retention": {"turns": 12,        # the mod's: turn records store.json keeps per session, the newest;
                                       # older ones go to an archive file (config.js, store.js planSlim)
+                  "coldDays": 7},     # days a session nobody touched stays in store.json; 0 = always (and the writer brings every moved session back)
 }
 
 

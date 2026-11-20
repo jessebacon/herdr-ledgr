@@ -5,7 +5,9 @@
 //     pixels), withScale (Herdr's theme left as it is), the default in config.js and ledgr_config.py;
 //   the rows: settings.js settingRows (order, labels, values), spaceRows (Herdr's spaces by name, then an
 //     off id Herdr no longer has), editFor (each row's change to config.json, bad values refused; Open files
-//     with, links.editor, 2026-11-10: the presets, a command of your own, a shell or a terminal refused);
+//     with, links.editor, 2026-11-10: the presets, a command of your own, a shell or a terminal refused; Idle
+//     sessions move out of store.json, retention.coldDays, retention Phase 2: 0 "never" to 60, retention.turns
+//     kept, its words, its − and +);
 //   the one writer: reader.js editConfig (a missing file, unknown keys kept, a stale file refused and
 //     nothing written, invalid JSON, another failure) and Reader saveConfig (queued clicks, a stale write
 //     read again and said);
@@ -235,14 +237,27 @@ try {
   A.match(fs.readFileSync(path.join(MOD, "bin/lib/ledgr_config.py"), "utf8"), /"links": \{"editor": "open"\}/, "ledgr_config.py mirrors links.editor: open");
 
   // ── the rows ───────────────────────────────────────────────────────────
-  A.deepEqual(S.SETTING_KEYS, ["textScale", "threshold", "handoff", "pasteIntoPrompt", "animations", "foldAsksWhileWorking", "openPanelOnAsks", "retentionDays", "maxDepth", "editor", "spaces"], "the rows in the dialog's order (Closed items stay in the list with the list's rows, 2026-11-19)");
+  A.deepEqual(S.SETTING_KEYS, ["textScale", "threshold", "handoff", "pasteIntoPrompt", "animations", "foldAsksWhileWorking", "openPanelOnAsks", "retentionDays", "coldDays", "maxDepth", "editor", "spaces"], "the rows in the dialog's order (Closed items stay in the list with the list's rows, 2026-11-19; Idle sessions move out of store.json after it, Phase 2)");
   for (const k of S.SETTING_KEYS) { A.ok(Array.isArray(W.SETTING_WORDS[k]) && W.SETTING_WORDS[k][0] && W.SETTING_WORDS[k][1].length > 20, `${k}: a label and a line in words.js`); A.ok(S.SETTING_PATHS[k], `${k}: its config.json path`); }
   const rows0 = S.settingRows(C.DEFAULTS, []);
   A.deepEqual(rows0.map((r) => r.key), S.SETTING_KEYS);
   A.deepEqual(Object.fromEntries(rows0.map((r) => [r.key, r.value])), { textScale: 1, threshold: "needed", handoff: "ledgr", pasteIntoPrompt: true, animations: true,
-    foldAsksWhileWorking: false, openPanelOnAsks: false, retentionDays: S.clampDays(C.DEFAULTS.retention_days), maxDepth: 2, editor: "open", spaces: [] }, "the defaults' values");
-  A.equal(rows0[0].label, "Text scale"); A.equal(rows0[2].label, "Who owns the closing list"); A.equal(rows0[9].label, "Open files with"); A.equal(rows0[9].path, "links.editor");
-  A.equal(rows0[10].path, "spaces.disabled");
+    foldAsksWhileWorking: false, openPanelOnAsks: false, retentionDays: S.clampDays(C.DEFAULTS.retention_days), coldDays: 7, maxDepth: 2, editor: "open", spaces: [] }, "the defaults' values");
+  A.equal(rows0[0].label, "Text scale"); A.equal(rows0[2].label, "Who owns the closing list"); A.equal(rows0[10].label, "Open files with"); A.equal(rows0[10].path, "links.editor");
+  A.equal(rows0[11].path, "spaces.disabled");
+  // Idle sessions move out of store.json (retention.coldDays, retention Phase 2): 0 "never" to 60 here, the
+  // reading the writer uses (config.js coldDaysOf), its line in words.
+  A.equal(rows0[8].key, "coldDays"); A.equal(rows0[8].label, "Idle sessions move out of store.json"); A.equal(rows0[8].path, "retention.coldDays");
+  A.ok(/ledgr-data\/cold\//.test(rows0[8].words) && /Set to never, every one comes back/.test(rows0[8].words), "its line: where they go, and that never brings every one back");
+  A.equal(C.DEFAULTS.retention.coldDays, 7, "the default: 7 days"); A.equal(C.DEFAULTS.retention.turns, 12, "beside retention.turns");
+  A.deepEqual(S.COLD_RANGE, { min: 0, max: 60 }, "the row's range (config.js reads up to 365)");
+  A.equal(S.coldDaysOf, C.coldDaysOf, "one reading of retention.coldDays (config.js)");
+  A.equal(S.coldDaysOf({ retention: { coldDays: 0 } }), 0, "0 is kept: never"); A.equal(S.coldDaysOf({ retention: { coldDays: "14" } }), 14, "a numeric string");
+  A.equal(S.coldDaysOf({ retention: { coldDays: 100 } }), 100, "a hand-written 100 shows as it is (stepped back into 0..60 here)");
+  for (const bad of [-1, 400, "x", null, true, {}]) A.equal(S.coldDaysOf({ retention: { coldDays: bad } }), 7, `${JSON.stringify(bad)}: the default`);
+  A.equal(S.coldDaysOf({}), 7, "missing: the default");
+  A.equal(S.clampColdDays(-3), 0); A.equal(S.clampColdDays(61), 60); A.equal(S.clampColdDays(6.6), 7); A.equal(S.clampColdDays("x"), 0);
+  A.equal(S.clampColdDays(0.4), 1, "a part of a day is a day (as config.js coldDaysOf reads it), only 0 is never"); A.equal(S.coldDaysOf({ retention: { coldDays: 0.4 } }), 1);
   // Closed items stay in the list (retention_days, 2026-11-19): 1 to 30 days, its one line in words.
   A.equal(rows0[7].label, "Closed items stay in the list"); A.equal(rows0[7].path, "retention_days");
   A.ok(rows0[7].words.startsWith("After that they move under Closed, archived, where they can still be read and reopened"), "its line: where they go and that they can be read and reopened");
@@ -255,9 +270,9 @@ try {
   for (const bad of ["x", null, undefined, {}, true, false, ""]) A.equal(S.retentionDaysOf({ retention_days: bad }), S.clampDays(C.DEFAULTS.retention_days), `${JSON.stringify(bad)}: the default`);
   A.equal(S.clampDays(0), 1); A.equal(S.clampDays(31), 30); A.equal(S.clampDays(12.4), 12); A.equal(S.clampDays("x"), 1);
   const cfgX = { ...C.DEFAULTS, instruct_block: false, extract: { threshold: "BLOCKING" }, ui: { textScale: 7, pasteIntoPrompt: false, animations: false, foldAsksWhileWorking: true },
-    surface: { openPanelOnAsks: true }, branch: { maxDepth: 6 }, links: { editor: "  ZED " }, retention_days: 9 };
+    surface: { openPanelOnAsks: true }, branch: { maxDepth: 6 }, links: { editor: "  ZED " }, retention_days: 9, retention: { turns: 12, coldDays: "0" } };
   A.deepEqual(Object.fromEntries(S.settingRows(cfgX, []).filter((r) => r.key !== "spaces").map((r) => [r.key, r.value])), { textScale: 1.6, threshold: "blocking", handoff: "prose",
-    pasteIntoPrompt: false, animations: false, foldAsksWhileWorking: true, openPanelOnAsks: true, retentionDays: 9, maxDepth: 6, editor: "zed" }, "values read as the mod and the hooks read them (instruct_block false is prose)");
+    pasteIntoPrompt: false, animations: false, foldAsksWhileWorking: true, openPanelOnAsks: true, retentionDays: 9, coldDays: 0, maxDepth: 6, editor: "zed" }, "values read as the mod and the hooks read them (instruct_block false is prose)");
   A.equal(S.settingRows({ links: { editor: "subl {path}:{line}" } }, []).find((r) => r.key === "editor").value, "subl {path}:{line}", "a command of your own, as written");
   A.equal(S.settingRows({ links: { editor: 7 } }, []).find((r) => r.key === "editor").value, "open", "anything else is the default");
   A.equal(W.THRESHOLD_WORDS.needed, "blocking + needed", "the threshold's words");
@@ -289,6 +304,15 @@ try {
   for (const bad of ["x", "", null, true, {}]) A.equal(S.editFor("retentionDays", bad), null, `refused: ${JSON.stringify(bad)}`);
   A.match(S.savedLine("retentionDays", 5), /^Closed items stay in the list: 5 days \(retention_days in ledgr-data\/config\.json\)\.$/);
   A.match(S.savedLine("retentionDays", 1), /: 1 day \(/); A.match(S.savedLine("retentionDays", 40), /: 30 days \(/);
+  // retention.coldDays: inside `retention`, retention.turns and the rest kept; clamped to 0..60; a word refused.
+  A.deepEqual(ed("coldDays", 14, { retention: { turns: 12 }, retention_days: 3 }), { retention: { turns: 12, coldDays: 14 }, retention_days: 3 }, "written beside retention.turns, the rest kept");
+  A.deepEqual(ed("coldDays", 0), { retention: { coldDays: 0 } }, "0: never"); A.deepEqual(ed("coldDays", 99), { retention: { coldDays: 60 } }, "at most 60 here");
+  A.deepEqual(ed("coldDays", -4), { retention: { coldDays: 0 } }); A.deepEqual(ed("coldDays", "9"), { retention: { coldDays: 9 } }); A.deepEqual(ed("coldDays", 2.4), { retention: { coldDays: 2 } });
+  A.deepEqual(ed("coldDays", 5, { retention: 7 }), { retention: { coldDays: 5 } }, "a retention that is not an object is replaced by one");
+  for (const bad of ["x", "", null, true, {}]) A.equal(S.editFor("coldDays", bad), null, `refused: ${JSON.stringify(bad)}`);
+  A.match(S.savedLine("coldDays", 7), /^Idle sessions move out of store\.json: after 7 days \(retention\.coldDays in ledgr-data\/config\.json\)\.$/);
+  A.match(S.savedLine("coldDays", 0), /: never \(the writer brings every older session back\) \(retention\.coldDays/); A.match(S.savedLine("coldDays", 1), /: after 1 day \(/);
+  A.equal(W.coldDaysWords(0), "never"); A.equal(W.coldDaysWords(1), "1 day"); A.equal(W.coldDaysWords(7), "7 days");
   A.deepEqual(ed("spaces", { id: SA, off: true }, { spaces: { disabled: [SB] } }), { spaces: { disabled: [SB, SA] } });
   A.deepEqual(ed("spaces", { id: SB, off: false }, { spaces: { disabled: [SB, SA] } }), { spaces: { disabled: [SA] } });
   A.deepEqual(ed("spaces", { id: SZ, drop: true }, { spaces: { disabled: [SZ, SA] } }), { spaces: { disabled: [SA] } }, "Drop takes a stale id out");
@@ -423,6 +447,17 @@ try {
       A.ok(r.all.includes("1 day"), "1 day");
       v.set("retentionDays", 30, cx); await drain(cx); draw(v, cx); A.equal(UI().ids.get("st-days-up")._h.on_click, undefined, "at 30 days: + is off");
       A.equal(cfgFile().retention_days, 30); }
+    // Idle sessions move out of store.json: − and + write retention.coldDays, 0 ("never") to 60; nothing else.
+    { const c0 = S.coldDaysOf(v.cfg), writesBefore = H().writes.length;
+      r = draw(v, cx); A.ok(UI().ids.has("st-cold-value") && r.all.includes(W.coldDaysWords(c0)), "the days shown");
+      click("st-cold-up", cx); await drain(cx); A.equal(cfgFile().retention.coldDays, c0 + 1, "+ one day, written"); A.match(v.flash, /^Idle sessions move out of store\.json: after /);
+      draw(v, cx); click("st-cold-down", cx); draw(v, cx); click("st-cold-down", cx); await drain(cx); A.equal(cfgFile().retention.coldDays, c0 - 1, "− twice");
+      v.set("coldDays", 0, cx); await drain(cx); r = draw(v, cx); A.equal(UI().ids.get("st-cold-down")._h.on_click, undefined, "at 0: − is off");
+      A.ok(texts(UI().ids.get("st-cold-value")).includes("never"), "0 reads never"); A.equal(cfgFile().retention.coldDays, 0);
+      v.set("coldDays", 60, cx); await drain(cx); draw(v, cx); A.equal(UI().ids.get("st-cold-up")._h.on_click, undefined, "at 60: + is off");
+      A.equal(cfgFile().retention.coldDays, 60);
+      A.ok(H().writes.slice(writesBefore).every(([p]) => p === CFG_PATH), "only config.json written (no spool event: rule 12)");
+      v.set("coldDays", 7, cx); await drain(cx); }
     draw(v, cx); click("st-depth-down", cx); draw(v, cx); click("st-depth-down", cx); draw(v, cx); click("st-depth-down", cx); await drain(cx); A.equal(cfgFile().branch.maxDepth, 0, "down to 0: Branch off");
     r = draw(v, cx); A.ok(r.all.includes("0 (off)"));
     click(`st-space-off-${SB}`, cx); await drain(cx); A.deepEqual(cfgFile().spaces.disabled, [SA, SZ, SB], "shop-api off"); A.match(v.flash, /ledgr is off in shop-api/);
@@ -704,7 +739,7 @@ try {
   }
   A.match(fs.readFileSync(path.join(MOD, "writer.js"), "utf8"), /textScale: textScaleOf\(cfg\)/, "the writer publishes ui.textScale in shared(\"ledgr.ui\")");
 
-  console.log(`OK: settings, ${checks} checks (the scale's clamp, step and half pixels; rows, values and edits; editConfig's compare-and-swap with a stale file; the dialog's controls, commands, demo and closed record; the panel's gear and one dialog at a time; every text size scaled at 160 %${DTS ? "; element methods checked against gpui-kit.d.ts" : ""}), 0 failure(s)`);
+  console.log(`OK: settings, ${checks} checks (the scale's clamp, step and half pixels; rows, values and edits (retention.coldDays too); editConfig's compare-and-swap with a stale file; the dialog's controls, commands, demo and closed record; the panel's gear and one dialog at a time; every text size scaled at 160 %${DTS ? "; element methods checked against gpui-kit.d.ts" : ""}), 0 failure(s)`);
 } catch (e) {
   console.log(String(e?.stack ?? e).split("\n").slice(0, 8).join("\n"));
   console.log(`FAIL: settings, after ${checks} checks`);

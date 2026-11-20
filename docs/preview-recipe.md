@@ -140,6 +140,19 @@ d ledgr.open:A16                # once the rows show: the dialog read-only, ARCH
 d ledgr.detail:close; d ledgr.demo   # back to the live store
 ```
 
+### An older session (optional, the demo)
+
+A frame of a cold session (2026-11-19, `docs/design/Retention.md` 10) also comes from the demo: a
+session goes cold only after `retention.coldDays` idle, and a live one would show its own names. The
+demo's "nightly report backfill" is cold, its items in a fixture the panel reads as it would a file.
+
+```sh
+d ledgr.demo                    # the demo store: one cold session
+d ledgr.older-sessions          # the session menu open, OLDER SESSIONS (1) ▾: its row, ◆ 1, "idle 9 d"
+d ledgr.session:t23             # show it: its lanes, OLDER THAN A DAY open, the dim "older" pill
+d ledgr.demo                    # back to the live store
+```
+
 ## Take the shot
 
 - Any tool: ⌘⇧4, then Space, then click the Herdr window, and crop to the pane plus the panel.

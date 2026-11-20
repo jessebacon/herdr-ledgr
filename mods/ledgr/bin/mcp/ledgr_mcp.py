@@ -43,6 +43,19 @@ handle to this session's agent ask in snapshot.json (the items open_asks lists) 
 event per ask still open, deferred or answered (action "resolve", actor "agent", the handle, the turn);
 it waits for the writer the same way.
 
+Cold sessions (retention Phase 2): a session nobody touched for retention.coldDays has its items in
+ledgr-data/cold/<file>, named by snapshot.json's `cold` map, and its record in store.json. Every read here
+goes through ledgr_extract.session_items, so open_asks, the repeats and the handle maps read that file,
+filtered as the snapshot is: the same answers as for a warm session, with no wait (the writer thaws the
+session at the event's pass, and the file stays at least an hour after). When the session's file cannot be
+read (the writer's fault on its record, or this server's own read), declare_asks and resolve_asks still
+send their events (the writer holds them in cold/held/<session>/ and applies them once the session is
+read, reset or forgotten; resolve_asks sends an ask it cannot look up by handle, item null, which store.js
+on_act resolves by handle), stay ok, add `cold` to the data and two lines: what happened, and to tell the
+user and list the items. A wait that finds its event held (cold/held/, by event id) ends at once,
+`writer: "held"`; an event gone from the spool and not held was applied, even while a snapshot.json the writer
+could not write after the thaw still names the session cold (its handles may then read as pending).
+
 Disabled spaces: a session is off when its record (sessions/<sid>.json) has `ledgr_off: true` (the
 hooks set it at the prompt that finds its Herdr space disabled, so a turn that began off stays off) or
 its `space` is in config.json spaces.disabled (missing: []). The space is the record's, else the map
@@ -104,7 +117,8 @@ INSTRUCTIONS = (
     "handles such as A7; when the user's message answers or drops one of them, call resolve_asks with its "
     "handle before declaring anything new. When a ledgr tool answers off: true, ledgr is off in this space: "
     "list what you need from the user in your reply instead. When a ledgr tool says its writer is not "
-    "applying events, the user cannot see these items in ledgr yet: say so and list them in your reply as well.")
+    "applying events, or that ledgr cannot read this session's earlier items, the user cannot see these items "
+    "in ledgr yet: say so and list them in your reply as well.")
 
 # A session where ledgr is off (spaces.disabled): (the result's note, its text) per tool.
 OFF_WORDS = {
@@ -325,12 +339,58 @@ class Identity:
 
 # ---------- snapshot ----------
 
+def session_items(sid):
+    """(items, cold): this session's items in snapshot.json, or in its cold file when the writer moved the
+    session out of store.json (ledgr_extract.session_items: the one reader of both)."""
+    return X.session_items(sid)
+
+
 def snapshot_items():
-    snap = C.read_json(C.path("snapshot.json"), {})
-    items = snap.get("items") if isinstance(snap, dict) else None
-    if isinstance(items, dict):
-        items = list(items.values())
-    return [it for it in items if isinstance(it, dict)] if isinstance(items, list) else []
+    """Every item snapshot.json carries (warm sessions only)."""
+    return X.session_items(None)[0]
+
+
+def cold_broken(cold):
+    """A cold session whose file the writer cannot read (its fault) or this server could not."""
+    return bool(cold and (cold.get("fault") or cold.get("error")))
+
+
+def cold_words(cold, sent="what you sent is kept"):
+    """The first of the two lines a result adds for a cold session whose file cannot be read (open_asks:
+    its one line, with what it could not list)."""
+    return f"ledgr cannot read this session's earlier items ({cold_why(cold)}); {sent} and applied once that is fixed (the user's panel offers Try again)."
+
+
+def cold_why(cold):
+    """"cold/<file>: <why>", or the why alone when it names the file already (the writer's words do)."""
+    where = f"cold/{cold['file']}" if cold and cold.get("file") else "its file in ledgr-data/cold/"
+    why = (cold or {}).get("fault") or (cold or {}).get("error") or "the ledgr writer could not read it"
+    return why if where in why else f"{where}: {why}"
+
+
+def held_ids(kind, ev_ids):
+    """The ids among ev_ids that the writer holds (retention Phase 2): it copies a spool file whose session's
+    cold file it cannot read, under the file's own name, to ledgr-data/cold/held/<session>/, and only then
+    takes it out of the spool. Matched by event id, among this process's `kind` files."""
+    root, mine, found = C.path("cold", "held"), f"-{kind}-{os.getpid()}-", set()
+    want = set(x for x in ev_ids or [] if x)
+    if not want:
+        return found
+    try:
+        dirs = os.listdir(root)
+    except OSError:
+        return found
+    for d in dirs:
+        try:
+            names = os.listdir(os.path.join(root, d))
+        except OSError:
+            continue
+        for n in names:
+            if mine in n and n.endswith(".json") and not n.startswith("."):
+                ev = C.read_json(os.path.join(root, d, n))
+                if isinstance(ev, dict) and ev.get("id") in want:
+                    found.add(ev["id"])
+    return found
 
 
 def writer_claim():
@@ -360,9 +420,7 @@ def span_words(s):
     return f"{m} min" if m < 120 else f"{m // 60} h" + (f" {m % 60} min" if m % 60 else "")
 
 
-def session_of(it):
-    anc = it.get("anchor") if isinstance(it.get("anchor"), dict) else {}
-    return anc.get("sessionId") or it.get("sessionId")
+session_of = X.session_of
 
 
 def level_of(it):
@@ -645,9 +703,9 @@ class Server:
         if ctx.get("error"):
             return text_result("ledgr: " + ctx["error"], {"ok": False, "error": ctx["error"]}, error=True)
         sid, turn, t = ctx["session_id"], ctx["turn"], ctx["terminal"]
-        _, _, known = X.recorded_asks(sid)
-        by_handle = {it.get("handle"): it for it in snapshot_items()
-                     if session_of(it) == sid and it.get("direction") == "agent_to_human"}
+        mine, cold = session_items(sid)
+        _, _, known = X.recorded_asks(sid, items=mine)
+        by_handle = {it.get("handle"): it for it in mine if it.get("direction") == "agent_to_human"}
         # Asks created in this turn come from an earlier declare_asks of the same turn: not repeats.
         known = {h: v for h, v in known.items() if (by_handle.get(h) or {}).get("createdTurn") != turn}
         by_text = {}
@@ -739,7 +797,7 @@ class Server:
                 calls -= 1                         # nothing written: the turn's call count stands
         handles, applied, wstat = [None] * len(asks), None, None
         if ev_id and asks:
-            handles, applied, wstat = self.wait_handles(sid, turn, asks)
+            handles, applied, wstat = self.wait_handles(sid, turn, asks, [ev_id])
             if any(handles):
                 st = C.read_json(state_path)
                 if isinstance(st, dict) and ev_id in (st.get("event_ids") or []):
@@ -768,6 +826,13 @@ class Server:
         if ctx.get("note"):
             data["note"] = ctx["note"]
         stalled = applied == "stalled"
+        # Retention Phase 2: a cold session whose file cannot be read. The event is kept (held by the writer,
+        # or still in the spool) and applied once the session is read again, reset or forgotten: ok, no retry.
+        cold, kept, applied = self.cold_now(sid, cold, applied, bool(ev_id and asks))
+        if kept:
+            data.update(cold=cold, writer=applied)
+            log(f"declare {sid} turn={turn}: cold {cold.get('file')} cannot be read "
+                f"({cold.get('fault') or cold.get('error') or 'held by the writer'}); event {ev_id} kept ({applied})")
 
         lines = []
         if items and not asks:
@@ -804,14 +869,17 @@ class Server:
                          "to the user: the panel does not have them.")
             lines.append("Tell the user in your reply that ledgr's writer is not applying events (relaunching Herdr "
                          "restarts it; nothing queued is lost), and list these items in your reply this time.")
-        elif asks and not any(handles):
+        if kept:
+            lines.append(cold_words(cold))
+            lines.append("Tell the user in your reply, and list these items there.")
+        if not stalled and not kept and asks and not any(handles):
             lines.append(f"Handles are pending: ledgr's writer is behind (the oldest queued event is {span_words(wstat['oldest_s'])} "
                          "old); they appear in the panel once it applies them." if applied == "idle" and wstat and wstat.get("oldest_s") else
                          "Handles are pending: ledgr's writer has not applied the event yet; they appear in the panel.")
         if any(a["quote"] for a in asks):
             lines.append("Quotes are checked against your reply when the turn ends, so keep them verbatim.")
         if pointer:
-            lines.append("Then end your reply with this line:" if stalled else
+            lines.append("Then end your reply with this line:" if stalled or kept else
                          "List them in your reply as usual and end it with this line:" if mode == "both" else
                          "End your reply with this line; do not list these items in prose or in a ledgr-asks block:")
             lines.append(pointer)
@@ -819,10 +887,11 @@ class Server:
             lines.append("Nothing here counts as needing the user, so end your reply without a pointer line.")
         return text_result("\n".join(lines), data, error=bool(items) and not asks)
 
-    def wait_handles(self, sid, turn, asks):
-        """(handles, how, status) once the writer has ingested our spool file(s); how is applied, timeout,
-        idle (the writer is behind: not waited for) or stalled (not applying: not waited for); status is
-        writer_state's, None when applied."""
+    def wait_handles(self, sid, turn, asks, ev_ids=None):
+        """(handles, how, status) once the writer has ingested our spool file(s); how is applied, held (the
+        writer keeps the event aside until the session's cold file can be read: no handles to wait for),
+        timeout, idle (the writer is behind: not waited for) or stalled (not applying: not waited for);
+        status is writer_state's, None when applied or held."""
         spool, mine = C.path("spool"), f"-asks-{os.getpid()}-"
         ws = self.writer_state(spool, mine)
         if ws["state"] != "ok":
@@ -835,6 +904,10 @@ class Server:
                 pending = False
             if not pending:
                 hs = self.match_handles(sid, turn, asks)
+                # Held is known, not inferred: the writer confirms its copy in cold/held/ before the spool file
+                # goes, and only a replay that applied it removes the copy. A repeat's handle is still known.
+                if held_ids("asks", ev_ids):
+                    return hs, "held", None
                 if all(hs) or time.monotonic() >= deadline:
                     return hs, "applied", None
             elif time.monotonic() >= deadline:
@@ -842,9 +915,10 @@ class Server:
                 return [None] * len(asks), ("stalled" if ws["state"] == "stalled" else "timeout"), ws
             time.sleep(0.05)
 
-    def wait_applied(self, kind):
-        """(how, status) once the writer has ingested this process's `kind` spool files: applied, timeout
-        after LEDGR_MCP_WAIT_MS, or without waiting idle (behind) or stalled (writer_state)."""
+    def wait_applied(self, kind, ev_ids=None):
+        """(how, status) once the writer has ingested this process's `kind` spool files: applied, held (kept
+        aside by the writer: the session's cold file cannot be read), timeout after LEDGR_MCP_WAIT_MS, or
+        without waiting idle (behind) or stalled (writer_state)."""
         spool, mine = C.path("spool"), f"-{kind}-{os.getpid()}-"
         ws = self.writer_state(spool, mine)
         if ws["state"] != "ok":
@@ -856,7 +930,7 @@ class Server:
             except OSError:
                 pending = False
             if not pending:
-                return "applied", None
+                return ("held" if held_ids(kind, ev_ids) else "applied"), None
             if time.monotonic() >= deadline:
                 ws = self.writer_state(spool, mine, with_mine=True)
                 return ("stalled" if ws["state"] == "stalled" else "timeout"), ws
@@ -934,8 +1008,26 @@ class Server:
             ws["state"] = "behind"
         return ws
 
+    def cold_now(self, sid, cold, how, sent):
+        """(cold, kept, how): kept when a result must say the session's cold file cannot be read: something
+        was sent, the writer did not apply it, and either it holds it (how "held": its copy found in
+        cold/held/, wait_handles and wait_applied) or the event still waits in the spool while the file could
+        not be read when the call began (the writer's fault, or this server's read: the writer will hold it).
+        An event gone from the spool and not in cold/held/ was applied, whatever snapshot.json still says: a
+        snapshot.json the writer could not write after a thaw may still name the session cold (integration,
+        2026-11-19: it is not taken as held, which would claim more than this server knows). For "held" the
+        session is read again, so the writer's fault names why."""
+        if not sent or not cold and how != "held":
+            return cold, False, how
+        if how == "held":
+            _, now = session_items(sid)
+            return now or cold or {"file": None, "fault": None, "error": None}, True, "held"
+        if how == "applied":
+            return cold, False, how
+        return cold, cold_broken(cold), how
+
     def match_handles(self, sid, turn, asks):
-        items = [it for it in snapshot_items() if session_of(it) == sid and it.get("direction") == "agent_to_human"
+        items = [it for it in session_items(sid)[0] if it.get("direction") == "agent_to_human"
                  and isinstance(it.get("handle"), str)]
         out = []
         for a in asks:
@@ -986,14 +1078,22 @@ class Server:
         if len(wanted) > MAX_RESOLVE:
             notes.append(f"only the first {MAX_RESOLVE} handles were read")
             wanted = wanted[:MAX_RESOLVE]
-        # The handle map open_asks uses: this session's agent asks in snapshot.json, by handle.
-        mine = [it for it in snapshot_items() if session_of(it) == sid and it.get("direction") == "agent_to_human"
-                and isinstance(it.get("id"), str)]
-        resolved, unknown, already, ev_ids = [], [], [], []
+        # The handle map open_asks uses: this session's agent asks in snapshot.json (a cold session's from its
+        # file), by handle.
+        items, cold = session_items(sid)
+        mine = [it for it in items if it.get("direction") == "agent_to_human" and isinstance(it.get("id"), str)]
+        unreadable = bool(cold and cold.get("error"))
+        resolved, unknown, already, ev_ids, unchecked = [], [], [], [], []
         for h in wanted:
             found = [it for it in mine if it.get("handle") == h]
             live = [it for it in found if it.get("status") not in CLOSED]
-            if not found:
+            if not found and unreadable and re.match(r"^A\d+$", h):
+                # Its cold file cannot be read here: the ask is looked up by handle when the writer applies
+                # the event (store.js on_act), which it holds until the file reads, a reset or a Forget.
+                ev_ids.append(S.act(t, sid, item=None, action="resolve", actor="agent", handle=h, turn=turn, note=note))
+                resolved.append(h)
+                unchecked.append(h)
+            elif not found:
                 unknown.append(h)
                 if re.match(r"^Q\d+$", h):
                     notes.append(f"{h} is a parked question, not an ask; resolve_asks closes asks only")
@@ -1003,13 +1103,20 @@ class Server:
                 ev_ids.append(S.act(t, sid, item=live[0]["id"], action="resolve", actor="agent", handle=h,
                                     turn=turn, note=note))
                 resolved.append(h)
-        how, wstat = self.wait_applied("act") if ev_ids else (None, None)
+        how, wstat = self.wait_applied("act", ev_ids) if ev_ids else (None, None)
+        cold, kept, how = self.cold_now(sid, cold, how, bool(ev_ids))
+        if unchecked and not kept:
+            notes.append(f"{', '.join(unchecked)} could not be checked here (this session's earlier items could not be "
+                         "read); the writer closes each one that is an open ask of this session")
         log(f"resolve {sid} turn={turn} resolved={resolved} already_closed={already} unknown={unknown} "
-            f"note={'yes' if note else 'no'} events={len(ev_ids)} writer={how}")
+            f"note={'yes' if note else 'no'} events={len(ev_ids)} writer={how}"
+            + (f" cold={cold.get('file')} kept unchecked={unchecked}" if kept else ""))
 
-        lines = [f"ledgr closed {', '.join(resolved)} as resolved by the agent"
-                 + (f" (turn {turn})" if turn is not None else "") + "; the user can reopen any of them in the panel."
-                 if resolved else "ledgr closed nothing."]
+        tn = f" (turn {turn})" if turn is not None else ""
+        lines = [f"ledgr kept the closing of {', '.join(resolved)}{tn}: it is applied once ledgr can read this "
+                 "session's earlier items." if resolved and kept else
+                 f"ledgr closed {', '.join(resolved)} as resolved by the agent{tn}; the user can reopen any of them "
+                 "in the panel." if resolved else "ledgr closed nothing."]
         if already:
             lines.append(f"Already closed: {', '.join(already)}.")
         if unknown:
@@ -1020,11 +1127,14 @@ class Server:
                          "panel still shows the asks open.")
             lines.append("Tell the user in your reply that ledgr's writer is not applying events (relaunching Herdr "
                          "restarts it; nothing queued is lost).")
-        elif resolved and how == "idle" and wstat and wstat.get("oldest_s"):
+        elif resolved and not kept and how == "idle" and wstat and wstat.get("oldest_s"):
             lines.append(f"ledgr's writer is behind (the oldest queued event is {span_words(wstat['oldest_s'])} old); "
                          "the panel shows them closed once it applies them.")
-        elif resolved and how != "applied":
+        elif resolved and not kept and how != "applied":
             lines.append("ledgr's writer has not applied this yet; the panel shows them closed once it does.")
+        if kept:
+            lines.append(cold_words(cold))
+            lines.append("Tell the user in your reply, and list there the asks you closed.")
         if ctx.get("note"):
             lines.append(f"Note: {ctx['note']}; this is the terminal's synthetic session {sid}.")
         data = {"ok": True, "session_id": sid, "turn": turn, "synthetic": ctx["synthetic"], "resolved": resolved,
@@ -1033,6 +1143,10 @@ class Server:
             data["writer_status"] = wstat
         if notes:
             data["notes"] = notes
+        if kept:
+            data["cold"] = cold
+        if unchecked:
+            data["unchecked"] = unchecked
         if ctx.get("note"):
             data["note"] = ctx["note"]
         return text_result("\n".join(lines), data)
@@ -1042,9 +1156,9 @@ class Server:
         if ctx.get("error"):
             return text_result("ledgr: " + ctx["error"], {"ok": False, "error": ctx["error"]}, error=True)
         sid = ctx["session_id"]
-        open_, dismissed, _ = X.recorded_asks(sid)
-        by_handle = {it.get("handle"): it for it in snapshot_items()
-                     if session_of(it) == sid and it.get("direction") == "agent_to_human"}
+        items, cold = session_items(sid)
+        open_, dismissed, _ = X.recorded_asks(sid, items=items)
+        by_handle = {it.get("handle"): it for it in items if it.get("direction") == "agent_to_human"}
         threshold = threshold_of(K.load(create=False))
 
         def row(h):
@@ -1080,12 +1194,22 @@ class Server:
         if d:
             lines.append("Dismissed by the user in the last 7 days (raise one again only if it truly blocks you, with repeat_of):")
             lines += [line(r) for r in d]
+        # Retention Phase 2: a cold session reads as a warm one (its file). One whose file cannot be read is
+        # said: what is listed may lack its earlier asks, and what the agent sends is kept until it reads.
+        if cold and cold.get("error"):
+            lines.append(cold_words(cold, "its earlier asks are not listed here, and what you declare or close is kept"))
+        elif cold_broken(cold):
+            lines.append(f"Note: ledgr's writer cannot read this session's earlier items ({cold_why(cold)}); they are "
+                         "listed from that file, and what you declare or close is kept and applied once that is fixed "
+                         "(the user's panel offers Try again).")
         if not lines:
             lines.append("No open or recently dismissed asks for this session.")
         if ctx.get("note"):
             lines.append(f"Note: {ctx['note']}; this is the terminal's synthetic session {sid}.")
         data = {"ok": True, "session_id": sid, "turn": ctx["turn"], "synthetic": ctx["synthetic"], "open": o,
                 "dismissed": d}
+        if cold_broken(cold):
+            data["cold"] = cold
         if ctx.get("note"):
             data["note"] = ctx["note"]
         return text_result("\n".join(lines), data)
@@ -1095,11 +1219,11 @@ class Server:
         if ctx.get("error"):
             return text_result("ledgr: " + ctx["error"], {"ok": False, "error": ctx["error"]}, error=True)
         sid = ctx["session_id"]
-        items = snapshot_items()
-        flag = any("releasedToAgent" in it for it in items if it.get("direction") == "human_to_agent")
+        items, cold = session_items(sid)              # a cold session's from its file
+        flag = any("releasedToAgent" in it for it in snapshot_items() + items if it.get("direction") == "human_to_agent")
         qs = []
         for it in items:
-            if it.get("direction") != "human_to_agent" or session_of(it) != sid or it.get("releasedToAgent") is not True:
+            if it.get("direction") != "human_to_agent" or it.get("releasedToAgent") is not True:
                 continue
             if (it.get("status") or "open") not in ("open", "deferred"):
                 continue
@@ -1112,6 +1236,9 @@ class Server:
         qs.sort(key=lambda q: handle_num(q.get("handle") or "Q0"))
         data = {"ok": True, "session_id": sid, "synthetic": ctx["synthetic"], "questions": qs,
                 "flag": "releasedToAgent"}
+        if cold and cold.get("error"):
+            data["cold"] = cold
+            return text_result(cold_words(cold, "its earlier questions are not listed here, and what you declare or close is kept"), data)
         if not flag:
             data["note"] = ("ledgr's store does not expose a release flag yet (expected: releasedToAgent: true on a "
                             "parked question), so no parked question is released to you")

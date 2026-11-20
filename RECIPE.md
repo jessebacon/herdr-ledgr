@@ -33,15 +33,17 @@ beside it).
   - Header, 42 px: ledgr; a session button (an agent pill such as claude or codex, the session name,
     a small dim "pane t21", a chevron) that opens the session list; the hold control (a faint "hold"
     while the panel follows focus, an accent pill "held" when it stays on one session); "turn N", in
-    working with "· working" while the agent works; an "off" pill where ledgr is off; a "demo" pill
-    in the demo; at the right a 13 px dim gear for the settings dialog.
+    working with "· working" while the agent works; an "off" pill where ledgr is off; a dim "older"
+    pill on a cold session; a "demo" pill in the demo; at the right a 13 px dim gear for the settings
+    dialog.
   - Session list: first a switch for the focused pane's space ("ledgr off in this space", or
     "ledgr on in this space" in accent, the space's name small and dim beside it); then live
     sessions grouped by agent and profile, each group headed by how its asks arrive ("declares asks"
     in accent, "extractor only", "no asks"), each row reading "N open" or "off"; then ENDED
     SESSIONS, where one whose terminal is gone offers Forget (two clicks). A session from a second
     Claude config folder (~/.claude-work) is labelled "claude · work" everywhere, with its own
-    group; the default folder reads "claude".
+    group; the default folder reads "claude". Last, a folded OLDER SESSIONS (N): cold sessions, each
+    row "N open", "◆ 1" and a dim "idle 9 d" from its stub, or "can't read" in blocked.
   - PINS lane (top): the shown session's pins, newest first, five, then "N more ›" and
     "archived (N) ›". The head: a chevron, PINS, a search box ("Search pins, every session") taking
     the free width, and "N pins"; with pins checked, a bar "3 selected · Ask about these 3 pins… ·
@@ -105,9 +107,11 @@ beside it).
   and one dim line below: Text scale (− 120 % + and a 100 % reset), Threshold (blocking only,
   blocking + needed, everything), Who owns the closing list (ledgr, both, prose), Paste into the
   prompt, Animations, Fold asks while the agent works, Open the panel on new asks (on or off each),
-  Branch depth (− 2 +, 0 to 4), Open files with, and Off spaces (each Herdr space by name, on or
-  off; an id Herdr no longer has, with Drop); the chosen value in accent. Footer: the status line
-  (what the last click saved, or why not) and the path of config.json, "edit anything else there".
+  Closed items stay in the list (− 3 days +), Idle sessions move out of store.json (− 7 days +,
+  "never" at 0), Branch depth (− 2 +, 0 to 4), Open files with, and Off spaces (each Herdr space by
+  name, on or off; an id Herdr no longer has, with Drop); the chosen value in accent. Footer: the
+  status line (what the last click saved, or why not) and the path of config.json, "edit anything
+  else there".
 - **Text scale** (0.8 to 1.6) multiplies every text size above, the heights of one-line rows and
   buttons, the glyph column and the checkboxes, to a half pixel; icons keep their size, and the host
   button and the chip stop at 26 px to stay inside their bars.
@@ -196,6 +200,14 @@ beside it).
   closed as not needed at least 7), then the writer moves it out of the store into an archive file;
   turn records past the newest 12 per session go the same way. Reopen on an archived row brings the
   item back open, under its own handle.
+- **Cold sessions.** A session nobody touched for 7 days (Settings: Idle sessions move out of
+  store.json; "never" brings every one back) moves its items and turn records into a file of its own;
+  its record and counts stay, so its menu row still says what is open, blocking asks included.
+  Showing it reads the file ("Reading this session's items…", then its lanes, OLDER THAN A DAY open)
+  and brings nothing back; the first act on it, or any event of its agent, brings it back first. A file
+  the writer cannot read: "can't read", the status line names the session, its new events are kept
+  aside until Try again, Use without its older items (two clicks; the file stays), or Forget, and its
+  view names any other file of the session on disk.
 - **The paste.** Paste answer, Paste answers, Paste into trunk, Paste confluence again and Ask here
   put the message on the clipboard, focus the target pane, and paste with Herdr's own paste action
   once Herdr reports that terminal focused on two looks 50 ms apart, within 600 ms, with the
@@ -326,10 +338,11 @@ beside it).
   recommended, `repeat_of`; writes `mcp/<sid>/<turn>.json`, spools `asks` with `source: "tool"`,
   `replaces_turn` on a later call, and returns the pointer line), `resolve_asks` (handles and a
   note; one `act` event per ask, `actor: "agent"`, recorded as `resolvedBy: "agent"`), `open_asks`
-  (this session's open asks with handles, from `snapshot.json`), `parked_questions` (an empty list
-  with a note until the panel has a release action). In an off space each answers `off: true` and
-  writes nothing. Its `instructions` say: `resolve_asks` first when the user's message settles an
-  open ask, `declare_asks` once when the reply's work is done. Details: `bin/mcp/README.md`.
+  (this session's open asks with handles, from `snapshot.json`, a cold session's from its file),
+  `parked_questions` (an empty list with a note until the panel has a release action). In an off
+  space each answers `off: true` and writes nothing. Its `instructions` say: `resolve_asks` first
+  when the user's message settles an open ask, `declare_asks` once when the reply's work is done.
+  Details: `bin/mcp/README.md`.
 - **Spool and writer.** Every change is one JSON event, written atomically to `ledgr-data/spool/`:
   from the hooks, the box (`capture` with `request.pins`, at most 12; `pin`), the panel and dialogs
   (`act`, `clear_questions`, `retry`, `branch`, `conclude`, `close_branch`, `resume`, `forget`,
@@ -344,16 +357,34 @@ beside it).
   grown 64 KiB since the last run): closed items and old turn records go into new files, each written
   once with `writeTextFile`'s expected null (create-only) and read back, and only then leave the store
   (if still exactly as planned). A `restore` event gets its line read from the named file before its
-  batch applies, and is always consumed.
+  batch applies, and is always consumed. Hourly, from the tick only and once that first run has
+  finished, the cold run: idle sessions planned (never one with an agent in a live mapped pane, the
+  open dialog's, a deferred item, a waiting confluence or an active branch), each written once to its
+  file and read back, then, all checked again, taken out of the store in one synchronous step. Before
+  a pass applies, every cold session its events need is read and put back (the store's copy wins;
+  `apply()` throws rather than touch a cold session); a file that cannot be read faults that session
+  alone and holds its events in `cold/held/` while the rest apply (only a read with no answer waits,
+  and three in a row fault). The sweep first reads `store.json` again and does nothing if it is not the
+  text the writer last read or wrote, then deletes a cold file only when provably redundant: by name
+  only one its record lists as thawed (an hour on) or a forgotten session's (a day on); any other only
+  after a read finds an identical copy of every item and turn record in `store.json` on disk, the
+  session's named file or its archive (never a later one: a restored store touched once is stamped later
+  while holding less). Reading copies read a cold file and
+  merge it in memory, never into a store that is saved.
 - **Data**, `~/.config/herdr-app/ledgr-data/`: `store.json` (the source of truth: `items`,
   `sessions`, `branches`, `terminals`, and its own `pins` map, `pn_<uuid>` ids with per-session
-  handles P1, P2, which nothing reading items ever sees); `snapshot.json` (`{v, updatedAt, items}`:
-  open, answered and deferred items plus those dismissed in the last 7 days, read by the extractor
-  and the MCP server); `spool/`; `terminals/`; `sessions/`; `turns/<sid>/` (the newest 50 per
-  session); `mcp/<sid>/`; `archive/<sid>/items-<ms>-<rand6>.jsonl` and `turns-<ms>-<rand6>.jsonl`
-  (at most 512 KiB each; `<sid>` with every character outside `A-Za-z0-9._-` made `_`; an id the store
-  holds wins over any line, else the newest file's last line); `store.pre-retention-<ms>.json` (the
-  store before the first run, kept); `log/`; `tmp/`; `config.json`. Limits are code,
+  handles P1, P2, which nothing reading items ever sees; a cold session's record keeps `cold: {file,
+  at, n}`, `n` its counts by level); `snapshot.json` (`{v, updatedAt, items, cold}`: open, answered
+  and deferred items plus those dismissed in the last 7 days, read by the extractor and the MCP
+  server; `cold` names each cold session's file, which they read for its items);
+  `cold/<sid>.<ms>-<rand6>.json` (one cold session, `{ledgr: "ledgr-cold", v: 1, sessionId, at,
+  session, items, turns, n}`, created once) and `cold/held/<sid>/` (events kept for one whose file
+  cannot be read, under their spool names); `spool/`; `terminals/`; `sessions/`; `turns/<sid>/` (the
+  newest 50 per session); `mcp/<sid>/`; `archive/<sid>/items-<ms>-<rand6>.jsonl` and
+  `turns-<ms>-<rand6>.jsonl` (at most 512 KiB each; `<sid>` with every character outside
+  `A-Za-z0-9._-` made `_`; an id the store holds wins over any line, else the newest file's last
+  line); `store.pre-retention-<ms>.json` (the store before the first run, kept); `log/`; `tmp/`;
+  `config.json`. Limits are code,
   `config.js` `LIMITS`: pin 4,000 characters, note 200, 12 pins per question, 24,000 pinned
   characters per branch, 200 search results; an answer 4,000, a sheet 24,000.
 - **`config.json`**, read again on every change, no restart (settings dialog row in brackets):
@@ -382,6 +413,7 @@ links.editor          open              zed | code | "cmd {path}:{line}"  [Open 
 spaces.disabled       []                Herdr space ids  [Off spaces]
 retention_days        3                 whole days 1 to 30  [Closed items stay in the list]
 retention.turns       12                turn records kept per session
+retention.coldDays    7                 0 (never) to 60  [Idle sessions move out of store.json]
 ```
 
 - **`keys.json`** (the installer writes `mod:ledgr` from its `MOD_KEYS`; `ledgr.btw` is the box's
@@ -426,7 +458,8 @@ retention.turns       12                turn records kept per session
   `ScrollHandle`.
 - **Commands** (the full list is in `main.js`): bound, `ledgr.toggle`, `ledgr.btw`, `ledgr.tab`,
   `ledgr.backtab`, `ledgr.pin`, `ledgr.detail-next`, `ledgr.detail-prev`; unbound, `ledgr.settings`,
-  `ledgr.focus-list`, the demos `ledgr.demo`, `ledgr.demo-detail[:<handle>]`, `ledgr.demo-settings`,
+  `ledgr.focus-list`, `ledgr.older-sessions`, `ledgr.cold-retry`, `ledgr.cold-reset`, the demos
+  `ledgr.demo`, `ledgr.demo-detail[:<handle>]`, `ledgr.demo-settings`,
   `ledgr-pane.demo-chip:<state>`, and one per click for shots and checks
   (`ledgr.session:<terminal>`, `ledgr.open:<handle>`, `ledgr.act:<handle>:<action>`,
   `ledgr.detail:<close|done|next|…>`, …), which `docs/preview-recipe.md` uses.
@@ -442,13 +475,15 @@ retention.turns       12                turn records kept per session
   `mcp__ledgr__parked_questions`, `mcp__ledgr__resolve_asks`. It shows a plan, applies it, and runs
   `herdr-app check` and the offline tests. `--yes --answers FILE` asks nothing
   (`setup/answers.example.json`; a key only from `LEDGR_API_KEY`); `--check` is the doctor;
-  `./uninstall.sh` reverses it. A host in another mod cannot import from `mods/ledgr/`, so the
-  installer writes byte-identical copies of `writer.js` `ENGINE_FILES` into `mods/<host>/ledgr/`
+  `--thaw-all` writes `retention.coldDays` 0 and waits until no session is cold (before installing an
+  older build); `./uninstall.sh` reverses it. A host in another mod cannot import from `mods/ledgr/`,
+  so the installer writes byte-identical copies of `writer.js` `ENGINE_FILES` into `mods/<host>/ledgr/`
   (the panel warns on drift); the public install needs none (`examples/personal-overlay/` is one
   such host, not part of the mod).
 - **Deeper**: the build spec `docs/design/Herdr ledger mod design.md` (Section 11 lists every
-  deviation), `docs/design/Detail.md`, `docs/design/Pins.md`, the builders' notes in
-  `docs/build-notes/` (`BUILD-NOTES-mod.md`, `-hooks`, `-phase2`, `-phase3`, `-detail`, `-pins`).
+  deviation), `docs/design/Detail.md`, `docs/design/Pins.md`, `docs/design/Retention.md`, the
+  builders' notes in `docs/build-notes/` (`BUILD-NOTES-mod.md`, `-hooks`, `-phase2`, `-phase3`,
+  `-detail`, `-pins`).
 
 ## Watch out
 
@@ -544,6 +579,16 @@ What tripped the build up:
   `hc run`'s nor the worktree dialog's limit is measured. A branch shares the trunk's checkout
   unless isolated (the preamble forbids edits; nothing enforces it), and the fork is taken at the
   end of the session, so it also sees every turn after the anchor; the manifest says how many.
+- Cold files: `store.json` can go back in time (one the writer cannot parse is set aside and it starts
+  empty; a person can put back a backup), so a cold file no record names may hold the only copy:
+  never delete one for being unnamed, and prove it by an identical copy, never by id, turn number or a
+  later `updatedAt` (a backup put back and touched once is stamped later while holding less). One
+  unreadable file must not hold the whole spool: fault its session alone. The writer is always ahead
+  of disk (it adds the chips' diagnostics after each save), so a sweep that waits for memory to equal
+  `store.json` never runs: save first, decide on the text written. The panel posts an act `seen`
+  whenever it shows a surfaced session: it must neither bring a cold session back nor move the idle
+  clock. Never bump `store.json`'s `v`: an older build sets aside any other version and starts empty;
+  roll back with `./install.sh --thaw-all` first.
 - The transcript lags: Claude Code writes a turn's records after Stop fires, hence part A's `lagged`
   file and part B's re-read; a declared turn that never catches up checks its quotes against the
   final message plus the turn's partial text.
@@ -577,6 +622,11 @@ What tripped the build up:
 - With a store over 1 MiB, the first start after the install writes `store.pre-retention-<ms>.json`,
   files under `ledgr-data/archive/<sid>/` (none over 512 KiB) and a store under the cap; `writer.log`
   says what the run took, and the next save is one `writeTextFile`.
+- `ledgr.demo`, then `ledgr.older-sessions`: the menu ends with OLDER SESSIONS (1) ▾, "nightly report
+  backfill", ◆ 1, "idle 9 d"; shown, its lanes and the "older" pill. On a real store with sessions
+  idle a week, at the first tick after housekeeping's first run, `writer.log` says "cold: N session(s)
+  moved out of store.json into cold/"; Done on an item of a cold session brings it back, its rows
+  and handles unchanged; and `./install.sh --thaw-all` ends with "no cold sessions".
 - A threshold chosen on the lane head, or edited in `config.json`, changes the counts within a
   couple of seconds; + on Text scale grows every view within a second, and `config.json` holds
   `ui.textScale` 1.05 with every other key as it was.

@@ -10,7 +10,9 @@ saveConfig (rule 12). A process starts only from opener.js, and only on a click 
 (2026-11-10, rule 13): a link or path the person clicks opens in the browser or the chosen editor (open,
 zed, code or their own command), never a shell, never a terminal, never with a line break. Only the writer
 writes under ledgr-data/archive/, each file new (spool.js writeNew), and the dialog's Reopen on an archived
-record posts one restore event and nothing else (2026-11-19, rule 14). A static check
+record posts one restore event and nothing else (2026-11-19, rule 14). Only the writer writes, unlinks,
+makes or removes anything under ledgr-data/cold/ (retention Phase 2, rule 15); the reading copies and the
+Python readers only read a cold file, and post only Try again and Use without its older items. A static check
 over the mod's own source (comments are stripped first, so the rule may be written down); the runtime
 half is tests/test_nav.mjs and tests/test_links.mjs.
 
@@ -119,12 +121,12 @@ ok(re.search(r"\bf\.terminal === t\b", function(nav, "focusedOn") or "") is not 
 
 
 def method(text, name):
-    """The body of a two-space-indented class method (`  name(args) {`, `async` allowed), one line or
-    many: from its opening brace to the brace that closes it (counted, so a one-line method never runs
+    """The body of a two-space-indented class method (`  name(args) {`, `async` allowed; args may hold one
+    level of parentheses, a default `st = this.viewStore()`), one line or many: from its opening brace to the brace that closes it (counted, so a one-line method never runs
     on into the next). None when the file or the method is not there."""
     if text is None:
         return None
-    m = re.search(rf"^  (?:async )?{name}\([^)]*\) \{{", text, flags=re.M)
+    m = re.search(rf"^  (?:async )?{name}\((?:[^()]|\([^()]*\))*\) \{{", text, flags=re.M)
     if not m:
         return None
     depth, i = 1, m.end()
@@ -402,7 +404,12 @@ wn = fn(files.get("spool.js"), "writeNew") or ""
 ok("writeTextFile(path, text, null)" in wn and "readTextFile(path)" in wn and wn.index("writeTextFile(path, text, null)") < wn.index("readTextFile(path)"),
    "rule 14: writeNew creates only (writeTextFile's expected null) and reads the file back")
 al = method(writer_js, "archiveLines")
-ok(al is not None and writer_js.count("writeNew(") == 1 and "writeNew(" in al, "rule 14: writer.js calls writeNew( once, inside archiveLines")
+# writeNew( in writer.js: exactly three calls, one in each of archiveLines (the archive), freezeRun (a cold
+# file, retention Phase 2) and holdEvent (a held event's copy under cold/held/); nowhere else.
+NEW_CALLERS = ("archiveLines", "freezeRun", "holdEvent")
+inside_new = {name: (method(writer_js, name) or "").count("writeNew(") for name in NEW_CALLERS}
+ok(writer_js.count("writeNew(") == 3 and inside_new == {name: 1 for name in NEW_CALLERS},
+   f"rule 14: writer.js calls writeNew( exactly once in each of archiveLines, freezeRun and holdEvent and nowhere else: {inside_new}, {writer_js.count('writeNew(')} in all")
 ok(al is not None and "`archive/${dir}/${kind}-${ms}-${rand6()}.jsonl`" in al, "rule 14: archiveLines names each file archive/<dir>/<kind>-<ms>-<rand6>.jsonl")
 READ_ONLY_BANNED = ("writeTextFile(", "writeEvent(", "writeNew(", "this.post(", "writeFile(", "mkdir(", "rename(", "unlink(", "rm(", "appendFile(",
                     "stage(", "stageMessage(", "stageIntoPrompt(", "run(", "exec(", "hc(", "setShared(", "write_to_clipboard(", "openOverlay(")
@@ -419,6 +426,74 @@ holds(ra, lambda b: b.count("this.post(") == 1 and 'this.post("restore", { sessi
 for bad in ("stage(", "stageMessage(", "stageIntoPrompt(", "stageText(", "stageQuestion(", "copyAnswer", "write_to_clipboard(", "run(", "hc(", "exec(",
             "openOverlay(", "writeEvent(", "writeTextFile(", "goTo", "spawn("):
     holds(ra, lambda b, bad=bad: bad not in b, f"rule 14: detail.js reopenArchived calls {bad}")
+
+# ── rule 15: cold sessions (retention Phase 2, 2026-11-19) ─────────────────────────────────────────
+# Only the writer writes under ledgr-data/cold/: writer.js and spool.js (writeNew, and quarantine's unlink of a
+# replayed held copy) are the only files whose writes, unlinks, mkdirs or rmdirs name it (config.js coldDir,
+# coldPath, heldDir, or a cold/ path); config.js only names the paths. In writer.js those calls sit in the
+# freeze (freezeRun), the sweep (coldSweep), holding (holdEvent) and the replay's clean-up (coldDone) alone,
+# each cold file is written once, under coldName (cold/<safe sid>.<ms>-<rand6>.json), never rewritten, and the
+# sweep deletes only what store.js coldGarbage names. The reading copies only read a cold file: Reader's cold
+# methods write, post, stage and run nothing, but for Try again (coldRetry, one cold_retry) and Use without its
+# older items (coldReset, one cold_reset); heldDir( is the writer's alone. The Python readers (bin/lib,
+# bin/mcp) open cold files to read only.
+COLDW = re.compile(r"\b(writeTextFile|writeFile|writeAtomic|writeAtomicWith|writeLarge|writeNew|writeEvent|mkdir|rmdir|rename|appendFile|unlink|rm|cp|copyFile)\(([^;\n]*)")
+names_cold = lambda a: bool(re.search(r"coldDir\(|coldPath\(|heldDir\(|cold/", a))
+for rel, t in js.items():
+    hits = [m.group(0)[:80] for m in COLDW.finditer(t) if names_cold(m.group(2))]
+    if rel not in ("writer.js", "spool.js"):
+        ok(hits == [], f"rule 15: {rel} writes, unlinks, makes or removes under cold/: {hits}")
+users = sorted(rel for rel, t in js.items() if "heldDir(" in t)
+ok(users == ["writer.js"] and "export const heldDir = (sid) =>" in (files.get("config.js") or ""), f"rule 15: heldDir( called only in writer.js (config.js defines it): {users}")
+COLD_WRITERS = ("freezeRun", "coldSweep", "holdEvent", "coldDone", "heldEvents", "listHeld", "readCold")
+spans = {name: method(writer_js, name) for name in COLD_WRITERS}
+for name, b in spans.items():
+    ok(b is not None, f"rule 15: writer.js has the method {name}")
+cold_calls = [m.group(0)[:80] for m in COLDW.finditer(writer_js) if names_cold(m.group(2))]
+cold_inside = [m.group(0)[:80] for name in ("freezeRun", "coldSweep", "holdEvent", "coldDone") for m in COLDW.finditer(spans[name] or "") if names_cold(m.group(2))]
+ok(sorted(cold_calls) == sorted(cold_inside) and cold_calls, f"rule 15: writer.js names cold/ in a write only in freezeRun, coldSweep, holdEvent and coldDone: {cold_calls}")
+for name in ("readCold", "heldEvents", "listHeld"):
+    holds(spans[name], lambda b: not COLDW.search(b), f"rule 15: writer.js {name} only reads")
+fr = spans["freezeRun"] or ""
+ok("coldName(" in fr and "writeNew(coldPath(file)" in fr and "commitFreeze(" in fr and fr.index("writeNew(coldPath(file)") < fr.index("commitFreeze("),
+   "rule 15: freezeRun writes each file new (writeNew, under coldName) before commitFreeze names it")
+sw = spans["coldSweep"] or ""
+ok("coldGarbage(" in sw and "this.live.toText() !== this.storeText" in sw and sw.index("coldGarbage(") < sw.index("fs.unlink(coldPath(name))"),
+   "rule 15: coldSweep deletes only what coldGarbage names, decided from a store equal to store.json on disk")
+ok(writer_js.count("fs.unlink(coldPath(") == 3 and (spans["coldSweep"] or "").count("fs.unlink(coldPath(") == 2,
+   f"rule 15: writer.js unlinks a cold file in three places only (a freeze's uncommitted file; the sweep's by name and by content): {writer_js.count('fs.unlink(coldPath(')}")
+# Integration (2026-11-19, the review's blocker): the sweep's second unlink comes only after a read and coldLacks
+# (a file provably redundant), and coldGarbage, the by-name rule, has no rule that deletes a warm session's file
+# for being unnamed and touched since.
+sw2 = spans["coldSweep"] or ""
+ok("fs.unlink(coldPath(c.name))" in sw2 and "coldLacks(" in sw2 and "readCold(" in sw2
+   and sw2.index("readCold(") < sw2.index("coldLacks(") < sw2.index("fs.unlink(coldPath(c.name))") and "lack.items || lack.turns" in sw2,
+   "rule 15: coldSweep removes an unnamed file by content only after reading it and finding nothing store.json lacks")
+cg = method(files.get("store.js"), "coldGarbage") or ""
+ok(cg and "touchedAt(" not in cg and "thawedEntry(" in cg, "rule 15: store.js coldGarbage deletes by name only a thawed (listed) or a forgotten session's file")
+holds(method(writer_js, "archiveCopies"), lambda b: not COLDW.search(b), "rule 15: writer.js archiveCopies only reads")
+COLD_READERS = ("coldOf", "coldDue", "coldLoading", "wantCold", "coldLoaded", "mergeColdAll", "dropColdUnnamed", "trimColdCache", "coldOthers")
+for name in COLD_READERS:
+    b = body("reader.js", name, "15")
+    for bad in READ_ONLY_BANNED:
+        holds(b, lambda b, bad=bad: bad not in b, f"rule 15: reader.js {name} only reads, but calls {bad}")
+mca = body("reader.js", "mergeColdAll", "15")
+holds(mca, lambda b: "this.writer.live" in b, "rule 15: reader.js mergeColdAll never merges into the fallback writer's live store")
+wc = body("reader.js", "wantCold", "15")
+holds(wc, lambda b: "fs.readFile(coldPath(file)" in b and "COLD_NAME.test(file)" in b, "rule 15: reader.js wantCold reads only a name of the writer's shape, in cold/")
+for name, ev in (("coldRetry", "cold_retry"), ("coldReset", "cold_reset")):
+    b = body("reader.js", name, "15")
+    holds(b, lambda b, ev=ev: b.count("this.post(") == 1 and f'this.post("{ev}", {{ session_id: sid, file: c.file }}' in b,
+          f"rule 15: reader.js {name} posts one event, {ev} {{session_id, file}}")
+    for bad in [x for x in READ_ONLY_BANNED if x != "this.post("]:
+        holds(b, lambda b, bad=bad: bad not in b, f"rule 15: reader.js {name} calls {bad}")
+for rel, t in files.items():
+    if not rel.endswith(".py"):
+        continue
+    for i, ln in enumerate(t.split("\n")):
+        if re.search(r"[\"']cold[\"']|cold/|[\"']held[\"']", ln):
+            ok(not re.search(r"\bos\.(remove|unlink|makedirs|mkdir|rmdir|replace|rename)\(|shutil\.|\bopen\(.*,\s*(mode\s*=\s*)?[\"'][rbt]*[wax+][rwxab+t]*[\"']", ln),
+               f"rule 15: {rel}:{i + 1} changes something under cold/: {ln.strip()[:100]}")
 
 # ── the engine rule (Detail.md 5.2): engine files never import the reading or staging modules ──────
 m = re.search(r"export const ENGINE_FILES = (\[[^\]]*\])", files.get("writer.js", ""))

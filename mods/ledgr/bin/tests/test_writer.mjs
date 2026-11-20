@@ -55,6 +55,27 @@
 //       item the run took is said in the note; an archive write that gets no answer, on a timer that fires,
 //       keeps its items. (24 also: the size trigger waits for HOUSE_GROWTH since the last run's end, and a
 //       retention change lets it run again.)
+// And cold sessions (retention Phase 2, 2026-11-19: writer.js freezeRun, applyBatch's thaw, held events, the sweep;
+// a home of its own; store.js and fixture_cold.mjs are builder A's):
+//   30. spool.js writeNew past the cap (fs.writeFile, a taken name refused, read back with fs.readFile), `drop`;
+//   31. a freeze run: files created and read back, named <safe sid>.<ms>-<rand6>.json, the stubs and the snapshot's
+//       cold map saved; canFreeze (a live pane, the open dialog, the running pass) and the store's rules;
+//   31b. COLD_RUN_MAX, COLD_RUN_MS, a session an event reached between the plan and the commit;
+//   32. a taken name and a read-back that differs: warm; the next run freezes; the stray file swept once superseded;
+//   33. a freeze given up at each await (mkdir, write, read back, save): nothing lost, no stub naming a missing
+//       file, a late file an orphan swept only once superseded;
+//   34. an event for a cold session: back and applied in one pass, the snapshot, the file kept until the grace;
+//   35. branch_started and pins_asked bring back both sessions; 36. Forget reads nothing, the file goes a day later;
+//   37. an unreadable file (missing, broken, another session's): faulted, events held (the spool empty, nothing
+//       waits), later ones too, the retry replays in name order once; Try again; Use without its older items;
+//   38. a read with no answer: the batch waits, one restart, the spool-stall words; a wanted session's does not;
+//   39. a held copy that fails keeps the spool file; 40. a spool and held duplicate applied once;
+//   41. coldDays 0 brings every session back; 42. a mixed store at start; 43. a takeover during a freeze;
+//   44. a session frozen during a pass's await is brought back by the check before the apply loop;
+//   45. track and runRetry leave a cold session alone; 46. poke; 47. a cold file past 1.2 MiB;
+//   48. the live-shape fixture; 49. the sweep never decides from memory ahead of disk (risk 2), both orders;
+//   50. the other builders' findings: coldDays 0 during a run, an act by handle, a stale cold_retry or
+//       cold_reset, snapshot.json written again after a thaw; 51. a replayed held event that throws: spool/failed.
 //   node tests/test_writer.mjs <empty scratch folder>      (tests/test-store.sh)
 import assert from "node:assert/strict";
 import * as fsm from "node:fs";
@@ -106,8 +127,8 @@ export const exec = (cmd, args, opts) => (H().exec ? H().exec(cmd, args, opts, r
 export const shared = (k) => S[k] ?? null;
 export const setShared = (k, v) => { S[k] = v; };
 export const watchFolder = () => new Promise(() => {});
-export const agents = () => [];
-export const terminals = () => [];
+export const agents = () => (H().agents ? H().agents() : []);
+export const terminals = () => (H().terminals ? H().terminals() : []);
 export const panes = () => [];
 export const focused = () => null;
 export const layout = () => null;
@@ -151,6 +172,9 @@ const st0 = Store.fromText(null);
 // Sections 1 to 17 test the stalls, not retention: housekeeping is not due in them (run just now, and not the
 // first after the upgrade); sections 18 to 27 test it on stores of their own.
 st0.d.retention = { v: 1, at: Date.now() }; st0.d.houseAt = Date.now();
+// ...nor cold sessions (Phase 2): the fixture's sessions are a week old by their fixed times, and a freeze would
+// take the filler session out of the store these sections need just under (and past) the cap.
+fsm.writeFileSync(`${data}/config.json`, JSON.stringify({ v: 1, retention: { coldDays: 0 } }));
 const FS = "ffffffff-0000-4000-8000-000000000001";
 st0.apply({ v: 1, id: "f0", type: "session_start", at: 1794400000000, terminal: "t90", session_id: FS, source: "startup", turn: 0, agent: "claude-code" });
 for (let i = 0; bytes(st0.toText()) < 1041470; i++) {
@@ -1305,6 +1329,1179 @@ const unhook = () => { delete globalThis.__herdr.exec; delete globalThis.__herdr
 }
 Writer.prototype.houseStep = realHouseStep;
 
+// ══ Cold sessions (retention Phase 2, 2026-11-19): writer.js freezeRun, the thaw in applyBatch, held events, the
+// sweep, in a home of its own ═══════════════════════════════════════════════════
+const FX = await import(new URL("./fixture_cold.mjs", import.meta.url).pathname);
+unhook(); patchFs({ readdir: realReaddir, writeFile: realWriteFile });
+const realReadFile3 = fsp.readFile, realMkdir3 = fsp.mkdir;
+const home3 = `${dir}/home3`, data3 = `${home3}/ledgr-data`, spool3 = `${data3}/spool`, cold3 = `${data3}/cold`, held3 = `${cold3}/held`, store3 = `${data3}/store.json`;
+globalThis.__herdr.home = home3;
+const NOW = Date.now();
+const csid = (n) => `c01d${String(n).padStart(4, "0")}-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const store3Of = () => Store.fromText(fsm.readFileSync(store3, "utf8"));
+const spool3Files = () => ls(spool3).filter((n) => n.endsWith(".json"));
+const coldFiles = () => ls(cold3).filter((n) => C.COLD_NAME.test(n));
+const heldFiles = (sid) => ls(`${held3}/${C.safeName(sid)}`);
+const log3 = () => (fsm.existsSync(`${data3}/log/writer.log`) ? fsm.readFileSync(`${data3}/log/writer.log`, "utf8") : "");
+const CFG3 = { v: 1, retention_days: 3, retention: { turns: 12, coldDays: 7 } };
+// A session idle `idle` days: `items` asks (the first `open` open, the rest answered) and `turns` turn records, its
+// latest time exactly NOW - idle days (Store.touchedAt reads that).
+function coldSession(st, n, { idle = 9, items = 3, open = 1, turns = 2, terminal = `t${n}` } = {}) {
+  const sid = csid(n), at = NOW - idle * DAYMS;
+  st.apply({ v: 1, id: `cs-${sid}`, type: "session_start", at, terminal, session_id: sid, source: "startup", turn: 0, agent: "claude-code", cwd: "/tmp/cold" });
+  for (let i = 0; i < items; i++) {
+    const it = mkItem(sid, n, i, { status: i < open ? "open" : "answered", age: idle });
+    it.createdAt = it.updatedAt = at - (items - i) * 1000;
+    st.d.items[it.id] = it;
+  }
+  st.d.sessions[sid].nextHandle = { A: items + 1, Q: 1, P: 1 };
+  if (turns) {
+    const recs = (st.d.turns[sid] = {});
+    for (let k = 1; k <= turns; k++) recs[k] = { stopAt: at - (turns - k) * 60e3, uuid: `u-${n}-${k}`, asks: { source: "tool", count: 1, at: at - (turns - k) * 60e3 } };
+    st.d.sessions[sid].turn = turns;
+  }
+  return sid;
+}
+// Phase 1 done and not due (its first run over, run just now): the cold run is the tick's only housekeeping.
+function coldStore(specs) {
+  const st = Store.fromText(null);
+  st.d.retention = { v: 1, at: NOW - 5 * DAYMS }; st.d.houseAt = NOW;
+  return { st, sids: specs.map(([n, o]) => coldSession(st, n, o)) };
+}
+function home3With(st, cfg = CFG3) {
+  fsm.rmSync(data3, { recursive: true, force: true });
+  fsm.mkdirSync(spool3, { recursive: true });
+  fsm.writeFileSync(`${data3}/config.json`, JSON.stringify(cfg));
+  const text = st.toText();
+  fsm.writeFileSync(store3, text);
+  return text;
+}
+async function coldWriter(role = "cold") { const w = new Writer(role); w.booted = true; await w.start(cx); return w; }
+// The tick's cold run (houseKick with tick), due now: its promise ({cold: {freeze, sweep}}).
+const coldRun = (w, c = cx) => { w.coldAt = 0; return w.houseKick(c, { tick: true }); };
+let evn = 0;
+const put3 = (ev) => { const name = `${ev.at}-${ev.type}-mod-${String(++evn).padStart(5, "0")}.json`; fsm.writeFileSync(`${spool3}/${name}`, JSON.stringify(ev)); return name; };
+const actEv = (sid, item, action, at = Date.now()) => ({ v: 1, id: `act-${++evn}-${action}`, type: "act", at, session_id: sid, item, action, arg: null });
+const applied3 = new Map();
+const realApply3 = Store.prototype.apply;
+Store.prototype.apply = function (ev) {
+  const r = realApply3.call(this, ev);
+  if (r?.applied && ev?.id) applied3.set(ev.id, (applied3.get(ev.id) ?? 0) + 1);
+  return r;
+};
+const csteps = [], psteps = [];
+Writer.prototype.houseStep = function (gen, s) { csteps.push(s); return realHouseStep.call(this, gen, s); };
+const realPassStep = SP.SpoolReader.prototype.step;
+SP.SpoolReader.prototype.step = function (pass, s) { psteps.push(s); return realPassStep.call(this, pass, s); };
+const unhook3 = () => { unhook(); delete globalThis.__herdr.terminals; delete globalThis.__herdr.agents; H.setShared("ledgr.detail", null); patchFs({ readFile: realReadFile3, writeFile: realWriteFile, mkdir: realMkdir3, readdir: realReaddir }); };
+
+// ── 30. writeNew past the cap, create-only both ways, `drop`; isThere ──
+{
+  A.equal(WR.COLD_RUN_MAX, 40); A.equal(WR.COLD_RUN_MS, 60000); A.equal(WR.COLD_THAW_MAX, 50); A.equal(WR.COLD_RETRY_MS, 600000);
+  A.equal(WR.COLD_GRACE_MS, 3600000); A.equal(WR.COLD_KEEP_MS, 86400000);
+  fsm.mkdirSync(`${dir}/wn`, { recursive: true });
+  const big = "x".repeat(CAP + 200000), p = `${dir}/wn/big.json`, calls = [];
+  const mine = (f) => String(f).startsWith(`${dir}/wn/`);
+  patchFs({ writeFile: (f, d) => { if (mine(f)) calls.push(String(f)); return realWriteFile(f, d); } });
+  globalThis.__herdr.writeTextFile = (f, t, e, real) => { if (mine(f)) calls.push(`writeTextFile ${f}`); return real(f, t, e); };
+  A.equal(await SP.writeNew(p, big), null, "past the cap: written");
+  A.deepEqual(calls, [p], "...through fs.writeFile (writeTextFile refuses past 1 MiB)"); A.equal(fsm.readFileSync(p, "utf8"), big, "...whole");
+  A.match(await SP.writeNew(p, big, { drop: true }), /a file of that name is there already/, "a name already taken: refused past the cap too");
+  A.equal(calls.length, 1, "...without writing"); A.equal(fsm.readFileSync(p, "utf8"), big, "...and drop never removes a file this call did not write");
+  A.match(await SP.writeNew(p, "small", { drop: true }), /not written/, "under the cap: writeTextFile's create-only");
+  A.equal(fsm.readFileSync(p, "utf8"), big);
+  const q = `${dir}/wn/q.json`;
+  globalThis.__herdr.readTextFile = (f, real) => (f === q ? Promise.resolve("other") : real(f));
+  A.match(await SP.writeNew(q, "text"), /read back other text/); A.ok(fsm.existsSync(q), "a read-back that differs: kept without drop (Phase 1's archive files)");
+  fsm.unlinkSync(q);
+  A.match(await SP.writeNew(q, "text", { drop: true }), /read back other text/); A.ok(!fsm.existsSync(q), "...removed with drop");
+  delete globalThis.__herdr.readTextFile;
+  globalThis.__herdr.writeTextFile = (f, t, e, real) => (f === q ? real(f, t, e).then(() => new Promise(() => {})) : real(f, t, e));
+  A.match(await SP.writeNew(q, "text", { cx: rcx, ms: 100, drop: true }), /no answer in/); A.ok(!fsm.existsSync(q), "a write that landed but never answered: removed with drop");
+  const r = `${dir}/wn/r.json`;
+  patchFs({ readFile: (f, ...a) => (String(f) === r ? Promise.resolve("short") : realReadFile3(f, ...a)) });
+  A.match(await SP.writeNew(r, big, { drop: true }), /read back other text/); A.ok(!fsm.existsSync(r), "past the cap, a read-back that differs: removed with drop");
+  unhook3();
+  A.equal(await SP.isThere(p), true); A.equal(await SP.isThere(`${dir}/wn/none.json`), false); A.equal(await SP.isThere(`${dir}/nowhere/x.json`), false, "no folder: not there");
+}
+
+// ── 31. a freeze run: the idle sessions' files created and read back, named to the pattern, then the stubs saved ──
+{
+  const { st, sids } = coldStore([[1, { idle: 9, items: 3, turns: 2 }], [2, { idle: 12, items: 5, open: 2, turns: 3 }], [3, { idle: 1 }],
+    [4, { idle: 10 }], [5, { idle: 10 }], [6, { idle: 10, items: 0, turns: 0 }]]);
+  const [S1, S2, S3, S4, S5, S6] = sids;
+  const text0 = home3With(st), orig = JSON.parse(text0);
+  const counts = Object.fromEntries(sids.map((sid) => [sid, st.coldCounts(sid)]));
+  const w = await coldWriter();
+  globalThis.__herdr.terminals = () => [{ address: "t4", state: "live" }];                        // S4: an agent in a live pane
+  H.setShared("ledgr.detail", { open: { session: S5, kind: "ask", id: itemId(S5, 0) } });           // S5: shown in the open dialog
+  const io = [];
+  globalThis.__herdr.writeTextFile = (p, t, e, real) => { io.push({ op: "write", p, e }); return real(p, t, e); };
+  globalThis.__herdr.readTextFile = (p, real) => { io.push({ op: "read", p }); return real(p); };
+  A.equal(w.canFreeze(S4), false, "canFreeze: a session mapped to a live terminal stays warm"); A.equal(w.canFreeze(S5), false, "...and one the open dialog shows");
+  A.equal(w.canFreeze(S3), true, "...otherwise yes (idleness is the store's)");
+  w.passSids = new Set([S3]); A.equal(w.canFreeze(S3), false, "...and one the running pass names"); w.passSids = new Set();
+  csteps.length = 0;
+  const run = coldRun(w);
+  A.ok(run && w.house?.why === "cold", "the tick's cold run, as its own housekeeping run");
+  const t = (await run).cold.freeze;
+  A.deepEqual(t.frozen, [S2, S1], "the two idle sessions, oldest idle first (not the live pane's, the dialog's, the active one, nor the empty one)");
+  const files = coldFiles(), s = store3Of();
+  A.equal(files.length, 2, "two files");
+  for (const sid of [S1, S2]) {
+    const c = s.d.sessions[sid].cold, m = C.COLD_NAME.exec(c.file);
+    A.ok(m && m[1] === C.safeName(sid) && /^\d{13}$/.test(m[2]) && /^[0-9a-z]{6}$/.test(m[3]), `${sid.slice(0, 8)}: cold/<safe sid>.<ms>-<rand6>.json`);
+    A.equal(Number(m[2]), c.at, "...its ms the stub's `at`"); A.deepEqual(c.n, counts[sid], "...the stub keeps the counts");
+    A.equal(s.itemsOf(sid).length, 0, "...its items left store.json"); A.equal(s.d.turns[sid], undefined, "...and its turn records");
+    const rec = JSON.parse(fsm.readFileSync(`${cold3}/${c.file}`, "utf8"));
+    A.equal(rec.ledgr, "ledgr-cold"); A.equal(rec.v, 1); A.equal(rec.sessionId, sid); A.equal(rec.at, c.at);
+    A.deepEqual(rec.items, Object.values(orig.items).filter((it) => it.anchor.sessionId === sid), "...the file holds its items as they were, in order");
+    A.deepEqual(rec.turns, orig.turns[sid], "...its turn records"); A.deepEqual(rec.session, orig.sessions[sid], "...and its record (for repair)"); A.deepEqual(rec.n, counts[sid]);
+    const p = `${cold3}/${c.file}`, wi = io.findIndex((x) => x.op === "write" && x.p === p), ri = io.findIndex((x) => x.op === "read" && x.p === p);
+    A.ok(wi >= 0 && io[wi].e === null && ri > wi, "...created (writeTextFile's expected null), then read back");
+    A.ok(csteps.includes(`freeze ${sid.slice(0, 8)}: write`) && csteps.includes(`freeze ${sid.slice(0, 8)}: read back`), "...each a named step");
+  }
+  A.ok(csteps.includes("freeze: plan") && csteps.includes("cold sweep") && csteps.some((x) => x.startsWith("save")), "the plan, the save and the sweep named too");
+  for (const sid of [S3, S4, S5, S6]) A.ok(!s.isCold(sid) && JSON.stringify(s.itemsOf(sid)) === JSON.stringify(Object.values(orig.items).filter((it) => it.anchor.sessionId === sid)), `${sid.slice(0, 8)} stays as it was`);
+  A.ok(bytes(fsm.readFileSync(store3, "utf8")) < bytes(text0), "store.json smaller");
+  const snap = JSON.parse(fsm.readFileSync(`${data3}/snapshot.json`, "utf8"));
+  A.equal(snap.cold[S1].file, s.d.sessions[S1].cold.file); A.equal(snap.cold[S1].fault, null);
+  A.ok(!snap.items.some((it) => it.sessionId === S1 || it.sessionId === S2), "snapshot.json: the cold map, no cold items");
+  A.equal(w.house, null, "the run is over");
+  await w.logChain; A.match(log3(), /cold: 2 session\(s\) moved out of store\.json into cold\/ \(2 file\(s\), \d+ bytes, the largest \d+\); store\.json \d+ -> \d+ characters/);
+  // Nothing more while S4 and S5 are kept warm; then they go too (S6, with nothing to move, never).
+  io.length = 0;
+  const t2 = (await coldRun(w)).cold.freeze;
+  A.equal(t2.planned, 0); A.ok(!io.some((x) => x.op === "write" && x.p.startsWith(cold3)), "no file written");
+  delete globalThis.__herdr.terminals; H.setShared("ledgr.detail", null);
+  const t3 = (await coldRun(w)).cold.freeze;
+  A.deepEqual(new Set(t3.frozen), new Set([S4, S5]), "the live pane gone and the dialog closed: they go"); A.ok(!store3Of().isCold(S6) && !store3Of().isCold(S3));
+  unhook3();
+}
+
+// ── 31b. COLD_RUN_MAX, COLD_RUN_MS, and a session changed between the plan and the commit ──
+{
+  const { st, sids } = coldStore(Array.from({ length: 42 }, (_, i) => [200 + i, { items: 1, turns: 1, idle: 8 + i / 100 }]));
+  home3With(st);
+  const w = await coldWriter();
+  const t = (await coldRun(w)).cold.freeze;
+  A.equal(t.frozen.length, WR.COLD_RUN_MAX, "at most COLD_RUN_MAX sessions in one run");
+  A.equal((await coldRun(w)).cold.freeze.frozen.length, 2, "the rest in the next");
+  // No session begun after COLD_RUN_MS: the clock jumps a minute after the first file.
+  const { st: st2, sids: s2 } = coldStore([[250, {}], [251, {}], [252, {}]]);
+  home3With(st2);
+  const w2 = await coldWriter();
+  const realNow = Date.now;
+  let skew = 0;
+  globalThis.__herdr.writeTextFile = (p, t, e, real) => { if (p.startsWith(`${cold3}/`)) skew = WR.COLD_RUN_MS + 1000; return real(p, t, e); };
+  Date.now = () => realNow() + skew;
+  let t2;
+  try { t2 = (await coldRun(w2)).cold.freeze; } finally { Date.now = realNow; unhook3(); }
+  A.equal(t2.frozen.length, 1, "after COLD_RUN_MS no new session is begun"); A.equal(t2.left, 2, "...the others left for the next run");
+  // A drain applies an event to a planned session while its file is written: that session is not committed, its file goes.
+  const { st: st3, sids: [X, Y] } = coldStore([[260, {}], [261, {}]]);
+  home3With(st3);
+  const w3 = await coldWriter();
+  const ev = actEv(X, itemId(X, 0), "resolve");
+  let raced = false;
+  globalThis.__herdr.writeTextFile = (p, t, e, real) => {
+    if (!raced && p.startsWith(`${cold3}/${C.safeName(X)}.`)) { raced = true; return (async () => { put3(ev); await w3.reader.drain(cx); return real(p, t, e); })(); }
+    return real(p, t, e);
+  };
+  const t3 = (await coldRun(w3)).cold.freeze;
+  unhook3();
+  A.ok(raced && applied3.get(ev.id) === 1, "the event applied meanwhile");
+  A.deepEqual(t3.frozen, [Y], "the changed session stays warm, the other goes"); A.equal(t3.removed, 1, "...its file removed");
+  A.deepEqual(coldFiles(), [store3Of().d.sessions[Y].cold.file], "only the committed file is left");
+  A.equal(store3Of().item(itemId(X, 0)).status, "resolved");
+  void sids; void s2;
+}
+
+// ── 32. a name already taken, a read-back that differs: the session stays warm; the next run freezes it ──
+{
+  const { st, sids: [S1, S2] } = coldStore([[11, {}], [12, {}]]);
+  home3With(st);
+  const w = await coldWriter();
+  let taken = null, garbled = null;
+  globalThis.__herdr.writeTextFile = (p, t, e, real) => {
+    if (!taken && p.startsWith(`${cold3}/${C.safeName(S1)}.`)) { taken = p; fsm.writeFileSync(p, "taken\n"); }
+    return real(p, t, e);
+  };
+  globalThis.__herdr.readTextFile = (p, real) => (!garbled && p.startsWith(`${cold3}/${C.safeName(S2)}.`) ? (garbled = p, real(p).then((x) => x.slice(0, -10))) : real(p));
+  const t = (await coldRun(w)).cold.freeze;
+  unhook3();
+  A.deepEqual(t.frozen, []); A.equal(t.failed.length, 2);
+  A.equal(fsm.readFileSync(taken, "utf8"), "taken\n", "a name already there: that file untouched (it is not this run's)");
+  A.ok(!fsm.existsSync(garbled), "a read-back that differs: the file removed");
+  const s = store3Of();
+  A.ok(!s.isCold(S1) && !s.isCold(S2) && s.itemsOf(S1).length === 3 && s.itemsOf(S2).length === 3, "both stay warm, whole");
+  await w.logChain; A.match(log3(), /cold: 0 session\(s\) moved .*2 file\(s\) not written, those sessions stay/);
+  const r2 = (await coldRun(w)).cold;
+  A.deepEqual(new Set(r2.freeze.frozen), new Set([S1, S2]), "the next run freezes both, under new names");
+  A.ok(store3Of().d.sessions[S1].cold.file !== base(taken));
+  // Integration (2026-11-19): a file no record names goes only once a read proves store.json holds all of it. This
+  // one is under a day old, and is no cold file at all ("taken"): it stays, now and a day on, said once.
+  A.deepEqual(r2.sweep.removed, [], "the stray file under the session's name: under a day old, not read");
+  const r3 = await w.coldSweep(w.gen, Date.now() + 2 * WR.COLD_KEEP_MS);
+  A.deepEqual(r3.removed, [], "a day on: read, not a cold record, so never deleted"); A.deepEqual(r3.kept, [base(taken)]);
+  A.ok(fsm.existsSync(taken)); await w.logChain; A.match(log3(), new RegExp(`cold sweep: cold/${base(taken).replace(/\./g, "\\.")} could not be read .*kept, never deleted`));
+  A.deepEqual((await w.coldSweep(w.gen, Date.now() + 2 * WR.COLD_KEEP_MS)).kept, [], "...not read again by this writer");
+}
+
+// ── 33. a freeze given up at each await: no stub names a missing file, a restart from disk loses nothing, a
+// late file is a harmless orphan, gone only once superseded ──
+for (const where of ["mkdir", "write", "read back", "save"]) {
+  const { st, sids: [S] } = coldStore([[20, {}]]);
+  home3With(st);
+  const w = await coldWriter(`given-up ${where}`);
+  let held = null;
+  const coldP = (p) => String(p).startsWith(`${cold3}/`) && !String(p).includes("/held/");
+  if (where === "mkdir") patchFs({ mkdir: (p, o) => (!held && String(p) === cold3 ? new Promise((res) => { held = { go: () => realMkdir3(p, o).then(res) }; }) : realMkdir3(p, o)) });
+  if (where === "write") globalThis.__herdr.writeTextFile = (p, t, e, real) => (!held && coldP(p) ? new Promise((res) => { held = { p, go: () => real(p, t, e).then(res) }; }) : real(p, t, e));
+  if (where === "read back") globalThis.__herdr.readTextFile = (p, real) => (!held && coldP(p) ? new Promise((res) => { held = { p, go: () => real(p).then(res) }; }) : real(p));
+  if (where === "save") globalThis.__herdr.writeTextFile = (p, t, e, real) => (!held && p === store3 ? new Promise(() => { held = { go: () => {} }; }) : real(p, t, e));
+  const run = coldRun(w);
+  await until(() => held, `the freeze to wait in its ${where}`);
+  const stepRe = { mkdir: /^housekeeping: freeze: making cold\/$/, write: /: write$/, "read back": /: read back$/, save: /^housekeeping: save: store\.json writeTextFile$/ }[where];
+  A.match(w.progress().step, stepRe, `progress() names the step the run waits in (${where})`);
+  if (where === "save") A.ok(w.live.isCold(S), "(committed in memory, its save waiting)");
+  w.house.since -= 100000;
+  w.tick(cx);
+  A.equal(w.stall?.kind, "house", `the watchdog gives the run up (${where})`);
+  await until(() => !w.starting && w.started, "the restart");
+  A.ok(!w.live.isCold(S) && w.live.itemsOf(S).length === 3, "the restart reads store.json: the session warm, whole");
+  held.go();
+  if (where !== "save") A.equal((await run).cold, null, "the given-up run stops after its late answer: no commit, no save");
+  const s = store3Of();
+  A.ok(!s.isCold(S) && s.itemsOf(S).length === 3 && Object.keys(s.d.turns[S]).length === 2, `store.json: nothing lost (${where})`);
+  A.ok(Object.values(s.d.sessions).every((x) => !x.cold || fsm.existsSync(`${cold3}/${x.cold.file}`)), "no stub names a missing file");
+  const hD = new Writer("hostD"); hD.booted = true; await hD.start(cx);
+  A.equal(hD.live.itemsOf(S).length, 3, "a writer starting from disk has every item"); hD.release();
+  await w.start(cx);
+  const orphans = coldFiles();
+  if (where === "mkdir") A.deepEqual(orphans, [], "nothing written");
+  else {
+    A.equal(orphans.length, 1, `the ${where === "write" ? "late " : ""}file landed under its own name, unnamed`);
+    if (held.p) A.equal(JSON.parse(fsm.readFileSync(held.p, "utf8")).sessionId, S, "...whole");
+    A.deepEqual((await w.coldSweep(w.gen)).removed, [], "the sweep keeps an orphan of a session untouched since (a freeze given up)");
+  }
+  unhook3();
+  const r = (await coldRun(w)).cold;
+  A.deepEqual(r.freeze.frozen, [S], "the next run freezes it under a new name");
+  A.deepEqual(r.sweep.removed, [], "...its sweep keeps the orphan while it is under a day old");
+  A.deepEqual((await w.coldSweep(w.gen, Date.now() + 2 * WR.COLD_KEEP_MS)).removed, orphans, "...and a day on removes it, read and proven redundant (every item in the session's named file)");
+  A.deepEqual(coldFiles(), [store3Of().d.sessions[S].cold.file]);
+}
+
+// ── 34. an event for a cold session: brought back and applied in one pass; the file stays until the grace ──
+{
+  const { st, sids: [S, S2] } = coldStore([[30, { items: 3, open: 2 }], [31, {}]]);
+  home3With(st);
+  const w = await coldWriter();
+  await coldRun(w);
+  const F = store3Of().d.sessions[S].cold.file;
+  const X = itemId(S, 0), ev = actEv(S, X, "resolve");
+  psteps.length = 0;
+  put3(ev);
+  await w.reader.drain(cx);
+  A.deepEqual(spool3Files(), [], "applied in one pass");
+  const s = store3Of();
+  A.ok(!s.isCold(S), "the session is warm again"); A.equal(s.itemsOf(S).length, 3, "every item back"); A.equal(Object.keys(s.d.turns[S]).length, 2, "...its turn records");
+  A.equal(s.item(X).status, "resolved", "the event applied to an item from the file"); A.equal(applied3.get(ev.id), 1);
+  A.ok(s.d.sessions[S].thawedAt >= NOW); A.ok(s.isCold(S2), "the other session stays cold");
+  A.ok(psteps.includes(`apply: cold ${S.slice(0, 8)}`) && psteps.includes(`apply: cold ${S.slice(0, 8)} read`), "named steps of the pass");
+  const snap = JSON.parse(fsm.readFileSync(`${data3}/snapshot.json`, "utf8"));
+  A.ok(snap.items.some((it) => it.id === itemId(S, 1)), "snapshot.json holds the session's open item"); A.equal(snap.cold[S], undefined); A.ok(snap.cold[S2]);
+  A.ok(fsm.existsSync(`${cold3}/${F}`), "the thaw leaves the file");
+  const th = s.d.sessions[S].thawedAt;
+  A.deepEqual((await w.coldSweep(w.gen, th + 30 * 60e3)).removed, [], "within COLD_GRACE_MS: kept");
+  A.deepEqual((await w.coldSweep(w.gen, th + 2 * HOURMS)).removed, [F], "past it: removed");
+  await w.logChain; A.match(log3(), /cold: 1 session\(s\) back from cold\/ \(c01d0030: 3 item\(s\), 2 turn record\(s\)\)/);
+  // An act "seen" needs no thaw (it marks the stub's chip seen).
+  put3({ ...actEv(S2, itemId(S2, 0), "seen"), item: null });
+  await w.reader.drain(cx);
+  A.ok(store3Of().isCold(S2), "an act seen leaves the session cold");
+}
+
+// ── 35. branch_started with a cold parent, pins_asked with a cold for_session: both sessions back ──
+{
+  const { st, sids: [P, Ch, T, Q] } = coldStore([[40, {}], [41, {}], [42, {}], [43, {}]]);
+  home3With(st);
+  const w = await coldWriter();
+  A.equal((await coldRun(w)).cold.freeze.frozen.length, 4);
+  const at = Date.now();
+  const bs = { v: 1, id: "bs-35", type: "branch_started", at, session_id: Ch, terminal: "t41", parent_session_id: P, item_id: "rq_none", anchor_turn: 1, fork_turn: 2, depth: 1, branch_id: "br_x35", source: "startup" };
+  const pa = { v: 1, id: "pa-35", type: "pins_asked", at: at + 1, session_id: T, terminal: "t42", turn: 3, item_id: itemId(Q, 0), for_session: Q };
+  put3(bs); put3(pa);
+  await w.reader.drain(cx);
+  A.deepEqual(spool3Files(), []);
+  const s = store3Of();
+  for (const x of [P, Ch, T, Q]) A.ok(!s.isCold(x) && s.itemsOf(x).length === 3, `${x.slice(0, 8)} back (branch_started: child and parent; pins_asked: trunk and for_session)`);
+  A.equal(applied3.get("bs-35"), 1); A.equal(applied3.get("pa-35"), 1);
+}
+
+// ── 36. Forget of a cold session reads nothing; its file goes a day later ──
+{
+  const { st, sids: [S] } = coldStore([[50, {}]]);
+  home3With(st);
+  const w = await coldWriter();
+  await coldRun(w);
+  const F = store3Of().d.sessions[S].cold.file, reads = [];
+  patchFs({ readFile: (p, ...a) => { if (String(p).startsWith(`${cold3}/`)) reads.push(String(p)); return realReadFile3(p, ...a); } });
+  const fg = { v: 1, id: "fg-36", type: "forget", at: Date.now(), session_id: S };
+  put3(fg);
+  await w.reader.drain(cx);
+  unhook3();
+  A.deepEqual(reads, [], "Forget read no cold file"); A.deepEqual(spool3Files(), []);
+  const s = store3Of();
+  A.equal(s.d.sessions[S], undefined); A.equal(s.d.forgotten[S], fg.at); A.ok(fsm.existsSync(`${cold3}/${F}`), "the file stays");
+  A.deepEqual((await w.coldSweep(w.gen, fg.at + HOURMS)).removed, [], "kept a while after the Forget");
+  A.deepEqual((await w.coldSweep(w.gen, fg.at + WR.COLD_KEEP_MS + 1000)).removed, [F], "removed past COLD_KEEP_MS");
+}
+
+// ── 37. a file that cannot be read (missing, broken, another session's): the session faulted, its events held
+// (the spool empty, nothing waits), retried, replayed in name order once; Try again; Use without its older items ──
+{
+  const { st, sids: [M, B, R] } = coldStore([[60, { items: 2, open: 2 }], [61, { items: 2, open: 2 }], [62, { items: 2, open: 2 }]]);
+  home3With(st);
+  const w = await coldWriter();
+  await coldRun(w);
+  const s0 = store3Of(), fileOf = (sid) => s0.d.sessions[sid].cold.file;
+  const recM = fsm.readFileSync(`${cold3}/${fileOf(M)}`, "utf8"), recB = fsm.readFileSync(`${cold3}/${fileOf(B)}`, "utf8");
+  fsm.unlinkSync(`${cold3}/${fileOf(M)}`);
+  fsm.writeFileSync(`${cold3}/${fileOf(B)}`, "{ broken");
+  fsm.writeFileSync(`${cold3}/${fileOf(R)}`, JSON.stringify({ ...JSON.parse(fsm.readFileSync(`${cold3}/${fileOf(R)}`, "utf8")), sessionId: csid(99) }));
+  const t0 = Date.now();
+  const e1 = actEv(M, itemId(M, 0), "resolve", t0), e2 = actEv(B, itemId(B, 0), "resolve", t0 + 1);
+  const e3 = { v: 1, id: "ask-37", type: "asks", at: t0 + 2, session_id: R, terminal: "t62", turn: 3, source: "tool", tool_call: 1, asks: [{ text: "Pick the region", kind: "decide", level: "blocking" }] };
+  const n1 = put3(e1), n2 = put3(e2), n3 = put3(e3);
+  await w.reader.drain(cx);
+  A.deepEqual(spool3Files(), [], "the three events left the spool: held, not waiting");
+  const s1 = store3Of();
+  for (const [sid, re, n] of [[M, /is missing/, n1], [B, /does not parse/, n2], [R, /c01d0099/, n3]]) {
+    const f = s1.d.sessions[sid].cold.fault;
+    A.ok(f, `${sid.slice(0, 8)} faulted`); A.match(f.error, re); A.equal(f.tries, 1); A.equal(f.held, 1, "...one event held");
+    A.deepEqual(heldFiles(sid), [n], "...kept in cold/held/<safe sid>/ under the spool file's own name");
+  }
+  A.equal(fsm.readFileSync(`${held3}/${C.safeName(M)}/${n1}`, "utf8"), JSON.stringify(e1), "...its exact text");
+  A.equal(applied3.get(e1.id), undefined, "nothing applied");
+  A.equal(JSON.parse(fsm.readFileSync(`${data3}/snapshot.json`, "utf8")).cold[M].fault.includes("is missing"), true, "snapshot.json names the fault");
+  A.equal(await w.checkWaiting(cx, w.gen), false, "checkWaiting finds nothing waiting"); A.ok(!w.stall || w.stall.ok, "...no stall");
+  A.deepEqual((await w.coldSweep(w.gen, Date.now() + 3 * WR.COLD_KEEP_MS)).removed, [], "the sweep leaves a faulted session's files"); A.deepEqual(heldFiles(M), [n1], "...and cold/held/");
+  // Later events are held too, with no read before the retry is due.
+  const tried = w.coldTried.get(M), e4 = actEv(M, itemId(M, 0), "reopen", t0 + 10), n4 = put3(e4);
+  await w.reader.drain(cx);
+  A.deepEqual(spool3Files(), []); A.deepEqual(heldFiles(M), [n1, n4]);
+  A.equal(store3Of().d.sessions[M].cold.fault.held, 2); A.equal(store3Of().d.sessions[M].cold.fault.tries, 1, "no read before the retry is due"); A.equal(w.coldTried.get(M), tried);
+  await w.logChain; A.match(log3(), /cold: c01d0060's cold\/\S+ cannot be read \(cold\/\S+ is missing\); its events are kept in cold\/held\/c01d0060/);
+  // The file is back; the tick's retry (COLD_RETRY_MS later) brings the session back, the held events replay in name order, once.
+  fsm.writeFileSync(`${cold3}/${fileOf(M)}`, recM);
+  A.equal(w.coldTick(cx, w.gen), false, "the retry is not due yet: no pass");
+  w.coldTried.set(M, Date.now() - WR.COLD_RETRY_MS - 1);
+  A.equal(w.coldTick(cx, w.gen), true, "due: a pass"); A.ok(w.wantThaw.has(M));
+  w.tick(cx);
+  await until(() => !store3Of().isCold(M) && !w.reader.running, "the retry to bring the session back");
+  const s2 = store3Of();
+  A.equal(s2.item(itemId(M, 0)).status, "open", "replayed in name order (resolve, then reopen)");
+  A.equal(applied3.get(e1.id), 1); A.equal(applied3.get(e4.id), 1, "each once");
+  A.ok(!fsm.existsSync(`${held3}/${C.safeName(M)}`), "the held files and their folder are gone"); A.ok(!w.heldSids.has(C.safeName(M)));
+  // Try again (cold_retry) with the file still broken: read at once, the event consumed, never held.
+  put3({ v: 1, id: "cr-37a", type: "cold_retry", at: Date.now(), session_id: B });
+  await w.reader.drain(cx);
+  A.deepEqual(spool3Files(), [], "Try again consumed"); A.deepEqual(heldFiles(B), [n2], "...not held"); A.equal(store3Of().d.sessions[B].cold.fault.tries, 2, "...the file read again at once");
+  fsm.writeFileSync(`${cold3}/${fileOf(B)}`, recB);
+  put3({ v: 1, id: "cr-37b", type: "cold_retry", at: Date.now(), session_id: B });
+  await w.reader.drain(cx);
+  A.ok(!store3Of().isCold(B), "Try again with the file mended: back"); A.equal(store3Of().item(itemId(B, 0)).status, "resolved", "...its held event replayed");
+  A.ok(!fsm.existsSync(`${held3}/${C.safeName(B)}`));
+  // Use without its older items (cold_reset): warm and empty, coldLost kept, the held event replays into it.
+  put3({ v: 1, id: "rs-37", type: "cold_reset", at: Date.now(), session_id: R, file: fileOf(R) });
+  await w.reader.drain(cx);
+  await until(() => !w.reader.running && !fsm.existsSync(`${held3}/${C.safeName(R)}`), "the reset's poke to replay the held event");
+  const s3 = store3Of(), lost = s3.d.sessions[R].coldLost;
+  A.ok(!s3.isCold(R)); A.equal(lost.file, fileOf(R)); A.match(lost.error, /c01d0099/);
+  const rest = s3.itemsOf(R);
+  A.equal(rest.length, 1, "the session holds only what replayed into it"); A.equal(rest[0].text, "Pick the region"); A.equal(rest[0].handle, "A3", "...under a handle past the file's (nextHandle)");
+  A.equal(applied3.get(e3.id), 1);
+  A.ok(fsm.existsSync(`${cold3}/${fileOf(R)}`), "the unreadable file is kept (coldLost names it)");
+}
+
+// ── 38. a read that gets no answer: the batch waits (no fault), one restart, then the spool-stall words ──
+{
+  const { st, sids: [S] } = coldStore([[70, {}]]);
+  home3With(st);
+  const w = await coldWriter();
+  await coldRun(w);
+  const F = store3Of().d.sessions[S].cold.file;
+  w.saveTimeout = 150;
+  patchFs({ readFile: (p, ...a) => (String(p) === `${cold3}/${F}` ? new Promise(() => {}) : realReadFile3(p, ...a)) });
+  const ev = actEv(S, itemId(S, 0), "resolve", Date.now() - 200000), n = put3(ev);
+  await w.reader.drain(rcx);
+  A.deepEqual(spool3Files(), [n], "the read got no answer: the event waits"); A.equal(w.reader.running, false, "...the pass ended");
+  A.ok(store3Of().isCold(S) && !w.live.d.sessions[S].cold.fault, "not faulted: tried again at the next pass"); A.match(w.note ?? "", /^reading cold\/\S+: no answer in 0\.\d s; tried again at the next pass$/);
+  // Second review (integration, 2026-11-19): reads that get no answer, in a row, are bounded. The second waits too;
+  // the third (COLD_TIMEOUT_MAX) faults the session, holds its event, and the spool moves.
+  A.equal(WR.COLD_TIMEOUT_MAX, 3);
+  await w.reader.drain(rcx);
+  A.deepEqual(spool3Files(), [n], "a second read with no answer: still waits"); A.ok(!store3Of().d.sessions[S].cold.fault);
+  await w.reader.drain(rcx);
+  A.deepEqual(spool3Files(), [], "the third: the session faulted, the spool moves"); A.deepEqual(heldFiles(S), [n], "...its event held");
+  A.match(store3Of().d.sessions[S].cold.fault?.error ?? "", /got no answer to 3 reads in a row/);
+  patchFs({ readFile: realReadFile3 }); w.saveTimeout = WR.SAVE_TIMEOUT_MS;
+  put3({ v: 1, id: "cr38", type: "cold_retry", at: Date.now(), session_id: S, file: F });
+  await w.reader.drain(rcx);
+  A.deepEqual(spool3Files(), [], "the host answers, Try again: applied"); A.ok(!store3Of().isCold(S)); A.equal(store3Of().item(itemId(S, 0)).status, "resolved", "the held event applied");
+  A.equal(w.coldTimeouts.has(S), false, "the count cleared");
+  // One read with no answer, then a good one: brought back as usual, nothing held.
+  const { st: st1, sids: [S1] } = coldStore([[73, {}]]);
+  home3With(st1);
+  const w1 = await coldWriter();
+  await coldRun(w1);
+  const F1 = store3Of().d.sessions[S1].cold.file;
+  w1.saveTimeout = 150;
+  let once = true;
+  patchFs({ readFile: (p, ...a) => (String(p) === `${cold3}/${F1}` && once ? (once = false, new Promise(() => {})) : realReadFile3(p, ...a)) });
+  const n1 = put3(actEv(S1, itemId(S1, 0), "resolve"));
+  // Two timeouts long ago (over COLD_RETRY_MS) and one now are not three in a row: the count starts again.
+  w1.coldTimeouts.set(S1, { n: 2, at: Date.now() - WR.COLD_RETRY_MS - 1000 });
+  await w1.reader.drain(rcx);
+  A.deepEqual(spool3Files(), [n1], "one read with no answer: waits"); A.ok(!store3Of().d.sessions[S1].cold.fault, "two old timeouts and one now: not faulted");
+  A.equal(w1.coldTimeouts.get(S1)?.n, 1, "...the count started again");
+  await w1.reader.drain(rcx);
+  A.deepEqual(spool3Files(), [], "the next read answers: applied"); A.ok(!store3Of().isCold(S1)); A.deepEqual(heldFiles(S1), [], "nothing held");
+  patchFs({ readFile: realReadFile3 }); w1.saveTimeout = WR.SAVE_TIMEOUT_MS; w1.release();
+  // A session only wanted (no event needs it) whose read gets no answer holds no event back.
+  const { st: st2, sids: [U, V] } = coldStore([[71, {}], [72, {}]]);
+  home3With(st2);
+  const w2 = await coldWriter();
+  await coldRun(w2);
+  const FU = store3Of().d.sessions[U].cold.file;
+  w2.saveTimeout = 150;
+  patchFs({ readFile: (p, ...a) => (String(p) === `${cold3}/${FU}` ? new Promise(() => {}) : realReadFile3(p, ...a)) });
+  w2.wantThaw.add(U);
+  const ev2 = actEv(V, itemId(V, 0), "resolve");
+  put3(ev2);
+  await w2.reader.drain(rcx);
+  A.deepEqual(spool3Files(), [], "the event for another session applies"); A.ok(!store3Of().isCold(V)); A.ok(w2.wantThaw.has(U) && store3Of().isCold(U), "the wanted one waits for a later pass");
+  unhook3(); w2.saveTimeout = WR.SAVE_TIMEOUT_MS;
+}
+
+// ── 39. a held copy that cannot be made keeps the spool file ──
+{
+  const { st, sids: [S] } = coldStore([[80, {}]]);
+  home3With(st);
+  const w = await coldWriter();
+  await coldRun(w);
+  fsm.unlinkSync(`${cold3}/${store3Of().d.sessions[S].cold.file}`);
+  globalThis.__herdr.writeTextFile = (p, t, e, real) => (p.includes("/cold/held/") ? Promise.reject(new Error("disk full")) : real(p, t, e));
+  const n = put3(actEv(S, itemId(S, 0), "resolve"));
+  await w.reader.drain(cx);
+  A.deepEqual(spool3Files(), [n], "not kept in cold/held: the spool keeps the event"); A.deepEqual(heldFiles(S), []);
+  A.match(w.note ?? "", /could not be kept in cold\/held/);
+  unhook3();
+  await w.reader.drain(cx);
+  A.deepEqual(spool3Files(), []); A.deepEqual(heldFiles(S), [n], "kept once writing works");
+  A.equal(store3Of().d.sessions[S].cold.fault.held, 1); A.equal(store3Of().d.sessions[S].cold.fault.tries, 1);
+}
+
+// ── 40. a held event still in the spool too (a crash before its spool file went): one event, applied once ──
+{
+  const { st, sids: [S] } = coldStore([[90, {}]]);
+  home3With(st);
+  const w = await coldWriter();
+  await coldRun(w);
+  const F = store3Of().d.sessions[S].cold.file, rec = fsm.readFileSync(`${cold3}/${F}`, "utf8");
+  fsm.unlinkSync(`${cold3}/${F}`);
+  const ev = actEv(S, itemId(S, 0), "resolve"), n = put3(ev);
+  await w.reader.drain(cx);
+  A.deepEqual(heldFiles(S), [n]);
+  fsm.writeFileSync(`${spool3}/${n}`, JSON.stringify(ev));
+  await w.reader.drain(cx);
+  A.deepEqual(spool3Files(), [], "the spool copy goes (held already, the same text)"); A.deepEqual(heldFiles(S), [n]);
+  A.equal(store3Of().d.sessions[S].cold.fault.held, 1, "not counted twice");
+  fsm.writeFileSync(`${spool3}/${n}`, JSON.stringify(ev));
+  fsm.writeFileSync(`${cold3}/${F}`, rec);
+  put3({ v: 1, id: "cr-40", type: "cold_retry", at: Date.now(), session_id: S });
+  await w.reader.drain(cx);
+  A.deepEqual(spool3Files(), []); A.ok(!fsm.existsSync(`${held3}/${C.safeName(S)}`), "both copies gone");
+  A.equal(applied3.get(ev.id), 1, "applied once"); A.equal(store3Of().item(itemId(S, 0)).status, "resolved");
+}
+
+// ── 41. retention.coldDays 0: every session back (a faulted one waits for its retry), nothing freezes ──
+{
+  const { st, sids: [S1, S2, S3] } = coldStore([[100, {}], [101, {}], [102, {}]]);
+  home3With(st);
+  const w = await coldWriter();
+  await coldRun(w);
+  fsm.unlinkSync(`${cold3}/${store3Of().d.sessions[S3].cold.file}`);
+  put3(actEv(S3, itemId(S3, 0), "resolve"));
+  await w.reader.drain(cx);
+  A.ok(store3Of().d.sessions[S3].cold.fault);
+  fsm.writeFileSync(`${data3}/config.json`, JSON.stringify({ ...CFG3, retention: { turns: 12, coldDays: 0 } }));
+  w.applyConfig(await C.loadConfig());
+  await until(() => !w.reader.running && !store3Of().isCold(S1) && !store3Of().isCold(S2), "coldDays 0: the sessions back");
+  A.ok(store3Of().d.sessions[S3].cold?.fault, "a faulted one stays (its retry brings it)");
+  A.deepEqual((await coldRun(w)).cold.freeze, { skipped: "coldDays 0" }, "and nothing freezes");
+}
+
+// ── 42. a mixed store (an older build added items beside a stub) is brought back at start, the store's copy winning ──
+{
+  const { st, sids: [S] } = coldStore([[110, { items: 3, open: 3 }]]);
+  home3With(st);
+  const w0 = await coldWriter();
+  await coldRun(w0);
+  w0.release();
+  const d = JSON.parse(fsm.readFileSync(store3, "utf8")), file = d.sessions[S].cold.file, rec = JSON.parse(fsm.readFileSync(`${cold3}/${file}`, "utf8"));
+  const y = { ...rec.items[1], text: "the store's copy (newer)" }, z = { ...mkItem(S, 110, 9), id: `rq_${S.slice(0, 8)}-new`, handle: "A9" };
+  d.items[y.id] = y; d.items[z.id] = z;
+  fsm.writeFileSync(store3, JSON.stringify(d));
+  await coldWriter("mixed");
+  const s = store3Of();
+  A.ok(!s.isCold(S), "brought back by the start's first pass"); A.equal(s.itemsOf(S).length, 4);
+  A.equal(s.item(y.id).text, "the store's copy (newer)", "the store's copy wins"); A.equal(s.item(rec.items[0].id).text, rec.items[0].text, "the file's others back");
+  A.ok(s.d.sessions[S].nextHandle.A >= 10, "nextHandle past every handle held");
+}
+
+// ── 43. a takeover during a freeze: the old holder's late write commits and saves nothing ──
+{
+  const { st, sids: [S] } = coldStore([[120, {}]]);
+  home3With(st);
+  const hA = await coldWriter("hostA"), hB = new Writer("hostB");
+  hB.booted = true;
+  let held = null;
+  globalThis.__herdr.writeTextFile = (p, t, e, real) => (!held && p.startsWith(`${cold3}/`) ? new Promise((res, rej) => { held = { p, go: () => real(p, t, e).then(res, rej) }; }) : real(p, t, e));
+  const run = coldRun(hA);
+  await until(() => held, "host A's freeze to wait in its write");
+  hA.house.since -= 300000; hA.beat();
+  hB.probe(cx);
+  A.equal(hB.starting, true, "host B takes the stuck claim");
+  await until(() => !hB.starting && hB.started, "host B's start");
+  A.equal(writerClaim().id, hB.id);
+  held.go();
+  A.equal((await run).cold, null, "host A's run stops after its late write");
+  A.ok(!store3Of().isCold(S) && store3Of().itemsOf(S).length === 3, "store.json: the session warm, whole"); A.ok(!hB.live.isCold(S));
+  A.ok(fsm.existsSync(held.p), "the late file is an orphan nobody names");
+  unhook3();
+  hB.release(); hA.retire();
+}
+
+// ── 44. a session going cold during a pass's awaits: passSids keeps it warm; were it frozen all the same, the
+// check right before the apply loop brings it back first ──
+{
+  const { st, sids: [S] } = coldStore([[130, { items: 2, open: 2 }]]);
+  home3With(st);
+  const w = await coldWriter();
+  const rel = `archive/${SP.archiveDir(S)}/items-1-abcdef.jsonl`;
+  let held = null;
+  patchFs({ readFile: (p, ...a) => (!held && String(p) === `${data3}/${rel}` ? new Promise((res, rej) => { held = { go: () => realReadFile3(p, ...a).then(res, rej) }; }) : realReadFile3(p, ...a)) });
+  const rs = { v: 1, id: "rs-44", type: "restore", at: Date.now(), session_id: S, item: itemId(S, 0), file: "items-1-abcdef.jsonl", reopen: true };
+  const ac = actEv(S, itemId(S, 1), "resolve");
+  put3(rs); put3(ac);
+  const d = w.reader.drain(cx);
+  await until(() => held, "the pass to wait reading the restore's archive file");
+  A.ok(w.passSids.has(S) && w.canFreeze(S) === false, "the running pass names the session: it cannot go cold");
+  const t = (await coldRun(w)).cold.freeze;
+  A.deepEqual(t.frozen, [], "a freeze meanwhile leaves it warm");
+  w.canFreeze = () => true;
+  A.deepEqual((await coldRun(w)).cold.freeze.frozen, [S], "(canFreeze bypassed: frozen during the pass's await)");
+  delete w.canFreeze;
+  held.go();
+  await d;
+  unhook3();
+  A.deepEqual(spool3Files(), []);
+  const s = store3Of();
+  A.ok(!s.isCold(S), "the pass brought it back before applying"); A.equal(s.item(itemId(S, 1)).status, "resolved", "...and applied the act"); A.equal(applied3.get(ac.id), 1);
+  A.ok(s.d.ingested.includes("rs-44"), "the restore consumed too");
+}
+
+// ── 45. track skips cold sessions; runRetry writes nothing for one ──
+{
+  const { st, sids: [S] } = coldStore([[140, {}]]);
+  home3With(st);
+  const w = await coldWriter();
+  await coldRun(w);
+  A.ok(w.live.isCold(S));
+  w.live.d.sessions[S].state = "working";
+  const timers = [], tcx3 = { ...cx, timer: { after: (ms) => { timers.push(ms); return null; }, every: () => {} } };
+  globalThis.__herdr.agents = () => [{ address: "t140", status: "working" }];
+  w.track(tcx3);
+  globalThis.__herdr.agents = () => [{ address: "t140", status: "idle" }];
+  w.track(tcx3);
+  A.deepEqual(timers, [], "no interrupt timer for a cold session"); A.equal(w.lastStatus.has("t140"), false, "...its terminal not tracked");
+  unhook3();
+  w.runRetry({ sid: S, turn: 1, terminal: "t140" }, cx);
+  await sleep(100);
+  A.equal(w.live.d.turns[S], undefined, "runRetry wrote no turn record beside the stub");
+}
+
+// ── 46. poke: one pass on an empty spool; a poke during a pass rides it; no spool folder at all ──
+{
+  const calls = [];
+  const rd = new SP.SpoolReader(async (b) => { calls.push(b.length); return true; });
+  await rd.drain(cx);
+  A.deepEqual(calls, [], "a drain with nothing in the spool applies nothing");
+  await rd.poke(cx);
+  A.deepEqual(calls, [0], "poke: one pass with an empty batch"); A.equal(rd.want, false);
+  let release = null;
+  const rd2 = new SP.SpoolReader(async () => { calls.push("pass"); if (!release) await new Promise((r) => { release = r; }); return true; });
+  calls.length = 0;
+  const d2 = rd2.poke(cx);
+  await until(() => release, "the first pass");
+  rd2.poke(cx);
+  release(); await d2;
+  A.deepEqual(calls, ["pass", "pass"], "a poke during a pass: one more round of it");
+  fsm.rmSync(spool3, { recursive: true, force: true });
+  calls.length = 0;
+  const rd3 = new SP.SpoolReader(async (b) => { calls.push(b.length); return true; });
+  await rd3.poke(cx);
+  A.deepEqual(calls, [0], "no spool folder: the poke's pass runs all the same"); A.equal(rd3.missing, true);
+  fsm.mkdirSync(spool3, { recursive: true });
+}
+
+// ── 47. a cold file past 1.2 MiB: fs.writeFile to its new name, read back and brought back with fs.readFile ──
+{
+  const { st } = coldStore([]);
+  const S = coldSession(st, 150, { items: 0, turns: 2 });
+  for (let i = 0; i < 320; i++) {
+    const it = mkItem(S, 150, i, { status: "answered", age: 9 });
+    it.anchor.quote = "q".repeat(4000); it.createdAt = it.updatedAt = NOW - 9 * DAYMS - 1000;
+    st.d.items[it.id] = it;
+  }
+  st.d.sessions[S].nextHandle = { A: 321, Q: 1, P: 1 };
+  home3With(st);
+  const w = await coldWriter();
+  const fw = [], fr = [], tw = [];
+  patchFs({ writeFile: (p, d) => { if (String(p).startsWith(`${cold3}/`)) fw.push(String(p)); return realWriteFile(p, d); },
+    readFile: (p, ...a) => { if (String(p).startsWith(`${cold3}/`)) fr.push(String(p)); return realReadFile3(p, ...a); } });
+  globalThis.__herdr.writeTextFile = (p, t, e, real) => { if (p.startsWith(`${cold3}/`)) tw.push(p); return real(p, t, e); };
+  A.deepEqual((await coldRun(w)).cold.freeze.frozen, [S]);
+  const F = store3Of().d.sessions[S].cold.file, size = fsm.statSync(`${cold3}/${F}`).size;
+  A.ok(size > 1.2 * CAP, `a cold file past 1.2 MiB (${size} bytes)`);
+  A.deepEqual(fw, [`${cold3}/${F}`], "written through fs.writeFile to its new name"); A.deepEqual(tw, [], "...not writeTextFile");
+  A.deepEqual(fr, [`${cold3}/${F}`], "read back with fs.readFile");
+  put3(actEv(S, itemId(S, 5), "resolve"));
+  await w.reader.drain(cx);
+  unhook3();
+  A.equal(store3Of().itemsOf(S).length, 320, "brought back whole"); A.equal(fr.length, 2, "...read with fs.readFile");
+}
+
+// ── 48. the live-shape fixture (fixture_cold.mjs): 20 sessions out, every file on the fast path, the largest
+// under 40 KB, store.json about 0.6 MB ──
+{
+  const { data: fx, sids } = FX.liveShape({ now: Date.now() });
+  fx.houseAt = Date.now();
+  home3With(Store.fromText(JSON.stringify(fx)));
+  const before = bytes(fsm.readFileSync(store3, "utf8"));
+  const w = await coldWriter("live-shape");
+  const fw = [], tw = [];
+  patchFs({ writeFile: (p, d) => { if (String(p).startsWith(`${cold3}/`)) fw.push(String(p)); return realWriteFile(p, d); } });
+  globalThis.__herdr.writeTextFile = (p, t, e, real) => { if (p.startsWith(`${cold3}/`)) tw.push(p); return real(p, t, e); };
+  const t = (await coldRun(w)).cold.freeze;
+  unhook3();
+  A.deepEqual(new Set(t.frozen), new Set(sids.cold), "the 20 sessions idle past a week, and only they"); A.equal(t.frozen.length, 20);
+  A.deepEqual(fw, [], "no file through fs.writeFile"); A.equal(tw.length, 20, "every file on the fast path (writeTextFile, create-only)");
+  const sizes = coldFiles().map((f) => fsm.statSync(`${cold3}/${f}`).size);
+  A.ok(Math.max(...sizes) < 40 * 1024, `the largest under 40 KB (${Math.max(...sizes)})`);
+  const after = bytes(fsm.readFileSync(store3, "utf8")), s = store3Of();
+  A.ok(after > 0.55e6 && after < 0.7e6 && before - after > 0.15e6, `store.json ${before} -> ${after} bytes`);
+  A.ok([...sids.active, ...sids.empty].every((sid) => !s.isCold(sid)), "the active sessions and the nine with nothing to move stay");
+}
+
+// ── 49. the sweep never decides from memory ahead of disk (risk 2): a thaw whose save has not landed, a save that failed ──
+{
+  const { st, sids: [S, S2] } = coldStore([[160, {}], [161, {}]]);
+  home3With(st);
+  const w = await coldWriter();
+  await coldRun(w);
+  const F = store3Of().d.sessions[S].cold.file, F2 = store3Of().d.sessions[S2].cold.file;
+  // (i) The thaw's save has not landed: the sweep waits for the store to be written, the file stays meanwhile.
+  let held = null;
+  globalThis.__herdr.writeTextFile = (p, t, e, real) => (!held && p === store3 ? new Promise((res, rej) => { held = { go: () => real(p, t, e).then(res, rej) }; }) : real(p, t, e));
+  put3(actEv(S, itemId(S, 0), "resolve"));
+  const d = w.reader.drain(cx);
+  await until(() => held, "the pass to wait in its save");
+  A.ok(!w.live.isCold(S) && store3Of().isCold(S), "thawed in memory; store.json still names the file");
+  let sw = null;
+  const sweep = w.coldSweep(w.gen, Date.now() + 2 * HOURMS).then((r) => { sw = r; });
+  await sleep(50);
+  A.equal(sw, null, "the sweep waits for store.json"); A.ok(fsm.existsSync(`${cold3}/${F}`), "...the file stays while the disk store names it");
+  held.go(); await d; await sweep;
+  A.ok(!store3Of().isCold(S), "saved"); A.deepEqual(sw.removed, [F], "then, past the grace, it may go");
+  // (ii) store.json cannot be written: memory stays ahead, the sweep decides nothing.
+  globalThis.__herdr.writeTextFile = (p, t, e, real) => (p === store3 ? Promise.reject(new Error("disk full")) : real(p, t, e));
+  const n = put3(actEv(S2, itemId(S2, 0), "resolve"));
+  await w.reader.drain(cx);
+  A.deepEqual(spool3Files(), [n], "not saved: the event waits"); A.ok(!w.live.isCold(S2) && store3Of().isCold(S2), "thawed in memory only");
+  sw = await w.coldSweep(w.gen, Date.now() + 2 * HOURMS);
+  A.equal(sw.skipped, "the store in memory is not store.json", "the sweep decides nothing"); A.ok(fsm.existsSync(`${cold3}/${F2}`), "...the file the disk store names stays");
+  unhook3();
+  await w.reader.drain(cx);
+  A.deepEqual(spool3Files(), []); A.deepEqual((await w.coldSweep(w.gen, Date.now() + 2 * HOURMS)).removed, [F2], "saved: past the grace it goes");
+}
+// ── 50. the other builders' findings: coldDays 0 during a run in flight (D, --thaw-all); an act with no item id but a
+// handle (D, resolve_asks on an unreadable session); a cold_retry or cold_reset naming a file the stub no longer
+// names (C); snapshot.json before the spool files go when sessions came back (D) ──
+{
+  // A run paused between its file write and its commit; coldDays goes to 0 meanwhile: nothing commits.
+  const { st, sids: [S] } = coldStore([[170, {}]]);
+  home3With(st);
+  const w = await coldWriter();
+  let held = null;
+  globalThis.__herdr.readTextFile = (p, real) => (!held && p.startsWith(`${cold3}/`) ? new Promise((res) => { held = { p, go: () => real(p).then(res) }; }) : real(p));
+  const run = coldRun(w);
+  await until(() => held, "the run to wait between its write and its commit");
+  fsm.writeFileSync(`${data3}/config.json`, JSON.stringify({ ...CFG3, retention: { turns: 12, coldDays: 0 } }));
+  A.equal(w.canFreeze(S), true, "(the writer has not read the new config.json yet)");
+  held.go();
+  const t = (await run).cold.freeze;
+  unhook3();
+  A.ok(csteps.includes("freeze: config.json"), "the run reads config.json again before its commit");
+  A.deepEqual(t.frozen, [], "coldDays 0 written meanwhile: the run in flight commits nothing"); A.equal(t.removed, 1, "...its file removed at once");
+  A.equal(w.canFreeze(S), false, "coldDays 0 in the config in hand: canFreeze says no to every session");
+  A.ok(!store3Of().isCold(S) && store3Of().itemsOf(S).length === 3, "the session warm in store.json"); A.deepEqual(coldFiles(), []);
+  // An act with no item id but a handle (the MCP server's resolve_asks when it cannot read the file): thawed, applied by handle.
+  const { st: st2, sids: [R] } = coldStore([[171, { items: 2, open: 2 }]]);
+  home3With(st2);
+  const w2 = await coldWriter();
+  await coldRun(w2);
+  A.ok(store3Of().isCold(R));
+  const ra = { v: 1, id: "ra-50", type: "act", at: Date.now(), session_id: R, item: null, handle: "A2", action: "resolve", actor: "agent", arg: null };
+  A.ok(w2.live.coldNeeded([ra]).has(R), "coldNeeded names the session of an act with no item id");
+  put3(ra);
+  await w2.reader.drain(cx);
+  A.deepEqual(spool3Files(), []); A.ok(!store3Of().isCold(R));
+  A.equal(store3Of().item(itemId(R, 1)).status, "resolved", "resolved by its handle once the session is back"); A.equal(store3Of().item(itemId(R, 1)).resolvedBy, "agent");
+  // A faulted session whose file is mended: a cold_retry naming another file reads nothing; one naming its file brings it
+  // back; a cold_reset in the same batch then finds it warm and discards nothing.
+  const { st: st3, sids: [F] } = coldStore([[172, {}]]);
+  home3With(st3);
+  const w3 = await coldWriter();
+  await coldRun(w3);
+  const file = store3Of().d.sessions[F].cold.file, rec = fsm.readFileSync(`${cold3}/${file}`, "utf8");
+  fsm.unlinkSync(`${cold3}/${file}`);
+  put3(actEv(F, itemId(F, 0), "resolve"));
+  await w3.reader.drain(cx);
+  A.equal(store3Of().d.sessions[F].cold.fault.tries, 1);
+  fsm.writeFileSync(`${cold3}/${file}`, rec);
+  const reads = [];
+  patchFs({ readFile: (p, ...a) => { if (String(p).startsWith(`${cold3}/`) && !String(p).includes("/held/")) reads.push(String(p)); return realReadFile3(p, ...a); } });
+  put3({ v: 1, id: "cr-50a", type: "cold_retry", at: Date.now(), session_id: F, file: "c01d0172-0000-4000-8000-000000000172.1000000000000-aaaaaa.json" });
+  await w3.reader.drain(cx);
+  A.deepEqual(reads, [], "a Try again naming a file the stub no longer names reads nothing (already answered)"); A.deepEqual(spool3Files(), []);
+  A.equal(store3Of().d.sessions[F].cold.fault.tries, 1);
+  put3({ v: 1, id: "cr-50b", type: "cold_retry", at: Date.now(), session_id: F, file });
+  put3({ v: 1, id: "rs-50", type: "cold_reset", at: Date.now() + 1, session_id: F, file });
+  await w3.reader.drain(cx);
+  unhook3();
+  const s3 = store3Of();
+  A.ok(!s3.isCold(F) && s3.itemsOf(F).length === 3, "Try again with its file: back, whole"); A.equal(s3.d.sessions[F].coldLost, undefined, "...and the reset after it discards nothing");
+  A.equal(s3.item(itemId(F, 0)).status, "resolved", "its held event replayed");
+  // snapshot.json fails once after a thaw: written again before the spool file goes, so it never names an applied
+  // session cold (the MCP server reads "spool file gone, snapshot.json cold" as held).
+  const { st: st4, sids: [G] } = coldStore([[173, {}]]);
+  home3With(st4);
+  const w4 = await coldWriter();
+  await coldRun(w4);
+  const snapPath = `${data3}/snapshot.json`;
+  let broken = true;
+  globalThis.__herdr.writeTextFile = (p, t, e, real) => (broken && p === snapPath ? Promise.reject(new Error("busy")) : real(p, t, e));
+  globalThis.__herdr.exec = (cmd, args, opts, real) => (cmd === "/bin/mv" && args[2] === snapPath && broken ? (broken = false, Promise.resolve({ code: 1, stdout: "", stderr: "busy" })) : real(cmd, args));
+  psteps.length = 0;
+  put3(actEv(G, itemId(G, 0), "resolve"));
+  await w4.reader.drain(cx);
+  unhook3();
+  A.deepEqual(spool3Files(), []); A.equal(broken, false, "the save's snapshot.json failed");
+  A.ok(psteps.includes("save: snapshot.json again"), "...and was written again");
+  const snap = JSON.parse(fsm.readFileSync(snapPath, "utf8"));
+  A.equal(snap.cold[G], undefined, "snapshot.json no longer names the session cold"); A.ok(!snap.items.some((it) => it.id === itemId(G, 0)), "...and holds its state");
+}
+// ── 51. a held event that throws when it replays: kept in spool/failed with its error, its held copy gone ──
+{
+  const { st, sids: [S] } = coldStore([[180, {}]]);
+  home3With(st);
+  const w = await coldWriter();
+  await coldRun(w);
+  const F = store3Of().d.sessions[S].cold.file, rec = fsm.readFileSync(`${cold3}/${F}`, "utf8");
+  fsm.unlinkSync(`${cold3}/${F}`);
+  const boom = { ...actEv(S, itemId(S, 0), "resolve"), id: "boom-51" }, ok51 = actEv(S, itemId(S, 1), "resolve");
+  const nb = put3(boom), no = put3(ok51);
+  await w.reader.drain(cx);
+  A.deepEqual(heldFiles(S), [nb, no].sort());
+  const realAct = Store.prototype.on_act;
+  Store.prototype.on_act = function (ev, ...a) { if (ev.id === "boom-51") throw new Error("synthetic: on_act blew up"); return realAct.call(this, ev, ...a); };
+  fsm.writeFileSync(`${cold3}/${F}`, rec);
+  const failed0 = w.reader.failed;
+  put3({ v: 1, id: "cr-51", type: "cold_retry", at: Date.now(), session_id: S, file: F });
+  await w.reader.drain(cx);
+  Store.prototype.on_act = realAct;
+  A.deepEqual(spool3Files(), []); A.ok(!store3Of().isCold(S));
+  A.equal(fsm.readFileSync(`${spool3}/failed/${nb}`, "utf8"), JSON.stringify(boom), "the replayed event that threw is kept in spool/failed, byte for byte");
+  A.match(fsm.readFileSync(`${spool3}/failed/${nb.replace(/\.json$/, ".error.txt")}`, "utf8"), /synthetic: on_act blew up/);
+  A.ok(!fsm.existsSync(`${held3}/${C.safeName(S)}`), "its held copy is gone (and the other's, applied)");
+  A.equal(store3Of().item(itemId(S, 1)).status, "resolved", "the other held event applied"); A.equal(store3Of().item(itemId(S, 0)).status, "open", "nothing of the one that threw");
+  A.equal(w.reader.failed, failed0 + 1, "counted in the claim's failed");
+}
+// ── 52. the integration's review findings (2026-11-19) ──
+// 52a. The blocker: the sweep never deletes the only copy of a cold session's items when store.json has lost the
+// stub. Three ways the store goes back in time, each ending with the file on disk, kept and said; a given-up
+// freeze's orphan whose items are all in the store (or its archive, or its named file) still goes a day on; a
+// self-mutation shows the content test is what keeps the file.
+{
+  const DAY = DAYMS, later = (d) => Date.now() + d * DAY;
+  const fileItems = (f) => JSON.parse(fsm.readFileSync(`${cold3}/${f}`, "utf8")).items.map((it) => it.id).sort();
+  // (i) store.json unparseable at a start: kept aside, the writer starts empty, Phase 1's first run marks the
+  // store, the session's next event makes it again, warm and empty; the sweep a few days on.
+  {
+    const { st, sids: [S] } = coldStore([[190, { items: 4, open: 2 }]]);
+    home3With(st);
+    const w0 = await coldWriter();
+    await coldRun(w0);
+    const F = store3Of().d.sessions[S].cold.file, ids = fileItems(F);
+    w0.release();
+    fsm.writeFileSync(store3, fsm.readFileSync(store3, "utf8").slice(0, -5));
+    const w = new Writer("corrupt"); w.booted = true; await w.start(cx);
+    await w.houseRun;
+    A.ok(ls(data3).some((n) => n.startsWith("store.corrupt")), "the unparseable store kept aside"); A.equal(w.live.d.retention?.v, 1, "Phase 1's first run on the empty store");
+    put3({ v: 1, id: "p52-1", type: "prompt", at: Date.now(), session_id: S, terminal: "t9", turn: 9, prompt_head: "back" });
+    await w.reader.drain(cx);
+    A.ok(w.live.d.sessions[S] && !w.live.d.sessions[S].cold && w.live.itemsOf(S).length === 0, "the session made again, warm, none of the file's items");
+    const sw = await w.coldSweep(w.gen, later(3));
+    A.ok(fsm.existsSync(`${cold3}/${F}`), "(i) a corrupt store's restart: the file stays"); A.deepEqual(sw.removed, []); A.deepEqual(sw.kept, [F], "...kept for good");
+    await w.logChain; A.match(log3(), new RegExp(`cold sweep: cold/${F.replace(/\./g, "\\.")} holds ${ids.length} item\\(s\\) and \\d+ turn record\\(s\\) store.json lacks`));
+    A.deepEqual((await w.coldSweep(w.gen, later(30))).removed, [], "...a month on, still kept");
+    // The same with the content test switched off: the file would go (what the old rule (c) did).
+    const realLacks = Store.prototype.coldLacks;
+    Store.prototype.coldLacks = () => ({ items: 0, turns: 0 });
+    w.coldKept.clear();
+    const mut = await w.coldSweep(w.gen, later(3));
+    Store.prototype.coldLacks = realLacks;
+    A.deepEqual(mut.removed, [F], "mutation: without coldLacks the file is deleted, so the content test is what keeps it");
+    w.release();
+  }
+  // (ii) a store.json put back by hand from an older copy: the session warm with one ask; its newer file holds three.
+  {
+    const { st, sids: [S] } = coldStore([[191, { items: 1, open: 1 }]]);
+    const backup = st.toText();
+    for (let i = 1; i < 3; i++) { const it = mkItem(S, 191, i, { status: "open", age: 9 }); it.updatedAt = Date.now() - 9 * DAYMS; st.d.items[it.id] = it; }
+    st.d.sessions[S].nextHandle = { A: 4, Q: 1, P: 1 };
+    home3With(st);
+    const w0 = await coldWriter();
+    await coldRun(w0);
+    const F = store3Of().d.sessions[S].cold.file;
+    A.equal(fileItems(F).length, 3);
+    w0.release();
+    fsm.writeFileSync(store3, backup);
+    const w = await coldWriter("restored");
+    put3({ v: 1, id: "p52-2", type: "prompt", at: Date.now(), session_id: S, terminal: "t9", turn: 9, prompt_head: "hi" });
+    await w.reader.drain(cx);
+    const sw = await w.coldSweep(w.gen, later(3));
+    A.ok(fsm.existsSync(`${cold3}/${F}`), "(ii) a store restored from an older copy: the file stays"); A.deepEqual(sw.kept, [F]);
+    w.release();
+  }
+  // (iii) faulted on a missing file, a newer file of the session on disk; Use without its older items: the newer
+  // file stays (an hour on, and a month on).
+  {
+    const { st, sids: [S] } = coldStore([[192, { items: 3, open: 2 }]]);
+    home3With(st);
+    const w = await coldWriter();
+    await coldRun(w);
+    const F2 = store3Of().d.sessions[S].cold.file;
+    const F1 = C.coldName(S, Date.now() - 20 * DAYMS, "lost01");
+    w.live.d.sessions[S].cold = { ...w.live.d.sessions[S].cold, file: F1, at: Date.now() - 20 * DAYMS };
+    await w.saveStore();
+    put3(actEv(S, itemId(S, 0), "resolve"));
+    await w.reader.drain(cx);
+    A.ok(store3Of().d.sessions[S].cold.fault, "faulted on the missing file");
+    A.deepEqual((await w.coldSweep(w.gen, later(3))).removed, [], "faulted: every file of the session kept");
+    put3({ v: 1, id: "cr52", type: "cold_reset", at: Date.now(), session_id: S, file: F1 });
+    await w.reader.drain(cx);
+    A.ok(!store3Of().isCold(S) && store3Of().d.sessions[S].coldLost?.file === F1, "used without its older items");
+    A.equal(store3Of().d.sessions[S].coldThawed, undefined, "the reset lists no file as thawed");
+    A.deepEqual((await w.coldSweep(w.gen, Date.now() + 2 * HOURMS)).removed, [], "(iii) an hour after the reset: the newer file stays");
+    const sw = await w.coldSweep(w.gen, later(30));
+    A.ok(fsm.existsSync(`${cold3}/${F2}`) && sw.kept.includes(F2), "...and a month on: kept for good (it holds what the reset gave up)");
+    w.release();
+  }
+  // A genuine orphan, all of it held: in the store, in the session's named file, or in its Phase 1 archive. Gone a
+  // day on, read first.
+  {
+    const { st, sids: [S] } = coldStore([[193, { items: 3, open: 1 }]]);
+    st.d.items[itemId(S, 2)].status = "resolved";           // closed before the orphan was written, archived as it was
+    home3With(st);
+    const w = await coldWriter();
+    const plan = w.live.planFreeze(7, Date.now());
+    const orphan = C.coldName(S, plan[0].record.at, "orphan");
+    fsm.mkdirSync(cold3, { recursive: true });
+    fsm.writeFileSync(`${cold3}/${orphan}`, JSON.stringify(plan[0].record));
+    // One of its items since archived by Phase 1 (out of the store, into archive/<sid>/).
+    const gone = itemId(S, 2), rec = w.live.d.items[gone];
+    fsm.mkdirSync(`${data3}/archive/${C.safeName(S)}`, { recursive: true });
+    fsm.writeFileSync(`${data3}/archive/${C.safeName(S)}/items-${Date.now()}-abc123.jsonl`, JSON.stringify(rec) + "\n");
+    delete w.live.d.items[gone];
+    await w.saveStore();
+    A.deepEqual((await w.coldSweep(w.gen, Date.now() + HOURMS)).removed, [], "under a day old: not read");
+    const sw = await w.coldSweep(w.gen, later(3));
+    A.deepEqual(sw.removed, [orphan], "a day on: read, an identical copy of every item in the store or its archive, removed"); A.ok(!fsm.existsSync(`${cold3}/${orphan}`));
+    w.release();
+  }
+}
+// 52b. A session id whose safe name begins with "." is never frozen (store.js freezeBlocker); one frozen before
+// that rule is still read (its own name) and its held folder survives a restart's listing.
+{
+  const { st, sids: [S] } = coldStore([[194, {}]]);
+  const D = ".hidden-session";
+  st.apply({ v: 1, id: "ss-dot", type: "session_start", at: Date.now() - 9 * DAYMS, terminal: "t8", session_id: D, source: "startup", turn: 0, agent: "claude-code", cwd: "/tmp/d" });
+  st.d.items.rq_dot1 = { ...mkItem(S, 194, 0, { status: "open", age: 9 }), id: "rq_dot1", anchor: { sessionId: D, turn: 1 } };
+  home3With(st);
+  const w = await coldWriter();
+  A.match(w.live.freezeBlocker(D), /no file name/);
+  const t = (await coldRun(w)).cold.freeze;
+  A.deepEqual(t.frozen, [S], "the dot-named session stays warm");
+  // As if frozen by a build before the rule: its file, its stub, a held folder.
+  const rec = { ledgr: "ledgr-cold", v: 1, sessionId: D, at: Date.now() - DAYMS, session: {}, items: [w.live.d.items.rq_dot1], turns: {}, n: {} };
+  const FD = C.coldName(D, rec.at, "dot001");
+  fsm.writeFileSync(`${cold3}/${FD}`, JSON.stringify(rec));
+  A.ok((await w.readCold(D, FD)).record, "its own dot-led name is read");
+  A.match((await w.readCold(S, FD)).error ?? "", /not a cold file name/, "...not as another session's");
+  fsm.mkdirSync(`${held3}/${D}`, { recursive: true }); fsm.writeFileSync(`${held3}/${D}/1-act-mod-00001.json`, "{}");
+  fsm.writeFileSync(`${held3}/.DS_Store`, "x");
+  await w.listHeld(w.gen);
+  A.ok(w.heldSids.has(D), "a held folder of a known dot-led session is listed"); A.ok(!w.heldSids.has(".DS_Store"), "...a hidden stray is not");
+  fsm.rmSync(`${held3}/${D}`, { recursive: true, force: true }); fsm.rmSync(`${held3}/.DS_Store`, { force: true });
+  w.release();
+}
+// 52c. (Second review) A read error other than "no answer" faults only that session: its event held, the other
+// session's applied in the same pass, the words saying the file is there; a missing file worded in a way notFound
+// does not know faults too (as missing); Try again works once the file can be read.
+{
+  const { st, sids: [S, O] } = coldStore([[195, {}], [196, { idle: 0.1 }]]);
+  home3With(st);
+  const w = await coldWriter();
+  await coldRun(w);
+  A.ok(store3Of().isCold(S) && !store3Of().isCold(O));
+  const F = store3Of().d.sessions[S].cold.file;
+  const err = (code, msg) => Object.assign(new Error(`${code}: ${msg}`), { code });
+  for (const [code, msg] of [["EACCES", "permission denied"], ["EIO", "i/o error"]]) {
+    patchFs({ readFile: (p, ...a) => (String(p) === `${cold3}/${F}` ? Promise.reject(err(code, msg)) : realReadFile3(p, ...a)) });
+    put3({ v: 1, id: `try-${code}`, type: "cold_retry", at: Date.now(), session_id: S, file: F });   // read now (a fault's retry waits 10 min)
+    const n = put3(actEv(S, itemId(S, 0), "resolve")), m = put3(actEv(O, itemId(O, 0), "resolve"));
+    await w.reader.drain(cx);
+    A.deepEqual(spool3Files(), [], `${code}: the spool moves`); A.ok(heldFiles(S).includes(n), `${code}: that session's event held`);
+    A.equal(store3Of().item(itemId(O, 0)).status, "resolved", `${code}: the other session's event applied in the same pass`);
+    A.match(store3Of().d.sessions[S].cold.fault?.error ?? "", new RegExp(`is there but could not be read \\(${code}`), `${code}: faulted, the file named as there`);
+    put3({ v: 1, id: `rv-${code}`, type: "act", at: Date.now(), session_id: O, item: itemId(O, 0), action: "reopen", arg: null });
+    await w.reader.drain(cx);
+    void m;
+  }
+  // A missing file worded as notFound does not know: the listing says it is not there: missing.
+  fsm.renameSync(`${cold3}/${F}`, `${cold3}/aside.tmp`);
+  patchFs({ readFile: (p, ...a) => (String(p) === `${cold3}/${F}` ? Promise.reject(new Error("the host could not find it")) : realReadFile3(p, ...a)) });
+  A.equal(SP.notFound(new Error("the host could not find it")), false);
+  put3({ v: 1, id: "cr52c1", type: "cold_retry", at: Date.now(), session_id: S, file: F });
+  await w.reader.drain(cx);
+  A.equal(store3Of().d.sessions[S].cold.fault?.error, `cold/${F} is missing`, "an unknown wording for a missing file: faulted as missing, never waiting");
+  fsm.renameSync(`${cold3}/aside.tmp`, `${cold3}/${F}`);
+  patchFs({ readFile: realReadFile3 });
+  put3({ v: 1, id: "cr52c2", type: "cold_retry", at: Date.now(), session_id: S, file: F });
+  await w.reader.drain(cx);
+  A.ok(!store3Of().isCold(S) && store3Of().item(itemId(S, 0)).status === "resolved", "readable again, Try again: back, its held events applied"); A.deepEqual(heldFiles(S), []);
+  // Herdr's fs words a missing file "No such file or directory (os error 2)"; isThere throws on another listing error.
+  A.equal(SP.notFound(new Error("No such file or directory (os error 2)")), true); A.equal(SP.notFound({ code: "ENOENT" }), true);
+  A.equal(SP.notFound(new Error("Too many open files (os error 24)")), false);
+  patchFs({ readdir: (p, ...a) => (String(p) === cold3 ? Promise.reject(err("EACCES", "permission denied")) : realReaddir(p, ...a)) });
+  await A.rejects(SP.isThere(`${cold3}/${F}`), /EACCES/, "isThere: a listing that fails for another reason is not known, not absent");
+  patchFs({ readdir: realReaddir });
+  A.equal(await SP.isThere(`${cold3}/nowhere/x.json`), false, "a folder not there: neither is the file");
+  w.release();
+}
+// 52d. Wanted reads (no event needs the session) stop at the first that gets no answer: one timed-out read a pass.
+{
+  const { st, sids } = coldStore([[196, {}], [197, {}], [198, {}]]);
+  home3With(st);
+  const w = await coldWriter();
+  await coldRun(w);
+  w.saveTimeout = 120;
+  let reads = 0;
+  patchFs({ readFile: (p, ...a) => (String(p).startsWith(`${cold3}/`) ? (reads++, new Promise(() => {})) : realReadFile3(p, ...a)) });
+  for (const sid of sids) w.wantThaw.add(sid);
+  const t0 = Date.now();
+  await w.reader.poke(rcx);
+  A.equal(reads, 1, "one wanted read timed out: no other wanted read this pass"); A.ok(Date.now() - t0 < 2000, "the pass ends at once after it");
+  A.ok(sids.every((sid) => store3Of().isCold(sid)), "all still cold, for the tick to try again");
+  patchFs({ readFile: realReadFile3 }); w.saveTimeout = WR.SAVE_TIMEOUT_MS;
+  await w.reader.poke(rcx);
+  A.ok(sids.every((sid) => !store3Of().isCold(sid)), "the host answers: every one back");
+  w.release();
+}
+// 52e. Two guards the review found masked by others, each tested on its own: a held event whose spool file is in the
+// same batch is one entry (heldIn's dedupe; `ingested` would also skip a second apply), so store.js apply() is
+// called once for it; and every session an event names, parent_session_id and for_session included, is in passSids
+// while the pass runs (the pre-apply cold check would also catch a session frozen meanwhile).
+{
+  const { st, sids: [S] } = coldStore([[199, {}]]);
+  home3With(st);
+  const w = await coldWriter();
+  await coldRun(w);
+  const F = store3Of().d.sessions[S].cold.file, recText = fsm.readFileSync(`${cold3}/${F}`, "utf8");
+  fsm.unlinkSync(`${cold3}/${F}`);
+  const ev = actEv(S, itemId(S, 0), "resolve"), n = put3(ev);
+  await w.reader.drain(cx);
+  A.deepEqual(heldFiles(S), [n]);
+  fsm.writeFileSync(`${spool3}/${n}`, JSON.stringify(ev));      // the same event in the spool too (a crash before its unlink)
+  fsm.writeFileSync(`${cold3}/${F}`, recText);
+  const calls = new Map(), real = Store.prototype.apply;
+  Store.prototype.apply = function (e) { if (e?.id) calls.set(e.id, (calls.get(e.id) ?? 0) + 1); return real.call(this, e); };
+  put3({ v: 1, id: "cr52e", type: "cold_retry", at: Date.now(), session_id: S, file: F });
+  await w.reader.drain(cx);
+  Store.prototype.apply = real;
+  A.equal(calls.get(ev.id), 1, "the held copy and its spool twin: apply() called once"); A.deepEqual(spool3Files(), []); A.deepEqual(heldFiles(S), []);
+  // passSids: a pass paused in its save holds the parent and the for_session warm.
+  const P = csid(301), Q = csid(302), K = csid(303);
+  let paused = null, seen = null;
+  globalThis.__herdr.writeTextFile = (p, t, e, realW) => (!paused && p === store3 ? new Promise((res) => { paused = () => realW(p, t, e).then(res); }) : realW(p, t, e));
+  put3({ v: 1, id: "bs52", type: "branch_started", at: Date.now(), session_id: K, terminal: "t7", parent_session_id: P, depth: 1, fork_turn: 1, anchor_turn: 1 });
+  put3({ v: 1, id: "pa52", type: "pins_asked", at: Date.now(), session_id: K, for_session: Q, item: "rq_none" });
+  const pass = w.reader.drain(cx);
+  await until(() => paused, "the pass to wait in its save");
+  seen = [P, Q, K].map((x) => w.passSids.has(x));
+  const refused = [P, Q].map((x) => w.canFreeze(x));
+  paused(); await pass; delete globalThis.__herdr.writeTextFile;
+  A.deepEqual(seen, [true, true, true], "passSids holds the parent_session_id and the for_session as well as the event's own");
+  A.deepEqual(refused, [false, false], "...so canFreeze refuses them while the pass runs");
+  w.release();
+}
+// 52f. (Second review) The sweep's proof is the version, and it is made against store.json read again from disk.
+{
+  const later = (d) => Date.now() + d * DAYMS;
+  // An orphan of S: its record as planned now, under a name a day old or more.
+  const orphanOf = (w, S, tag) => {
+    const plan = w.live.planFreeze(7, Date.now() + 30 * DAYMS).find((p) => p.sid === S);   // idle or not
+    plan.record.at = Date.now();
+    const name = C.coldName(S, plan.record.at, tag);
+    fsm.mkdirSync(cold3, { recursive: true });
+    fsm.writeFileSync(`${cold3}/${name}`, JSON.stringify(plan.record));
+    return { name, record: plan.record };
+  };
+  // (2) The reviewer's state loss: a backup holds A1 open; then A1 is drafted and resolved, no new turn; S freezes;
+  // the backup is put back with Herdr quit. A1's id and turn are in the store, but an older version: F stays.
+  {
+    const { st, sids: [S] } = coldStore([[200, { items: 2, open: 2 }]]);
+    const backup = st.toText();
+    st.act(itemId(S, 0), "draft", "an answer typed later", Date.now() - 8 * DAYMS);
+    st.act(itemId(S, 0), "resolve", null, Date.now() - 8 * DAYMS);
+    home3With(st);
+    const w0 = await coldWriter();
+    await coldRun(w0);
+    const F = store3Of().d.sessions[S].cold.file;
+    w0.release();
+    fsm.writeFileSync(store3, backup);
+    const w = await coldWriter("backup2");
+    const sw = await w.coldSweep(w.gen, later(3));
+    A.ok(fsm.existsSync(`${cold3}/${F}`) && sw.kept.includes(F), "a backup put back: A1's id is in the store, but an older version: the file stays");
+    w.release();
+  }
+  // (Third review) The reviewer's two: a backup put back, then Done (or Promote) once on the restored A1, which stamps
+  // it later than the file's resolved, drafted copy: the file is kept in both.
+  for (const action of ["resolve", "promote"]) {
+    const { st, sids: [S] } = coldStore([[action === "resolve" ? 204 : 205, { items: 2, open: 2 }]]);
+    const backup = st.toText();
+    st.act(itemId(S, 0), "draft", "a long answer typed later", Date.now() - 8 * DAYMS);
+    st.act(itemId(S, 0), "resolve", null, Date.now() - 8 * DAYMS);
+    home3With(st);
+    const w0 = await coldWriter();
+    await coldRun(w0);
+    const F = store3Of().d.sessions[S].cold.file;
+    w0.release();
+    fsm.writeFileSync(store3, backup);
+    const w = await coldWriter(`backup-${action}`);
+    put3(actEv(S, itemId(S, 0), action));
+    await w.reader.drain(cx);
+    A.ok(Number(store3Of().item(itemId(S, 0)).updatedAt) > Number(JSON.parse(fsm.readFileSync(`${cold3}/${F}`, "utf8")).items.find((it) => it.id === itemId(S, 0)).updatedAt),
+      `(${action} after the restore: the store's A1 is stamped later than the file's)`);
+    const sw = await w.coldSweep(w.gen, later(3));
+    A.ok(sw.kept.includes(F) && fsm.existsSync(`${cold3}/${F}`), `${action} once after a backup is put back: the file with the draft and the resolution is kept`);
+    w.release();
+  }
+  // An orphan whose item the store holds only in a later version: kept (above). One whose turn records the store
+  // lacks, with no item at all: kept. The same, its records in the turns archive: removed.
+  {
+    const { st, sids: [S] } = coldStore([[201, { items: 1, open: 1 }]]);
+    home3With(st);
+    const w = await coldWriter();
+    const o1 = orphanOf(w, S, "later1");
+    w.live.act(itemId(S, 0), "promote", null, Date.now());   // a later version in the store
+    await w.saveStore();
+    const sw1 = await w.coldSweep(w.gen, later(3));
+    A.ok(sw1.kept.includes(o1.name) && fsm.existsSync(`${cold3}/${o1.name}`), "the store holds only a later version: no proof of descent, kept (the accepted cost)");
+    w.coldKept.clear();
+    // Turn records only, none in the store: kept.
+    const rec2 = { ...o1.record, items: [], turns: { 41: { stopAt: 1 }, 42: { stopAt: 2 } } };
+    const n2 = C.coldName(S, o1.record.at, "turns1");
+    fsm.writeFileSync(`${cold3}/${n2}`, JSON.stringify(rec2));
+    const sw2 = await w.coldSweep(w.gen, later(3));
+    A.ok(sw2.kept.includes(n2) && fsm.existsSync(`${cold3}/${n2}`), "no item, two turn records the store lacks: kept (older than the oldest kept proves nothing now)");
+    // The same records in the session's turns archive (cut by Phase 1): removed.
+    w.coldKept.clear();
+    fsm.mkdirSync(`${data3}/archive/${C.safeName(S)}`, { recursive: true });
+    fsm.writeFileSync(`${data3}/archive/${C.safeName(S)}/turns-${Date.now()}-abc123.jsonl`,
+      [JSON.stringify({ sessionId: S, turn: 41, rec: { stopAt: 1 } }), JSON.stringify({ sessionId: S, turn: 42, rec: { stopAt: 2 } })].join("\n") + "\n");
+    A.deepEqual((await w.coldSweep(w.gen, later(3))).removed, [n2], "its records in the turns archive: removed");
+    // (5) An archive line of another session with the same id proves nothing.
+    const o3 = orphanOf(w, S, "other1");
+    const it0 = w.live.d.items[itemId(S, 0)];
+    delete w.live.d.items[itemId(S, 0)];
+    await w.saveStore();
+    fsm.writeFileSync(`${data3}/archive/${C.safeName(S)}/items-${Date.now()}-abc124.jsonl`, JSON.stringify({ ...it0, anchor: { ...it0.anchor, sessionId: "someone-else" }, updatedAt: Date.now() }) + "\n");
+    const sw3 = await w.coldSweep(w.gen, later(3));
+    A.ok(sw3.kept.includes(o3.name), "an archive line of another session proves nothing: kept");
+    w.release();
+  }
+  // (3) store.json replaced on disk under a running writer: the sweep removes nothing, and says so.
+  {
+    const { st, sids: [S] } = coldStore([[202, {}]]);
+    home3With(st);
+    const w = await coldWriter();
+    const o = orphanOf(w, S, "replc1");
+    await w.saveStore();
+    A.equal(w.live.toText(), w.storeText, "(memory is the text this writer last wrote: no save before the sweep)");
+    fsm.writeFileSync(store3, JSON.stringify({ ...JSON.parse(fsm.readFileSync(store3, "utf8")), houseAt: 1 }));
+    const sw = await w.coldSweep(w.gen, later(3));
+    A.deepEqual(sw.removed, [], "store.json replaced on disk: nothing removed"); A.match(sw.skipped ?? "", /store.json on disk is not the store this writer last read or wrote/);
+    A.match(w.note ?? "", /cold sweep: nothing removed/); await w.logChain; A.match(log3(), /cold sweep: nothing removed: store.json on disk is not/);
+    A.ok(fsm.existsSync(`${cold3}/${o.name}`));
+    w.release();
+  }
+  // The two guards in the content step, each on its own: the proof is store.json as read (a pass changing memory
+  // during the read proves nothing), and a file named meanwhile is not removed.
+  {
+    const { st, sids: [S] } = coldStore([[203, { items: 2, open: 2 }]]);
+    home3With(st);
+    const w = await coldWriter();
+    const o = orphanOf(w, S, "guard1");
+    const lostId = itemId(S, 1), lost = w.live.d.items[lostId];
+    delete w.live.d.items[lostId];
+    await w.saveStore();                               // store.json lacks it: the orphan holds the only copy
+    patchFs({ readFile: (p, ...a) => (String(p) === `${cold3}/${o.name}` ? (w.live.d.items[lostId] = lost, realReadFile3(p, ...a)) : realReadFile3(p, ...a)) });
+    const sw = await w.coldSweep(w.gen, later(3));
+    patchFs({ readFile: realReadFile3 });
+    A.ok(sw.kept.includes(o.name) && fsm.existsSync(`${cold3}/${o.name}`), "memory holding the item (not saved) proves nothing: the file stays");
+    delete w.live.d.items[lostId];
+    w.coldKept.clear();
+    // Every item held on disk, but the file named during its read: not removed.
+    w.live.d.items[lostId] = lost;
+    await w.saveStore();
+    patchFs({ readFile: (p, ...a) => (String(p) === `${cold3}/${o.name}` ? (w.live.d.sessions[S].coldLost = { file: o.name, at: Date.now(), n: {}, error: "x" }, realReadFile3(p, ...a)) : realReadFile3(p, ...a)) });
+    const sw2 = await w.coldSweep(w.gen, later(3));
+    patchFs({ readFile: realReadFile3 });
+    A.ok(!sw2.removed.includes(o.name) && fsm.existsSync(`${cold3}/${o.name}`), "a file named during its read is not removed");
+    delete w.live.d.sessions[S].coldLost;
+    w.release();
+  }
+}
+Store.prototype.apply = realApply3;
+Writer.prototype.houseStep = realHouseStep;
+SP.SpoolReader.prototype.step = realPassStep;
+
 console.log(`OK: writer, ${checks} checks (the 2026-11-12 stalled event past 1 MiB, a fault on the status line, quarantine to spool/failed, the heartbeat; `
   + `2026-11-19: a pass that never returns seen, restarted from store.json, nothing applied twice, a late mv that lands nothing, a timed-out write, `
   + `an event that waits, a back-off that keeps the claim, a takeover, writer.log; the review: a sweep that cannot list fails the start, `
@@ -1313,4 +2510,8 @@ console.log(`OK: writer, ${checks} checks (the 2026-11-12 stalled event past 1 M
   + `a taken name and a bad read-back kept, a given-up run and a late write harmless, an item reopened meanwhile kept, the triggers, `
   + `restore from a file, a legacy month and bad names, none in a non-holder or a check copy; `
   + `across the seam: the run's files read back by Reader.loadArchive, the dialog's Reopen restored by the writer, archived again in a newer file; `
-  + `the review's: growth before a run by size, a failed config read, an act for an archived item, an archive write timed out), 0 failure(s)`);
+  + `the review's: growth before a run by size, a failed config read, an act for an archived item, an archive write timed out; `
+  + `cold sessions: freeze runs written once and read back, given up at every await, taken over, capped; thaw in the pass, `
+  + `held events replayed in order once, Try again, Use without, coldDays 0, a mixed store, the sweep only from the store on disk, `
+  + `a 1.2 MiB file, the live-shape fixture; the integration's review: a store gone back in time (a corrupt start, a backup, a reset) keeps the `
+  + `only copy, an orphan proven redundant goes, dot-led ids, only not-found is missing, one wanted read a pass, two masked guards), 0 failure(s)`);

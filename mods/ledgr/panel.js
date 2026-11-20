@@ -58,6 +58,17 @@
 // loadArchive) and listed below it, state word "archived", dim, no quick action; the cursor and the list's
 // keys work on them as on any row, and a click or Enter opens the dialog read-only on the record
 // (props.archived: its file), whose one action is Reopen.
+// Cold sessions (retention Phase 2, 2026-11-19): a session nobody touched for retention.coldDays keeps only its
+// record in store.json (a stub with its counts) and its items in ledgr-data/cold/. The session menu lists such
+// sessions under a folded "OLDER SESSIONS (N)" at its bottom (counts from the stub, store.js countsOf; "idle
+// 9 d"; "can't read" when the writer cannot read the file). Shown, its file is read (Reader wantCold, from a
+// timer) and merged into this copy's store, never the fallback writer's (viewStore shows a clone then), so its
+// lanes show as usual; meanwhile one line says so, and a read that failed says why with Try again. When the
+// writer cannot read it (s.cold.fault): its words, the events it keeps, Try again, Use without its older items
+// (two clicks: cold_reset) and Forget. Showing one never brings it back (its `seen` is the one act the writer
+// applies to the stub alone); the first other act on it does, at the writer. The header marks it with a dim
+// "older" pill; the status line names a session the writer cannot read, and its view names the session's other
+// files in cold/ (Reader coldOthers), one of which may hold what is missing.
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Popup, ScrollHandle } from "gpui-base";
 import { theme, props, shared, setShared, focused, run, openOverlay, closeOverlay, agents, panes, spaces, home } from "herdr";
@@ -70,11 +81,13 @@ import { isLive } from "./nav.js";
 import { demoData, DEMO_SESSION } from "./fixtures.js";
 import { THRESHOLD_WORDS, itemWords as H, paneWords as P, sessionWords, stageLabels, clearLabel, clearConfirm, clearedWords, OFF_HERE, spaceToggleWords, handleWords,
   pinsWords, PINS_EMPTY, pinsSearchEmpty, pinsSelectedWords, askAboutPinsWords, pinNameWords, pinLabel, writerHealthWords, NO_WRITER,
-  archivedLineWords, ARCHIVED_LINE_TIP, ARCHIVE_READING, archiveEmptyWords, archiveFailedWords } from "./words.js";
+  archivedLineWords, ARCHIVED_LINE_TIP, ARCHIVE_READING, archiveEmptyWords, archiveFailedWords,
+  olderSessionsWords, idleWords, olderPillTip, coldLoadingWords, coldErrorWords, coldFaultWords, COLD_RETRY, COLD_RESET, coldResetConfirm, coldLostWords,
+  coldFaultsLine, coldWaitWords, coldUnreadWords } from "./words.js";
 import { loadAdapters, adapterOf, asksMode } from "./adapters.js";
 import { thenRequest, thenStale } from "./pinning.js";
-import { Reader, ARCHIVE_RETRY_MS } from "./reader.js";
-import { rowModel, entryKey, moveCursor, keepPlace, ROW, archivedCount } from "./listing.js";
+import { Reader, ARCHIVE_RETRY_MS, COLD_ARM_MS } from "./reader.js";
+import { rowModel, entryKey, moveCursor, keepPlace, ROW, archivedCount, touchedOf } from "./listing.js";
 import { detailSpec, settingsSpec } from "./detailing.js";
 
 const ICON = (n) => `mods/workspace-chrome/${n}.svg`;
@@ -181,6 +194,16 @@ export class Panel extends Reader {
     // (count: session.archived when the read started; list null until the first read ends).
     this.archShown = new Set();
     this.archRows = new Map();
+    // Cold sessions (retention Phase 2): the session menu's OLDER SESSIONS fold (null: open while the shown
+    // session is one of them; a click decides from then on), and the fallback writer's store as shown with
+    // cold records merged ({text, gen, st}: a clone, never the writer's own; viewStore).
+    this.olderOpen = null;
+    this.coldClone = null;
+    // Cold sessions whose OLDER THAN A DAY fold the person shut (it opens on its own for them: foldOpen).
+    this.olderShut = new Set();
+    // A command that named an item of a cold session not read here yet ({sid, c, at}: coldWait), run once its
+    // items are merged (onCold).
+    this.coldThen = null;
     this.pinSearch = InputState.new({ placeholder: "Search pins, every session" });
     this.pinSearch.on("change", (_e, cx) => { this.pinQuery = this.pinSearch.value(); cx.notify(); });
     this.pinSearch.on("submit", (_e, cx) => { this.searchSubmit(cx); cx.notify(); });
@@ -218,7 +241,74 @@ export class Panel extends Reader {
 
   viewStore() {
     if (this.demo && this.demoStore) return this.demoStore;
-    return this.fallback() ? this.writer.live : this.live;
+    if (!this.fallback()) return this.live;
+    return this.fallbackView() ?? this.writer.live;
+  }
+
+  // The fallback writer's store as this panel shows it (retention Phase 2, the contract's risk 3): the writer's
+  // own while none of its cold sessions has a record read here; else a clone made from the text the writer
+  // last saved or read (writer.storeText), the records merged into it (Reader mergeColdAll) and the typed
+  // answers on top, rebuilt when that text or the records change. Never a merge into writer.live: the writer
+  // saves that store, and a merged session would be saved mixed (items beside its stub).
+  fallbackView() {
+    const w = this.writer, text = w?.storeText, live = w?.live;
+    if (typeof text !== "string" || !live || typeof live.coldSessions !== "function") { this.coldClone = null; return null; }
+    const want = live.coldSessions().some((sid) => { const c = live.d.sessions[sid]?.cold; const e = c && !c.fault ? this.coldCache.get(c.file) : null; return Boolean(e?.record); });
+    if (!want) { this.coldClone = null; return null; }
+    const k = this.coldClone;
+    if (k && k.text === text && k.gen === this.coldGen) { k.st.threshold = live.threshold; return k.st; }
+    let st;
+    try { st = Store.fromText(text); } catch { this.coldClone = null; return null; }
+    st.threshold = live.threshold;
+    st.maxDepth = live.maxDepth;
+    st.spacesOff = live.spacesOff;
+    this.dropColdUnnamed(st);
+    this.mergeColdAll(st);
+    for (const [id, v] of this.drafts) { const it = st.item(id); if (it && !(it.draft === v.text && v.sent)) it.draft = v.text; }
+    this.coldClone = { text, gen: this.coldGen, st };
+    return st;
+  }
+
+  // A cold record was merged (Reader coldLoaded): rows that appear are not a motion. A command kept for that
+  // session's items (coldWait) runs now, when the session is still the one shown and it was given less than a
+  // minute ago; a file that could not be read leaves it (the panel's lines say why, with Try again).
+  onCold(cx) {
+    this.prevCls = null;
+    this.obsVer = undefined;
+    const w = this.coldThen;
+    if (!w) return;
+    const st = this.viewStore(), c = this.coldOf(w.sid, st);
+    if (c && c.state === "loading") return;
+    this.coldThen = null;
+    if (this.flash === coldWaitWords(w.h)) this.flash = "";
+    if (c && c.state !== "ok") return;
+    if (Date.now() - w.at > 60000 || this.current(st) !== w.sid || !cx?.timer) return;
+    cx.timer.after(0, (cx) => { this.command(w.c, cx); cx.notify(); });
+  }
+
+  // A command that names an item of the shown session by its handle (open:, cursor:, go:, whole:, menu:,
+  // ask-here:, act:, pick:, copy-answer:) while that session is cold and its items are not in the shown store
+  // yet (retention Phase 2): rather than "No A3 in this session", its file is read (Reader wantCold) and the
+  // command kept, to run once the items are merged (onCold); when the writer cannot read the file, why. A pin's
+  // or a branch's handle needs no file (both stay in the store). True when it took the command.
+  coldWait(c, cx) {
+    const m = /^(open|cursor|go|whole|menu|ask-here|act|pick|copy-answer):\[?([AQ]\d+)\]?(?::|$)/i.exec(c);
+    if (!m) return false;
+    const st = this.viewStore(), sid = this.current(st), s = sid ? st.d.sessions[sid] : null;
+    const cold = s ? this.coldShown(st, s) : null, h = m[2].toUpperCase();
+    if (!cold || st.byHandle(sid, h)) return false;
+    if (cold.state === "fault") { this.flash = coldUnreadWords(h); return true; }
+    this.coldThen = { sid, c, h, at: Date.now() };
+    this.flash = coldWaitWords(h);
+    this.wantCold(sid, cx, { force: cold.state === "error" });
+    return true;
+  }
+
+  // The shown session is cold and its items are not in the shown store yet (its file being read, unreadable
+  // here, or unreadable by the writer): Reader coldOf's record, else null.
+  coldShown(st, s) {
+    const c = s ? this.coldOf(s.sessionId, st) : null;
+    return c && c.state !== "ok" ? c : null;
   }
 
   // config.json changed (Reader.watchStore): the fallback writer follows it, and a new threshold moves
@@ -270,6 +360,8 @@ export class Panel extends Reader {
   // it, leaves the command to the dialog.
   command(c, cx) {
     if (PANEL_IGNORES.has(c) || c.startsWith("detail:") || c.startsWith("conclude-edit:") || c.startsWith("settings:")) return;
+    // An item of a cold session this copy has not read yet: read first, then the command (coldWait).
+    if (this.coldWait(c, cx)) return;
     if (c === "demo") {
       if (this.demo && !FORCE_DEMO) {
         if (this.detailId) this.closeDetail();
@@ -315,6 +407,16 @@ export class Panel extends Reader {
       if (g.length) this.copyAnswers(s, Math.max(...g.map((it) => it.anchor?.turn ?? 0)), cx); else this.flash = "No typed answers in this session.";
     }
     else if (c === "sessions") this.menu = !this.menu;
+    // `older-sessions`: the session menu open, its OLDER SESSIONS fold opened or closed (as its click).
+    else if (c === "older-sessions") { const st = this.viewStore(); this.menu = true; this.olderOpen = !this.olderShown(st, this.current(st)); }
+    // `cold-retry`, `cold-reset` (twice: arm, then post): the shown cold session's Try again and Use without its
+    // older items, as their clicks.
+    else if (c === "cold-retry" || c === "cold-reset") {
+      const st = this.viewStore(), sid = this.current(st), s = sid ? st.d.sessions[sid] : null;
+      if (!s || !this.coldOf(sid, st)) this.flash = "The shown session is not an older one.";
+      else if (c === "cold-retry") this.coldRetry(s, cx);
+      else if (!this.coldReset(s, cx)) this.flash = "Use without its older items is for a session the ledgr writer cannot read.";
+    }
     // `session:<terminal or session id prefix>`: show that session, as a click in the session menu does.
     else if (c.startsWith("session:")) {
       const k = c.slice("session:".length), st = this.viewStore();
@@ -694,11 +796,18 @@ export class Panel extends Reader {
     this.noteDetail(cx);
     // ledgr off in this space (spaces.disabled): the lanes are hidden, nothing is marked seen.
     const off = this.offState(st, s);
+    // A cold session too: `seen` is the one act that does not bring it back (store.js coldOf(ev) leaves it out; it
+    // marks the stub's chip seen), so showing one stays read-only and the host button quiets.
     if (s && !off && !this.demo && s.surfaced && shown && this.seenSent.get(sid) !== (s.lastStopAt ?? 0)) {
       this.seenSent.set(sid, s.lastStopAt ?? 0);
       cx.timer.after(0, (cx) => this.post("act", { session_id: sid, action: "seen" }, { action: "seen", sid }, cx));
     }
     if (this.thenReq) this.runThen(st, cx);
+    // A cold session shown: its file is read (Reader wantCold, from a timer, never from render).
+    const cold = off ? null : this.coldShown(st, s);
+    if (cold && this.coldDue(sid, st)) cx.timer.after(0, (cx) => this.wantCold(sid, cx));
+    // The writer cannot read it: its other files in cold/, if any, are named in its words (Reader coldOthers).
+    if (cold?.state === "fault") this.coldOthers(sid, cold.file, cx);
     try { this.listFocused = this.keys.is_focused(); } catch { this.listFocused = false; }
     this.ctx = { threshold: st.threshold, now: Date.now(), here: sid, store: st, branchLive: (b) => this.branchLive(b) };
     this.entries = [];
@@ -710,14 +819,17 @@ export class Panel extends Reader {
     // claim holds the role: a fault or a stall before the fallback's note, the rest after it.
     const health = claim ? writerHealthWords(claim, now) : this.inApp && !this.demo && !FORCE_DEMO ? NO_WRITER : null;
     const urgent = !claim || Boolean(claim.fault) || (claim.stall && !claim.stall.ok) || claimStuck(claim, now) > PASS_STUCK_MS;
-    const note = this.flash || (urgent ? health : null) || this.writerNote || health || (this.fallback() ? this.writer.note : null);
+    // A session whose cold file the writer cannot read (store.js coldFaults): named after the writer's own trouble.
+    const faults = typeof st.coldFaults === "function" ? st.coldFaults() : [];
+    const coldNote = faults.length ? coldFaultsLine(faults, (x) => sessionWords(st.d.sessions[x] ?? { sessionId: x })) : null;
+    const note = this.flash || (urgent ? health : null) || coldNote || this.writerNote || health || (this.fallback() ? this.writer.note : null);
     return v_flex().id("ledgr").track_focus(this.keys).on_key_down((e, cx) => this.onKey(e, cx))
       .size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border)
       .text_color(t.foreground).text_size(t.ts(12.5))
       .child(this.header(t, st, s, off))
       .when(this.menu, (el) => el.child(this.sessionMenu(t, st, sid)))
       .child(v_flex().id("ledgr-list").track_scroll(this.listScroll).flex_1().min_h(0).overflow_y_scrollbar().px(8).py(8).gap(4).children(list))
-      .when(Boolean(s) && !off, (el) => el.child(this.footer(t, st, s)))
+      .when(Boolean(s) && !off && !cold, (el) => el.child(this.footer(t, st, s)))
       .when(Boolean(note), (el) => el.child(
         div().flex_none().px(12).py(6).border_t(1).border_color(t.border).text_size(t.ts(11)).text_color(t.muted).child(note)));
   }
@@ -856,7 +968,8 @@ export class Panel extends Reader {
     this.closedAt = at;
     if (!this.demo && c.drafts && typeof c.drafts === "object") {
       let n = 0;
-      for (const [id, text] of Object.entries(c.drafts)) if (typeof text === "string") { this.drafts.set(id, { text, sent: true, seq: 0 }); n++; }
+      // `at`: an item not in this copy's store (a cold session it has not read) keeps its answer a while (overlayLocal).
+      for (const [id, text] of Object.entries(c.drafts)) if (typeof text === "string") { this.drafts.set(id, { text, sent: true, seq: 0, at: Date.now() }); n++; }
       if (n) { this.overlayLocal(); this.bump(); }
     }
     if (c.opener !== this.panelId || this.replaced.has(c.overlay)) return;
@@ -1297,6 +1410,8 @@ export class Panel extends Reader {
       .when(Boolean(s), (el) => el.child(div().flex_none().text_size(t.ts(11)).text_color(s.state === "working" ? t.working : t.dim)
         .child(`turn ${s.turn}${s.state === "working" ? " · working" : s.state === "ended" ? " · ended" : ""}`)))
       .when(Boolean(off), (el) => el.child(this.pill(t, "off", t.dim)))
+      // A cold session (retention Phase 2): a dim "older" pill, its tooltip naming the file.
+      .when(Boolean(s?.cold?.file) && Boolean(this.coldOf(s?.sessionId, st)), (el) => el.child(div().id("lg-older-pill").flex_none().tooltip(olderPillTip(s.cold.file)).child(this.pill(t, "older", t.dim))))
       .when(this.demo, (el) => el.child(this.pill(t, "demo", t.accent)))
       // The settings dialog (text scale, threshold, closing list, the switches, branch depth, off spaces).
       .child(div().id("lg-settings").flex_none().w(t.ts(24)).h(t.ts(22)).flex().items_center().justify_center().rounded(6).cursor_pointer()
@@ -1318,9 +1433,14 @@ export class Panel extends Reader {
   // Branch sessions are listed under their parent, indented, not at the top level. Live sessions are
   // grouped by agent, each group headed by how that agent's asks arrive (declares asks, extractor
   // only, no asks). Sessions whose terminal is gone offer Forget (two clicks): the session, its items
-  // and its branches go.
+  // and its branches go. Cold sessions (retention Phase 2) leave the groups and ENDED for a folded
+  // "OLDER SESSIONS (N)" line at the bottom (olderShown): each row with its counts from the stub (store.js
+  // countsOf: "N open", "◆ b" when b), a dim "idle 9 d", or "can't read" when the writer cannot read its
+  // file. Every count in the menu is countsOf's.
   sessionMenu(t, st, sid) {
-    const list = st.sessionsList();
+    const all = st.sessionsList();
+    const isCold = (s) => Boolean(this.coldOf(s.sessionId, st));
+    const list = all.filter((s) => !isCold(s)), older = all.filter(isCold);
     const ids = new Set(list.map((s) => s.sessionId));
     const kids = new Map();
     for (const s of list) if (s.parentSessionId && ids.has(s.parentSessionId)) kids.set(s.parentSessionId, [...(kids.get(s.parentSessionId) ?? []), s]);
@@ -1340,11 +1460,20 @@ export class Panel extends Reader {
         .child(div().text_size(t.ts(10.5)).text_color(m.word === "declares asks" ? t.accent : t.dim).child(m.word));
     };
     const ended = roots.filter((s) => s.state === "ended").flatMap((s) => flat(s, 0));
-    const row = ([s, depth]) => {
-      const open = st.itemsOf(s.sessionId).filter((it) => st.counts(it)).length;
+    // OLDER SESSIONS: a cold branch session under its cold parent, the rest at the top of the fold.
+    const oIds = new Set(older.map((s) => s.sessionId)), oKids = new Map();
+    for (const s of older) if (s.parentSessionId && oIds.has(s.parentSessionId)) oKids.set(s.parentSessionId, [...(oKids.get(s.parentSessionId) ?? []), s]);
+    const oFlat = (s, d) => [[s, d], ...(d < 6 ? (oKids.get(s.sessionId) ?? []).flatMap((c) => oFlat(c, d + 1)) : [])];
+    const olderRows = older.filter((s) => !(s.parentSessionId && oIds.has(s.parentSessionId))).flatMap((s) => oFlat(s, 0));
+    const olderOpen = this.olderShown(st, sid);
+    const now = Date.now();
+    const row = ([s, depth], cold = false) => {
+      const c = typeof st.countsOf === "function" ? st.countsOf(s.sessionId) : null;
+      const open = c ? c.open : st.itemsOf(s.sessionId).filter((it) => st.counts(it)).length;
       const offThere = !this.demo && spaceOff(this.cfg, this.sessionSpace(st, s));
       const gone = !this.demo && !this.parentLive(s);
       const asking = this.forgetAsk === s.sessionId;
+      const fault = cold && Boolean(s.cold?.fault);
       return h_flex().id(`lg-s-${s.sessionId}`).h(t.ts(26)).pr(8).pl(8 + depth * 14).gap(6).items_center().rounded(6).cursor_pointer()
         .when(s.sessionId === sid, (el) => el.bg(t.selected)).hover((x) => x.bg(t.hover))
         .on_click((_e, cx) => {
@@ -1357,7 +1486,12 @@ export class Panel extends Reader {
         .child(this.pill(t, agentLabel(s.agent, s.profile)))
         .child(div().flex_1().min_w(0).truncate().text_size(t.ts(12)).child(sessionWords(s)))
         .when(Boolean(s.terminal), (el) => el.child(div().flex_none().text_size(t.ts(10.5)).text_color(t.dim).child(P(s.terminal))))
-        .child(div().flex_none().text_size(t.ts(11)).text_color(open && !offThere ? t.accent : t.dim).child(offThere ? "off" : open ? `${open} open` : gone ? "gone" : s.state))
+        .when(!cold, (el) => el.child(div().flex_none().text_size(t.ts(11)).text_color(open && !offThere ? t.accent : t.dim).child(offThere ? "off" : open ? `${open} open` : gone ? "gone" : s.state)))
+        // An older session: its counts from the stub (or "can't read"), and how long it has been idle.
+        .when(cold && fault, (el) => el.child(div().flex_none().text_size(t.ts(11)).text_color(t.blocked).child("can't read")))
+        .when(cold && !fault && open > 0, (el) => el.child(div().flex_none().text_size(t.ts(11)).text_color(offThere ? t.dim : t.accent).child(offThere ? "off" : `${open} open`)))
+        .when(cold && !fault && Number(c?.b) > 0, (el) => el.child(div().flex_none().text_size(t.ts(11)).font_semibold().text_color(t.blocked).child(`◆ ${c.b}`)))
+        .when(cold, (el) => el.child(div().flex_none().text_size(t.ts(10.5)).text_color(t.dim).child(idleWords(now - touchedOf(st, s)))))
         .when(gone && !asking, (el) => el.child(div().id(`lg-f-${s.sessionId}`).flex_none().px(5).rounded(4).text_size(t.ts(10.5)).text_color(t.dim)
           .hover((x) => x.bg(t.hover).text_color(t.foreground)).tooltip("Forget this session, its items and its branches")
           .on_click((_e, cx) => { cx.stop_propagation(); this.forgetAsk = s.sessionId; cx.notify(); }).child("forget")))
@@ -1370,10 +1504,22 @@ export class Panel extends Reader {
     const sw = this.spaceSwitch(t);
     return v_flex().flex_none().max_h(220).id("lg-menu").overflow_y_scrollbar().px(6).py(4).gap(1).border_b(1).border_color(t.border).bg(t.surface)
       .when(Boolean(sw), (el) => el.child(sw))
-      .children(groups.flatMap((g) => [groupHead(g), ...g.rows.map(row)]))
+      .children(groups.flatMap((g) => [groupHead(g), ...g.rows.map((r) => row(r))]))
       .when(ended.length > 0, (el) => el.child(div().px(8).pt(6).pb(2).text_size(t.ts(10.5)).font_semibold().text_color(t.dim).child("ENDED SESSIONS")))
-      .children(ended.map(row))
-      .when(!list.length, (el) => el.child(div().px(8).py(6).text_size(t.ts(11.5)).text_color(t.dim).child("No sessions yet.")));
+      .children(ended.map((r) => row(r)))
+      .when(older.length > 0, (el) => el.child(div().id("lg-older").px(8).pt(6).pb(2).rounded(5).cursor_pointer().text_size(t.ts(10.5)).font_semibold().text_color(t.dim)
+        .hover((x) => x.bg(t.hover).text_color(t.foreground))
+        .tooltip("Sessions nobody touched for a while: store.json keeps their record, their items wait in ledgr-data/cold/ and are read when you show one")
+        .on_click((_e, cx) => { cx.stop_propagation(); this.olderOpen = !olderOpen; cx.notify(); })
+        .child(olderSessionsWords(older.length, olderOpen))))
+      .when(olderOpen, (el) => el.children(olderRows.map((r) => row(r, true))))
+      .when(!all.length, (el) => el.child(div().px(8).py(6).text_size(t.ts(11.5)).text_color(t.dim).child("No sessions yet.")));
+  }
+
+  // The OLDER SESSIONS fold: as the person last clicked it; until then open while the shown session is cold.
+  olderShown(st, sid) {
+    if (this.olderOpen !== null) return this.olderOpen;
+    return Boolean(sid && this.coldOf(sid, st));
   }
 
   // The focused pane has no ledgr session (current()): say so, and why it may not have one yet.
@@ -1496,6 +1642,12 @@ export class Panel extends Reader {
 
     this.pinsLane(out, t, st, s);
     rule();
+    // A cold session whose items are not in the shown store yet: what is happening instead of its lanes (its
+    // pins above are in the store and show as usual).
+    const cold = this.coldShown(st, s);
+    if (cold) { this.coldLines(out, t, st, s, cold); return out; }
+    // Gone on without its older items (cold_reset): said, dim, above its lanes.
+    if (s.coldLost && typeof s.coldLost === "object") put(div().id("cold-lost").px(6).py(3).text_size(t.ts(11)).text_color(t.dim).child(coldLostWords(s.coldLost)));
     const togMine = (open) => this.setCollapsed("mine", !open);
     put(this.laneHead(t, "mine", "YOUR QUESTIONS", mine.filter((it) => it.status === "open").length,
       !this.collapsed.mine, togMine, null, null, this.clearButton(t, st, s)), "lane:mine", () => togMine(this.collapsed.mine));
@@ -1580,7 +1732,7 @@ export class Panel extends Reader {
       ["deferred", "DEFERRED", (it) => it.status === "deferred"],
       ["closed", "CLOSED", (it) => isClosed(it)],
     ]) {
-      if (!this.folds[key]) continue;
+      if (!this.foldOpen(key, st, s)) continue;
       const list = items.filter(pick).sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
       rule();
       put(div().px(4).py(2).text_size(t.ts(10.5)).font_semibold().text_color(t.dim).child(`${title} (${list.length})`));
@@ -1588,6 +1740,34 @@ export class Panel extends Reader {
       if (key === "closed") this.archivedLines(out, t, st, s);
     }
     return out;
+  }
+
+  // ── cold sessions (retention Phase 2, 2026-11-19) ────────────────────
+  // The shown session is cold and its items are not merged (Reader coldOf: c.state "loading", "error" or
+  // "fault"). Loading: one line, how long it has been idle and its counts from the stub (store.js countsOf).
+  // Unreadable here: why, that nothing is lost, and Try again (Reader coldRetry; Enter on the line too). The
+  // writer cannot read it: its words and the events it keeps aside, Try again (cold_retry), Use without its
+  // older items (two clicks: Reader coldReset, cold_reset) and Forget (two clicks, as in the session menu).
+  coldLines(out, t, st, s, c) {
+    const sid = s.sessionId, counts = typeof st.countsOf === "function" ? st.countsOf(sid) : null;
+    const line = (id, words, color) => div().id(id).px(6).py(3).text_size(t.ts(11.5)).text_color(color).child(words);
+    if (c.state === "loading") { this.put(out, line("cold-reading", coldLoadingWords(Date.now() - touchedOf(st, s), counts), t.muted)); return; }
+    const retry = (cx) => this.coldRetry(s, cx);
+    if (c.state === "error") {
+      this.put(out, line("cold-error", coldErrorWords(c.error, c.file), t.muted));
+      this.put(out, h_flex().id("cold-acts").flex_none().px(6).gap(6).items_center()
+        .child(this.btn(t, "cold-retry", COLD_RETRY, (_e, cx) => retry(cx), { primary: true, tip: `Read ledgr-data/cold/${c.file} again now` })), "cold:retry", retry);
+      return;
+    }
+    this.put(out, line("cold-fault", coldFaultWords({ error: c.error, held: c.held, file: c.file, others: this.coldOthers(sid, c.file, null) ?? [] }), t.blocked));
+    const now = Date.now(), armed = this.coldResetAsk?.sid === sid && now - this.coldResetAsk.at < COLD_ARM_MS, forgetting = this.forgetAsk === sid;
+    this.put(out, h_flex().id("cold-acts").flex_none().flex_wrap().px(6).gap(6).items_center()
+      .child(this.btn(t, "cold-retry", COLD_RETRY, (_e, cx) => retry(cx), { primary: true, tip: "Read the file again here, and ask the ledgr writer to try at once" }))
+      .child(this.btn(t, "cold-reset", armed ? coldResetConfirm(c.n?.items) : COLD_RESET, (_e, cx) => { this.coldReset(s, cx); cx.notify(); },
+        { primary: armed, tip: armed ? "Click again: the session goes on, warm and empty; the kept events apply to it; the file stays in ledgr-data/cold/" : "The session goes on without the items in its file (two clicks)" }))
+      .child(this.btn(t, "cold-forget", forgetting ? "Forget it and its branches" : "Forget", (_e, cx) => { if (forgetting) this.forget(s, cx); else this.forgetAsk = sid; cx.notify(); },
+        { primary: forgetting, tip: forgetting ? "Click again: the session, its items and its branches go; the kept events are dropped" : "Forget this session (two clicks)" })),
+    "cold:retry", retry);
   }
 
   // ── the archive (retention, 2026-11-19) ──────────────────────────────
@@ -1682,12 +1862,31 @@ export class Panel extends Reader {
       deferred: items.filter((it) => it.status === "deferred").length,
       closed: items.filter(isClosed).length,
     };
-    const fold = (key, label) => div().id(`fold-${key}`).px(5).py(1).rounded(5).cursor_pointer()
-      .text_color(this.folds[key] ? t.foreground : t.dim).when(this.folds[key], (el) => el.bg(t.selected))
-      .hover((x) => x.bg(t.hover)).on_click((_e, cx) => { this.folds[key] = !this.folds[key]; cx.notify(); })
-      .child(`${label} (${counts[key]}) ${this.folds[key] ? "▾" : "›"}`);
+    const fold = (key, label) => { const open = this.foldOpen(key, st, s); return div().id(`fold-${key}`).px(5).py(1).rounded(5).cursor_pointer()
+      .text_color(open ? t.foreground : t.dim).when(open, (el) => el.bg(t.selected))
+      .hover((x) => x.bg(t.hover)).on_click((_e, cx) => { this.toggleFold(key, st, s); cx.notify(); })
+      .child(`${label} (${counts[key]}) ${open ? "▾" : "›"}`); };
     return h_flex().flex_none().h(t.ts(30)).px(8).gap(4).items_center().border_t(1).border_color(t.border).text_size(t.ts(11))
       .child(fold("older", "older than a day")).child(fold("deferred", "deferred")).child(fold("closed", "closed"));
+  }
+
+  // A footer fold, open: the person's choice (this.folds, every session). A cold session's open items are all
+  // older than a day (it went cold for being untouched), so its OLDER THAN A DAY fold is open unless the person
+  // shut it for that session (olderShut): showing one shows its items, as the menu's count promised. The same
+  // for a day after it came back (s.thawedAt; integration, 2026-11-19): the first act on a cold session thaws it,
+  // and its rows must not fold away under the person's hand.
+  olderAuto(st, s) {
+    return Boolean(s) && (Boolean(this.coldOf(s.sessionId, st)) || Date.now() - (Number(s.thawedAt) || 0) < 86400e3);
+  }
+
+  foldOpen(key, st, s) {
+    if (key === "older" && this.olderAuto(st, s)) return !this.olderShut.has(s.sessionId);
+    return Boolean(this.folds[key]);
+  }
+
+  toggleFold(key, st, s) {
+    if (key === "older" && this.olderAuto(st, s)) { if (this.olderShut.has(s.sessionId)) this.olderShut.delete(s.sessionId); else this.olderShut.add(s.sessionId); return; }
+    this.folds[key] = !this.folds[key];
   }
 
   btn(t, id, label, onClick, o = {}) {

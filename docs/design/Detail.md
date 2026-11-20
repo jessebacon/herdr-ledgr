@@ -3,7 +3,10 @@
 Date: 2026-11-10. Status: built the same day (see Section 11 of the design doc for departures). Written against the repo at commit 4433d65 (pins
 committed). Line numbers are as read on 2026-11-10. Builds on `Herdr ledger mod design.md` (Phases 1
 to 3), `Pins.md`, and the build notes in `docs/build-notes/`. Retention (2026-11-19, `Retention.md` 6)
-added archived rows under CLOSED and a read-only dialog for them; the sections it touched say so.
+added archived rows under CLOSED and a read-only dialog for them; the sections it touched say so. Retention
+Phase 2 (2026-11-19, `Retention.md` 10; built: `BUILD-NOTES-detail.md` 18) added cold sessions: the session
+menu's OLDER SESSIONS fold, a cold session's loading, error and fault views, and the dialog on an item of
+one; the sections it touched say so too.
 
 The panel becomes a scan list: one line per item, driven by the pointer or by arrows and Enter.
 Clicking a row, or Enter on it, opens a centered dialog (`kind: "dialog"`, 0.6 × 0.75 of the
@@ -39,6 +42,7 @@ screen with `TextView.markdown(...).selectable(true)`, Esc back).
 | Files | mod.json, keys.json, the installer, the store and every engine file unchanged | 4 |
 | Must happen first | Probe P1 (staging with a dialog open, where the keyboard goes after it closes) | 6.4, 7 |
 | Archived items (added 2026-11-19, `Retention.md` 6) | CLOSED ends with `archived (N) · show` (entry `arch:items`); shown, archived rows read from ledgr-data/archive/ (state word "archived", dim, no quick action); the dialog shows one whole and read-only (`props.archived`), its one action Reopen | 1.3, 1.4, 1.7, 1.10, 2.1, 2.4, 2.5, 2.8 |
+| Cold sessions (added 2026-11-19, `Retention.md` 10) | The session menu ends with a folded OLDER SESSIONS (N), rows counted from the stub; shown, a cold session's file is read and merged into the copy's own store, never brought back ("Reading…", then its lanes; unreadable: Try again; the writer cannot read it: Try again, Use without its older items, Forget, and any other file of the session in cold/ named); a dim "older" pill; the dialog on one of its items says "Reading…", never Gone | 1.1, 1.7, 1.10, 2.1, 2.8, 5.2, 6.5 |
 
 ## 1. The list (Builder A)
 
@@ -53,6 +57,25 @@ screen with `TextView.markdown(...).selectable(true)`, Esc back).
 | Pin checkboxes and the selection; search results grouped by session with "open session" | Conclude… / Edit conclusion…, the Conclude editor, Paste into trunk, Ask for a conclusion, Close branch, Focus the branch, Show the preamble |
 | Row quick actions: Done, Paste answer | A pin's Ask here… / Branch… / Note / Copy / Go to anchor / Archive / Restore / Delete, "show whole message", the "Copy" pill on search results (:1479-1481) |
 | Motion: a row entering, the answered glow, a row leaving (ghost) | The answered fold of an open row (`f.fold`, :1080-1083) goes: rows no longer open |
+
+Cold sessions (2026-11-19, `Retention.md` 10) stay in the panel too. The session menu lists them under a
+folded OLDER SESSIONS (N) at its bottom, out of the agent groups and ENDED (open while the shown session is
+cold, until the person clicks it): each row with its pill, name, pane, "N open" and "◆ b" from the stub's
+counts (`store.js` `countsOf`, no file read), a dim "idle 9 d", or "can't read" when the writer cannot read
+its file. Shown, a cold session draws its pins, then one line instead of its lanes while its file is read
+("Reading this session's items (idle 9 days; kept in ledgr-data/cold/)… 3 open, 1 blocking."), then its
+lanes as usual, its open items under OLDER THAN A DAY, which opens on its own for a cold session and for a
+day after it comes back unless the person shuts it there; showing it never brings it back (the first act
+other than `seen` does, at the writer), nor moves its idle clock (`seen` is off the clock, warm or cold). A
+file this copy cannot read: why, that nothing is lost, and Try again. A file the writer cannot read: its
+words and the events it keeps, Try again, Use without its older items (two clicks) and Forget (two clicks);
+when another file of the session is in `ledgr-data/cold/` (`Reader.coldOthers`: listed from a timer, at
+most once a minute), the words name it ("Another file of this session is in ledgr-data/cold/ (<name>): it
+may hold what is missing; ./install.sh --check says what it holds, and Use without its older items leaves
+it there."), since the writer's sweep keeps every file of a faulted session (one may be what repairs
+it) and the person should see it before choosing to go on without the missing one. No footer until it is read. The header carries a dim
+"older" pill, its tooltip naming the file, and the status line names any session the writer cannot read.
+The rows, state words and quick actions are the usual ones (1.2-1.4).
 
 ### 1.2 The row
 
@@ -184,6 +207,8 @@ their own focus handle and Esc.
   `item:<id>`, `branch:<id>`, `group:<turn>`, `sheet:<turn>`, `sug:<turn>`, `err:<turn>`, and
   (2026-11-19) `arch:items`, CLOSED's last line `archived (N) · show`, whose Enter shows or hides the
   session's archived rows as its click does; each archived row is an `item:<id>` entry like any other.
+  Also (2026-11-19, cold sessions) `cold:retry`, the buttons' line of a cold session that could not be
+  read, whose Enter is Try again.
   The selection bar, the search box, Clear, the threshold menu and the footer are not entries.
 - `this.cursor` is an entry key, in memory, reset when the shown session changes.
 - Moving: `moveCursor(keys, cursor, delta)` (listing.js); then `this.listScroll.scroll_to_item(index)`
@@ -260,6 +285,8 @@ exactly one of them.
 | detail:close, detail:done, detail:whole, detail:pick:<n>, detail:answer:<text> | new | dialog only |
 | archived | new (2026-11-19) | panel: CLOSED opened, the shown session's archived rows shown or hidden, as a click on `archived (N) · show`; `open:<handle>` and `cursor:<handle>` reach an archived row once the rows are read |
 | detail:reopen | new (2026-11-19) | dialog only, on an archived record: Reopen (one `restore` event). On an archived record `detail:done`, `detail:pick:` and `detail:answer:` say it is read-only; `detail:whole` works |
+| older-sessions, cold-retry, cold-reset | new (2026-11-19, cold sessions; bound to no key) | panel: the session menu opened, its OLDER SESSIONS fold opened or closed, as its click; the shown cold session's Try again; its Use without its older items (twice: arm, then one `cold_reset`). On a warm session the last two say so |
+| open:, cursor:, go:, whole:, menu:, ask-here:, act:, pick:, copy-answer: naming an item of a cold session not read yet | (2026-11-19) | panel: the file is read first ("Reading this session's older items for A1…") and the command runs once the items are merged, within a minute and while that session is shown; when the writer cannot read the file, it says so and keeps nothing. A pin's or a branch's handle needs no file |
 | tab, backtab, btw, pin, submit, escape | capture box | capture box; the dialog handles tab and backtab only for its own fields (2.7); the panel ignores all six |
 
 "The dialog is open on that item" is `shared("ledgr.detail").open.id === it.id`.
@@ -335,6 +362,15 @@ Since 2026-11-19 an item housekeeping archived is not gone: opened from its arch
 the dialog reads the session's archive itself (Reader `loadArchive`) and shows the record read-only (2.4);
 "Reading the archive…" meanwhile, and `archiveGoneWords` when no file read holds it. A dialog open on a
 live item that a run archives meanwhile reads the archive once and shows the archived record in its place.
+
+Nor is an item of a cold session (2026-11-19, `Retention.md` 10): its session's stub is in `store.json`,
+its items in `ledgr-data/cold/`. The dialog reads that file itself (Reader `wantCold`, `detail.js`
+`coldTarget`) and merges it into its own store; meanwhile it says "Reading this session's items (kept in
+ledgr-data/cold/)…", never `DETAIL_GONE` (the header says "ledgr", not "Gone"), and the item shows as usual
+once it arrives (the late-record path). A file it cannot read, or one the writer cannot read, is said, with
+Try again beside Close; the writer's words name the session's other files in `cold/`, as the panel's view
+does. Reading never brings the session back: the first act posts its event, and the writer
+thaws it. Props are unchanged; a pin or a branch of a cold session is in the store and needs no file.
 
 ### 2.2 Size and layout
 
@@ -562,7 +598,8 @@ Nothing typed is lost when Esc or a click outside closes the dialog:
   branch; the next `close-branch` ends it). On an archived record only "whole" applies.
 - Next and previous (⌘↓ / ⌘↑, 2026-11-11; `listing.js` `laneOf`): on an archived record the lane is
   `"archive"` (2026-11-19), the session's archived rows as read, the store's ids left out, newest first,
-  each step opening the next record from its own file.
+  each step opening the next record from its own file. On an item of a cold session (2026-11-19) the lane
+  is drawn from the merged items, as for a warm one.
 
 ### 2.9 Modules
 
@@ -760,6 +797,7 @@ changes, so the Python side and `test_compose.mjs` are untouched. Docs are the o
 | detailing.js | B | A (`openDetail`) | `DETAIL`, `KINDS`, `OPEN_STATES`, `detailProps`, `detailSpec`, `kindOf`, `closesAfterStage`, `mergeClosed`, … (2.9) |
 | Dialog props | A writes | B reads | `{view: "detail", session, kind, id, open: OPEN_STATES \| null, sel: [pn_ ids], opener: panelId, demo: boolean}`; since 2026-11-19 also `archived: "<archive file>"` for an archived row |
 | The archive (2026-11-19) | the retention builders | panel, dialog | `listing.js` `archiveRecords`, `archivedCount`, `closedAtOf`, `laneOf`'s `"archive"` lane; `Reader.loadArchive`; `rowModel().archived`; `Retention.md` 3.2, 6 |
+| Cold sessions (2026-11-19) | the retention Phase 2 builders | panel, dialog | Reader `coldOf`, `coldDue`, `coldLoading`, `wantCold`, `coldLoaded` (+ `onCold(cx)` hook), `mergeColdAll`, `dropColdUnnamed`, `trimColdCache`, `coldRetry`, `coldReset`, `coldOthers`, `ownStore`; `listing.js` `parseCold`, `touchedOf`; `store.js` `isMerged`, `mergeCold`, `coldSessions`, `coldFaults`, `countsOf`; the events `cold_retry` and `cold_reset` `{session_id, file}`; a merge only into a store the copy owns (the panel's fallback mode shows a clone); `Retention.md` 10 |
 | `shared("ledgr.detail")` | B writes | A reads | `{open: {overlay, opener, session, kind, id, at} \| null, closed: {overlay, opener, session, kind, id, at, flash, focus: "list" \| "pane" \| null, terminal, drafts: {[itemId]: text}} \| null}` |
 | words.js | B | A | `stageLabels(paste).quick`; existing exports unchanged |
 | Commands | A (panel), B (dialog) | main.js header (B), scripted checks | 1.10, exact names |
@@ -884,6 +922,13 @@ through the panel's own events.
     `archived (3) · hide` and three dim "archived" rows with no Done; ↓ to one, Enter: the dialog,
     ARCHIVED first, no answer box, Reopen alone; ⌘↓ to the next archived row. The real path is
     `Retention.md` 8.3.
+11. Cold sessions (2026-11-19): `herdr-app do ledgr.demo`, `ledgr.older-sessions`: the menu ends with
+    OLDER SESSIONS (1) ▾ and "nightly report backfill" with its count, ◆ 1 and "idle 9 d"; click it: its
+    lanes, the dim "older" pill; Enter on Ask 1: the dialog. On the live store, a session not read yet:
+    "Reading this session's items…", then its lanes, `store.json` still naming it cold; Done on one of its
+    items brings it back; `ledgr.open:<handle>` on another cold session opens the dialog once the file is
+    read. The fault view, in a throwaway session only, is `Retention.md` 10.12 step 6; with a second file
+    of that session in `cold/`, its words name it. The list is `BUILD-NOTES-detail.md` 18.
 
 ## 7. Out of scope, and open questions
 

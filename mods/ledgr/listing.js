@@ -6,7 +6,7 @@
 // colors. The archive's reading rule (retention, 2026-11-19: archiveRecords) is here too, so the panel's
 // archived rows and the dialog's archived record are read the same way (reader.js loadArchive reads the
 // files; this decides which line counts). Not an engine file.
-import { isAgentAsk, isHuman, isClosed, isSuggestion, isBlocking, levelOf } from "./store.js";
+import { isAgentAsk, isHuman, isClosed, isSuggestion, isBlocking, levelOf, coldRecordError } from "./store.js";
 import { handleWords, branchWords, agoWords, pinsWords } from "./words.js";
 
 // A branch's live word (branch.js liveStatus, or the demo's), as the list and the dialog say it.
@@ -314,6 +314,34 @@ export function neighbors(ids, id) {
   const list = Array.isArray(ids) ? ids : [], i = list.indexOf(id);
   if (i < 0) return { at: 0, of: list.length, prev: null, next: null };
   return { at: i + 1, of: list.length, prev: i > 0 ? list[i - 1] : null, next: i < list.length - 1 ? list[i + 1] : null };
+}
+
+// ── cold sessions (retention Phase 2, 2026-11-19) ────────────────────────
+// A session nobody touched for retention.coldDays keeps only its record in store.json (a stub: the record as
+// it was, plus `cold` {file, at, n, fault?}); its items and turn records are in ledgr-data/cold/<file>, one
+// JSON document {ledgr: "ledgr-cold", v: 1, sessionId, at, session, items, turns, n}, written once by the
+// writer. A reading copy reads it when the session is shown (reader.js wantCold) and merges it into its own
+// store (store.js mergeCold), never bringing the session back itself: the first act on it does, at the writer.
+// A cold file's text, checked as the writer's thaw checks it before anything of it is shown (store.js
+// coldRecordError, the one check thaw and mergeCold make too): {record} or {error} (in words). sid: the session
+// it must hold; file: the name read; named: the file the session's stub names now (when given, they must
+// agree). Pure.
+export function parseCold(text, sid, file = null, named = null) {
+  if (typeof text !== "string" || !text.trim()) return { error: "the file is empty" };
+  let r;
+  try { r = JSON.parse(text); } catch { return { error: "the file is not JSON" }; }
+  const bad = coldRecordError(r, sid);
+  if (bad) return { error: bad };
+  if (named !== null && named !== undefined && file !== named) return { error: "the session names another file now" };
+  return { record: r };
+}
+
+// When a session was last touched (the idle clock: store.js touchedAt, which a stub carries forward), in ms;
+// without it, the latest of the record's own times. Never seenAt: looking at a session does not move it.
+export function touchedOf(store, s) {
+  if (!s) return 0;
+  if (typeof store?.touchedAt === "function") { const v = Number(store.touchedAt(s.sessionId)); if (Number.isFinite(v) && v > 0) return v; }
+  return Math.max(0, ...[s.touchedAt, s.updatedAt, s.thawedAt, s.promptAt, s.lastStopAt].map((v) => Number(v) || 0));
 }
 
 // An item's one line: its text's first line; a bookmark (no text), the first line of its quote in quotes.

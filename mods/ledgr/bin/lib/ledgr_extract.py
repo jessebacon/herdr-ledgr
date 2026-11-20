@@ -22,10 +22,15 @@ provider, usage, ms, error, block_error, extract_request_id, [error_detail], [tr
      checked against the listed handles);
   5. always-model: union, block asks win; block-only: never calls a model.
 Adapters add the agent-specific parts (message ids, emitting the events).
+
+session_items(sid) is how every Python reader (this module, bin/mcp) reads a session's items:
+snapshot.json, or, for a session the writer moved out of store.json (retention Phase 2, "cold": idle for
+retention.coldDays), the file snapshot.json's `cold` map names, filtered as the snapshot is. Read-only.
 """
 import json
 import os
 import random
+import re
 import sys
 import time
 
@@ -41,16 +46,157 @@ MAX_OPEN = 30
 MAX_DISMISSED = 15
 DISMISSED_DAYS = 7
 OPEN_STATES = (None, "open", "deferred", "answered")
+# Retention Phase 2 (cold sessions): the names the mod writes (config.js COLD_NAME, store.js COLD_FORMAT)
+# and what store.js snapshot() keeps of an item (OPEN_STATES there, plus dismissed within 7 days).
+COLD_NAME = re.compile(r"^(.+)\.(\d{13})-([0-9a-z]{6})\.json$")
+COLD_FORMAT = "ledgr-cold"
+SNAPSHOT_STATES = ("open", "answered", "deferred", "rejoin_pending")
+SNAPSHOT_QUOTE = 200
 
 
-def recorded_asks(sid, snapshot_path=None, now_ms=None):
-    """This session's agent asks from the mod's snapshot.json:
-    (open [(handle, text)], recently dismissed [(handle, text)], known {handle: {id, status}})."""
-    snap = C.read_json(snapshot_path or C.path("snapshot.json"), {})
-    items = snap.get("items") if isinstance(snap, dict) else None
-    if isinstance(items, dict):
-        items = list(items.values())
+def session_of(it):
+    anc = it.get("anchor") if isinstance(it.get("anchor"), dict) else {}
+    return anc.get("sessionId") or it.get("sessionId")
+
+
+def _num(v):
+    """store.js num(): a finite number (a numeric string included), else 0."""
+    if isinstance(v, bool):
+        return int(v)
+    try:
+        n = float(v) if isinstance(v, (int, float)) else float(v.strip() or 0) if isinstance(v, str) else 0.0
+    except ValueError:
+        return 0.0
+    return n if n == n and n not in (float("inf"), float("-inf")) else 0.0
+
+
+def snapshot_copy(it, now_ms):
+    """One store.json item as store.js snapshot() writes it, or None when the snapshot leaves it out: kept
+    are open, answered, deferred and rejoin_pending items, and dismissed ones within 7 days; the copy gets
+    `sessionId` from its anchor, loses a quote over 200 characters (counted as JavaScript counts), and its
+    draft and pins."""
+    st = it.get("status")
+    when = it.get("resolvedAt") if it.get("resolvedAt") is not None else it.get("updatedAt")
+    if st not in SNAPSHOT_STATES and not (st == "dismissed" and _num(when) >= now_ms - DISMISSED_DAYS * 86400_000):
+        return None
+    c = dict(it)
+    anc = dict(it["anchor"]) if isinstance(it.get("anchor"), dict) else {}
+    c["sessionId"] = anc.get("sessionId")
+    q = anc.get("quote")
+    if isinstance(q, str) and q and len(q.encode("utf-16-le")) // 2 > SNAPSHOT_QUOTE:
+        del anc["quote"]
+    c["anchor"] = anc
+    c.pop("draft", None)
+    c.pop("pins", None)
+    return c
+
+
+def _js(v, n):
+    """JSON.stringify(v ?? null).slice(0, n), as store.js words a value."""
+    return json.dumps(v, ensure_ascii=False)[:n]
+
+
+def cold_record_error(rec, sid):
+    """None, or why `rec` is not `sid`'s cold file: store.js coldRecordError, check for check and word for word
+    (the writer's thaw and the reading copies refuse the same files)."""
+    if not isinstance(rec, dict):
+        return "not a cold file (no JSON object)"
+    if rec.get("ledgr") != COLD_FORMAT:
+        return f"not a cold file (ledgr {_js(rec.get('ledgr'), 40)})"
+    v = rec.get("v")
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v != 1:
+        return f"cold file version {_js(v, 20)}, not 1"
+    if not isinstance(sid, str) or not sid or rec.get("sessionId") != sid:
+        sv = rec.get("sessionId")
+        return f"the file is session {str('?' if sv is None else sv)[:40]}'s, not {str(sid)[:40]}"
+    items, turns = rec.get("items"), rec.get("turns")
+    if not isinstance(items, list):
+        return "the file holds no item list"
+    if turns is not None and not isinstance(turns, dict):
+        return "the file's turn records are not a map"
+    for i, it in enumerate(items):
+        if not isinstance(it, dict) or not isinstance(it.get("id"), str) or not it["id"] or it["id"] == "__proto__":
+            return f"item {i + 1} of the file has no id"
+        if (it.get("anchor") if isinstance(it.get("anchor"), dict) else {}).get("sessionId") != sid:
+            return f"item {it['id'][:40]} in the file is another session's"
+    for k, r in (turns or {}).items():
+        if k == "__proto__" or not isinstance(r, dict):
+            return f"turn record {k[:20]} of the file is not a record"
+    return None
+
+
+def cold_record(sid, file, data_dir=None):
+    """(record, None), or (None, why) when ledgr-data/cold/<file> cannot be read as `sid`'s cold file, in the
+    writer's words (writer.js readCold): the name (config.js COLD_NAME, no folder), the read (any size: open()
+    has no cap), the JSON, then the record (cold_record_error)."""
+    m = COLD_NAME.match(file) if isinstance(file, str) else None
+    # A name beginning with "." only as this session's own (writer.js readCold: one frozen before such ids were refused).
+    if not (m and "/" not in file and "\\" not in file and (not file.startswith(".") or m.group(1) == safe_name(sid))):
+        return None, f"not a cold file name: {_js(file, 80)}"
+    try:
+        with open(os.path.join(data_dir or C.DATA, "cold", file), encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return None, f"cold/{file} is missing"
+    except (OSError, ValueError) as ex:
+        return None, f"cold/{file} could not be read ({str(getattr(ex, 'strerror', None) or ex)[:160]})"
+    try:
+        rec = json.loads(text)
+    except ValueError as ex:
+        return None, f"cold/{file} does not parse ({str(ex)[:120]})"
+    bad = cold_record_error(rec, sid)
+    return (None, f"cold/{file}: {bad}") if bad else (rec, None)
+
+
+def session_items(sid, snapshot_path=None, now_ms=None):
+    """-> (items, cold): this session's items as snapshot.json carries them (store.js snapshot()).
+
+    A warm session's come from the snapshot's `items`. A cold one (retention Phase 2: the writer moved its
+    items and turn records to ledgr-data/cold/<file> and kept its record in store.json; the snapshot's
+    `cold` map names it) reads that file, filtered as snapshot() filters (snapshot_copy); items the
+    snapshot itself carries for it (a "mixed" session an older build left) come first and win by id.
+    `cold` is None for a warm session, else {"file", "fault" (the writer's s.cold.fault.error: it cannot
+    read the file and holds the session's events; else None), "error" (why it could not be read here;
+    else None)}. A read that fails reads snapshot.json once more first: a thaw may have moved on (the
+    file then stays at least an hour after it, so a snapshot that names it finds it). With no sid, every
+    item of the snapshot, as before. Read-only."""
+    path = snapshot_path or C.path("snapshot.json")
     now_ms = now_ms or C.now_ms()
+    for attempt in range(2):
+        snap = C.read_json(path, {})
+        snap = snap if isinstance(snap, dict) else {}
+        items = snap.get("items")
+        items = list(items.values()) if isinstance(items, dict) else items if isinstance(items, list) else []
+        items = [it for it in items if isinstance(it, dict)]
+        if not sid:
+            return items, None
+        mine = [it for it in items if session_of(it) == sid]
+        ent = (snap.get("cold") if isinstance(snap.get("cold"), dict) else {}).get(sid)
+        if not isinstance(ent, dict):
+            return mine, None
+        file = ent.get("file") if isinstance(ent.get("file"), str) else None
+        fault = ent.get("fault") if isinstance(ent.get("fault"), str) and ent.get("fault") else None
+        rec, error = cold_record(sid, file, os.path.dirname(os.path.abspath(path)))
+        if error and attempt == 0:
+            continue                          # read the snapshot again once: it may have moved on
+        cold = {"file": file, "fault": fault, "error": error}
+        have = {it.get("id") for it in mine}
+        for it in (rec or {}).get("items") or []:
+            if isinstance(it, dict) and it.get("id") not in have and session_of(it) == sid:
+                c = snapshot_copy(it, now_ms)
+                if c is not None:
+                    mine.append(c)
+        return mine, cold
+    return [], None                           # not reached
+
+
+def recorded_asks(sid, snapshot_path=None, now_ms=None, items=None):
+    """This session's agent asks from the mod's snapshot.json (through session_items, so a cold session's
+    come from its file; `items`: that list when the caller has read it already):
+    (open [(handle, text)], recently dismissed [(handle, text)], known {handle: {id, status}})."""
+    now_ms = now_ms or C.now_ms()
+    if items is None:
+        items = session_items(sid, snapshot_path, now_ms)[0]
     open_, dismissed, known = [], [], {}
     for it in items if isinstance(items, list) else []:
         if not isinstance(it, dict) or it.get("direction") != "agent_to_human":
@@ -76,7 +222,6 @@ def recorded_asks(sid, snapshot_path=None, now_ms=None):
 
 def safe_name(name):
     """A session id as bin/mcp names its folder: every character outside A-Za-z0-9._- becomes _."""
-    import re
     return re.sub(r"[^A-Za-z0-9._-]", "_", str(name))
 
 
@@ -97,17 +242,16 @@ def tool_asks(decl, sid, turn, text, snapshot_path=None):
     """A turn's declared asks, validated again at Stop: quotes against the turn's text, repeat_of
     against the session's recorded asks (this turn's own left out: they are the declaration itself).
     Options and the recommendation come from the declaration, else from the writer's item in
-    snapshot.json; when neither has them the key is left out, so the writer keeps the item's own."""
-    snap = C.read_json(snapshot_path or C.path("snapshot.json"), {})
-    items = snap.get("items") if isinstance(snap, dict) else None
-    items = list(items.values()) if isinstance(items, dict) else items if isinstance(items, list) else []
+    snapshot.json (a cold session's from its file, session_items); when neither has them the key is left
+    out, so the writer keeps the item's own."""
+    items = session_items(sid, snapshot_path)[0]
     mine = {}
     for it in items:
         anc = it.get("anchor") if isinstance(it, dict) and isinstance(it.get("anchor"), dict) else {}
         if anc.get("sessionId") == sid and it.get("direction") == "agent_to_human" and it.get("origin") == "tool" \
                 and turn in (it.get("createdTurn"), anc.get("turn")) and isinstance(it.get("text"), str):
             mine[A.norm_key(it["text"])] = it
-    _, _, known = recorded_asks(sid, snapshot_path)
+    _, _, known = recorded_asks(sid, snapshot_path, items=items)
     known = {h: v for h, v in known.items() if not any(x.get("handle") == h for x in mine.values())}
     raw, keep_opts = [], set()
     for a in decl.get("asks") or []:

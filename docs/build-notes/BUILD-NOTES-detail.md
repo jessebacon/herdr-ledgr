@@ -944,3 +944,198 @@ the keys on them, the dialog on a real archived record (selection, links, Reopen
 writer, the message read from a turn file whose record was cut), and a Reopen while a new reading copy
 runs beside an old host engine before Herdr is relaunched (the old writer ignores a `restore`; the dialog
 says it could not be read).
+
+## 18. Cold sessions in the reading copies (2026-11-19, uncommitted)
+
+Retention Phase 2 (`docs/design/Retention.md` 10): a session nobody touched for `retention.coldDays` (7
+days) keeps only its record in `store.json`, a stub with `cold` `{file, at, n}` (`n`: its counts by level),
+and its items and turn records move to `ledgr-data/cold/<safe sid>.<ms>-<rand6>.json`, written once by the
+writer; the first event that needs the session warm brings it back there (`BUILD-NOTES-mod.md` 20). This
+section is the reading copies' half: the session menu lists cold sessions under OLDER SESSIONS with their
+counts from the stub, a shown one is read from its file and merged into the copy's own store without being
+brought back, the dialog opens an item of one, and the panel offers Try again and Use without its older
+items when a file cannot be read. Built by the reading-copies builder against the Phase 2 contract while the
+store, the writer and the Python readers were built beside it; the integration's changes are listed apart
+below, and `tests/test_seams.mjs` drives the real writer and the real panel together. Line numbers are left
+out.
+
+**Reading a cold file** (the Reader's cold half).
+
+| What | Where |
+|---|---|
+| `COLD_CACHE` 12 records kept per copy; `COLD_READ_MS` 10 s for one read; `COLD_LOAD_RETRY_MS` 30 s before a failed read is tried again on its own; `COLD_DRAFT_MS` 60 s a typed answer whose item is not in the shown store is kept; `COLD_ARM_MS` 4 s for Use without its older items' second click | `mods/ledgr/reader.js` |
+| The cache, file name → `{sid, file, loading, record, error, at, used}`; `coldGen` bumped on every change to it (the panel's fallback clone follows it); `coldResetAsk` `{sid, at}` while Use without is armed | `reader.js` `coldCache`, `coldGen`, `coldResetAsk` (constructor) |
+| The store a copy may merge into: its demo store, else `store.json` as it read it (`live`); never a fallback writer's | `reader.js` `ownStore` |
+| A session as this copy shows it: null (not cold), else `{file, state, n, error?, held?}`, `state` "fault" when `s.cold.fault` is set (never merged here), "ok" when merged into the shown store, "error" when this copy could not read it (with `retryAt`), else "loading" (being read, or not asked for yet); `n` the stub's counts | `coldOf(sid, st)` |
+| Whether to read now (not merged, not faulted, and not read yet, read but not merged, or failed `COLD_LOAD_RETRY_MS` ago); whether any read is going | `coldDue`, `coldLoading` |
+| The read, from a timer or a handler, never from render: a record already read is merged at once; else `fs.readFile(coldPath(file), "utf8")` (no 1 MiB cap) bounded by `spool.js` `within(cx, COLD_READ_MS, …)` on the copy's own timer, then `listing.js` `parseCold`. Only a plain name matching `config.js` `COLD_NAME`, read in `ledgr-data/cold/`; anything else is an error and no read. The demo reads `fixtures.js` `FIXTURE_COLD[file]` at once. `force` reads again now (Try again); a failed read asks for a render after `COLD_LOAD_RETRY_MS`. Returns the state | `wantCold(sid, cx, {force})` |
+| A record arrived: `coldGen`, `mergeColdAll`, `overlayLocal`, `bump`, the copy's `onCold` hook, a render | `coldLoaded(cx)` |
+| Every cold session whose record was read, merged into a store this copy owns (`store.js` `mergeCold`: deep copies beside the stub, the store's own ids and turn records winning, `s.cold` unchanged, the session marked merged on that instance only); a faulted one never; `this.writer.live` refused | `mergeColdAll(st = this.ownStore())` |
+| A record no stub names any more (its session came back, was forgotten, or froze again under a new name) leaves the cache, a read still going excepted (not in the demo); the 12 most recently used are kept | `dropColdUnnamed(st)`, `trimColdCache` |
+| `reload()`: after `Store.fromText`, `mergeColdAll(st)` then `dropColdUnnamed(st)`, then `overlayLocal` (acts and drafts posted here applied on top of merged items) | `reload` |
+| A draft whose item is not in the store is kept while a cold read runs here, else until `COLD_DRAFT_MS` after its `at`, instead of being deleted (a dialog's closed record can name an item of a cold session this panel has not read) | `overlayLocal`; `at` set by `typeDraft` and the panel's `noteDetail` |
+| Try again: the cache entry dropped and the file read again now; when the writer cannot read it either (`s.cold.fault`), one `cold_retry` `{session_id, file}` too | `coldRetry(s, cx)` |
+| Use without its older items, a faulted session only: the first click arms it for `COLD_ARM_MS`, the second posts one `cold_reset` `{session_id, file}`, shown at once through `overlayLocal`'s `cold_reset` local act (`store.js` `on_cold_reset`: warm, empty, `coldLost` kept on the record); the demo saves nothing. The file stays in `cold/`: `coldLost.file` names it, so the writer's sweep never deletes it, and any other file of the session stays too (the sweep keeps an unnamed file it cannot prove redundant). Returns "armed", "posted" or null | `coldReset(s, cx)`; `overlayLocal` |
+| A faulted session's other files in `ledgr-data/cold/` (integration, the review's blocker): names of the session's own shape (`safeName(sid)` before the time) other than the one its stub names, newest first; null until listed. Listed from a timer (never from render), bounded by `COLD_READ_MS`, at most once a minute per session and file, never in the demo; the cache is `coldOtherCache` (`"<sid>\n<file>"` → `{names, at, loading}`). Read-only (rule 15 lists it) | `coldOthers(sid, file, cx)` |
+
+`listing.js` (pure): `parseCold(text, sid, file, named)` checks a cold file's text as the writer's thaw
+does, through `store.js` `coldRecordError` (the one check `thaw` and `mergeCold` make too), and answers
+`{record}` or `{error}` in words ("the file is empty", "the file is not JSON", the check's own words, "the
+session names another file now"). `touchedOf(store, s)` is the idle clock the menu and the loading line say:
+`store.js` `touchedAt` when the store has it, else the latest of the record's own times, never `seenAt`.
+
+**The panel.**
+
+| What | Where |
+|---|---|
+| The fallback writer's store as shown: the writer's own while no cold record read here names one of its sessions; else a clone made from `writer.storeText`, its `threshold`, `maxDepth` and `spacesOff` copied, the records merged (`dropColdUnnamed`, `mergeColdAll`) and the typed answers on top, kept in `coldClone` `{text, gen, st}` and rebuilt when that text or `coldGen` changes. Never a merge into `writer.live`: the writer saves that store, and a merged session would be saved mixed (the contract's risk 3) | `mods/ledgr/panel.js` `viewStore`, `fallbackView` |
+| A merge is not a motion (`prevCls`, `obsVer` reset); a kept handle command runs (integration, 1 below) | `onCold` |
+| The shown session is cold and not merged: `coldOf`'s record, else null | `coldShown` |
+| Shown: its file read from a timer when `coldDue`; nothing else posted but its `seen` | `render` |
+| `seen` is still posted for a surfaced cold session shown: the one act that does not thaw (`store.js` `coldOf(ev)` leaves out an act "seen"; it marks the stub's chip seen, and moves no idle clock: integration 3 below), so the host button quiets and showing stays read-only | `render` |
+| The session menu: cold sessions leave the agent groups and ENDED for a folded line at the bottom, OLDER SESSIONS (N) (`lg-older`), a cold branch session under its cold parent. The fold is as the person last clicked it (`olderOpen`), until then open while the shown session is cold. Each row: the pill, the name, the pane, "N open" and "◆ b" from `store.js` `countsOf` (the stub's `n` at the panel's threshold, so no file is read for the menu), a dim "idle 9 d" (`idleWords(now - touchedOf(st, s))`), and "can't read" in `blocked` for a faulted one. Every count in the menu is `countsOf`'s | `sessionMenu`, `olderShown` |
+| The header: a dim "older" pill (`lg-older-pill`) while the shown session is cold, merged or not, its tooltip naming the file | `header`; `words.js` `olderPillTip` |
+| The status line: the sessions the writer cannot read (`store.js` `coldFaults`), after an urgent writer-health line and before the writer's note | `render`; `words.js` `coldFaultsLine` |
+| A cold session not merged: its PINS lane (pins stay in the store), then, instead of its lanes, one of three views. Loading: one line, `cold-reading`, "Reading this session's items (idle 9 days; kept in ledgr-data/cold/)… 3 open, 1 blocking." Unreadable here: why and that nothing is lost (`cold-error`), and Try again (`cold-retry`). Faulted: the writer's words and the events it keeps (`cold-fault`, in `blocked`), with "Another file of this session is in ledgr-data/cold/ (<name>[ and N more]): it may hold what is missing; ./install.sh --check says what it holds, and Use without its older items leaves it there." when `coldOthers` lists one (`render` asks for the listing while the shown session is faulted), Try again, Use without its older items (`cold-reset`, two clicks; armed it reads "Go on without its 5 older items? Click again") and Forget (`cold-forget`, two clicks), in `cold-acts`. The buttons' line is the entry `cold:retry` (Enter is Try again). No footer while not merged | `body`, `coldLines` |
+| After a `cold_reset`: a dim line above its lanes saying what was lost and when the person chose to go on (`cold-lost`) | `body`; `words.js` `coldLostWords` |
+| The footer's OLDER THAN A DAY fold of a cold session opens on its own (its open items are all older than a day) unless the person shut it for that session (`olderShut`); `folds.older` stays the person's choice for every other session | `foldOpen`, `toggleFold`, `olderAuto` (integration, 2 below) |
+| Commands, bound to no key: `older-sessions` (the menu opened, its OLDER SESSIONS fold opened or closed, as its click), `cold-retry` (Try again), `cold-reset` (Use without its older items: twice, arm then post); on a warm session "The shown session is not an older one." | `command` |
+
+**The dialog.**
+
+| What | Where |
+|---|---|
+| The cold session an item target needs read: its session, when cold and not merged here (loading, error or fault); never for a pin or a branch, which stay in the store | `mods/ledgr/detail.js` `coldTarget` |
+| Read at the start (`start`; the demo in the constructor), and again from a timer in `render` when `coldDue` | `start`, constructor, `render` |
+| No record yet: "Reading this session's items (kept in ledgr-data/cold/)…" (`coldLoadingWords()`), never `DETAIL_GONE`, and the header says "ledgr", not "Gone"; unreadable here, `coldErrorWords`; faulted, `coldFaultWords` with `others` (the session's other files in `cold/`, `coldOthers`, listed from `render` while the target's session is faulted, as the panel does); in both, Try again (`dt-cold-retry`, Reader `coldRetry`) before Close | `goneWords`, `header`, `nothing(t, words, extra)` |
+| The record arrives with a render, and the late-record path prepares it (fields, the props' open state, the keyboard as on open) | `render` (`preparedFor`, `prepare`, `applyOpen`, `focusFirst`) |
+| `lookInArchive` skipped while the target's session is cold and not read: its item is in the file, not archived | `lookInArchive` |
+| ⌘↓ / ⌘↑ and "N of M" walk the merged items as any lane; no change | `laneSpot`, `step` |
+
+Props are unchanged: the dialog finds the file through the stub its own `store.json` read holds.
+
+**Settings.** One row, "Idle sessions move out of store.json", after "Closed items stay in the list" and
+before Branch depth: − and + (`st-cold-down`, `st-cold-value`, `st-cold-up`), the value in words
+(`coldDaysWords`: "never" or "7 days"). `SETTING_KEYS` gains `coldDays`, `SETTING_PATHS.coldDays` is
+`retention.coldDays`; `COLD_RANGE` 0 to 60; `clampColdDays` (0 or less is 0, "never"; any other value
+rounded, at least 1, at most 60); the value shown is `config.js` `coldDaysOf` (re-exported), the reading the
+writer uses, so a hand-written 100 shows as it is and steps back into the range. `editFor("coldDays", v)`
+writes `retention.coldDays` inside `retention`, `retention.turns` kept, through `Reader.saveConfig`; a word is
+refused. `savedLine` says "after 7 days" or "never (the writer brings every older session back)". No spool
+event: `settings.js` still posts none (rule 12). (`mods/ledgr/settings.js`.)
+
+**Words** (`mods/ledgr/words.js`). `idleWords(ms, long)` ("idle 9 d" in the menu, "idle 9 days" in the
+panel's line; minutes under an hour, hours under a day), `olderSessionsWords(n, open)` ("OLDER SESSIONS (3)
+›", open "▾"), `coldCountWords` ("3 open, 1 blocking", "nothing open"), `olderPillTip(file)`,
+`coldLoadingWords(idleMs, counts)` (both optional: the dialog passes neither), `coldErrorWords(why, file)`,
+`coldFaultWords({error, held, file, others})` (`others`: the integration's, the session's other files in
+`cold/`, the first named and "and N more"), `COLD_RETRY` ("Try again"), `coldRetryWords(file, fault)`,
+`COLD_RESET` ("Use without its older items"), `coldResetConfirm(n)`, `coldResetWords(name)`,
+`coldLostWords(lost)`, `coldFaultsLine(faults, nameOf)`, `coldDaysWords(n)`, `SETTING_WORDS.coldDays`; and
+the integration's `coldWaitWords(h)` ("Reading this session's older items for A1…") and
+`coldUnreadWords(h)`.
+
+**The demo** (`mods/ledgr/fixtures.js`). One more session, "nightly report backfill" (`DEMO_COLD_SESSION`),
+idle nine days and cold: `demoData` holds its stub (`cold: {file: DEMO_COLD_FILE, at, n}`, the counts
+`demoColdRecord(now).n`) and one pin, `pn_demo-pin-000f`; its items and turn records are
+`FIXTURE_COLD[DEMO_COLD_FILE]` (`demoColdRecord`: Ask 1 a blocking provide, Ask 2 a decide with options, Ask 3
+optional, Question 1 parked, Ask 4 closed by the agent; turns 4 to 6), which `wantCold` reads in the demo
+instead of a file. `DEMO_COLD_FILE` has `COLD_NAME`'s shape. So `ledgr.demo` ends its session menu with
+OLDER SESSIONS (1), and the session opens with its lanes.
+
+**Integration** (on top of the builder's work).
+
+1. `panel.js` `coldWait`, called first in `command`: a command naming an item by an `A<n>` or `Q<n>` handle
+   (`open:`, `cursor:`, `go:`, `whole:`, `menu:`, `ask-here:`, `act:`, `pick:`, `copy-answer:`) on a cold
+   session not merged here reads the file (`wantCold`, forced after an error) and keeps the command in
+   `coldThen` `{sid, c, h, at}`, saying `coldWaitWords(h)` meanwhile; `onCold` runs it once the items are
+   merged, when that session is still shown and the command is under a minute old, and clears the words.
+   When the writer cannot read the file, `coldUnreadWords(h)` and nothing kept. A pin's or a branch's handle
+   needs no file. Before, it said "No A1 in this session."
+2. `panel.js` `olderAuto`: the OLDER THAN A DAY fold stays open on its own for a cold session and for a day
+   after it came back (`s.thawedAt`), unless the person shut it for that session. The first act on a cold
+   session thaws it, and its rows would otherwise fold away under the person's hand (found by
+   `test_seams.mjs`).
+3. `seen` does not move the idle clock, warm or cold: `store.js` `touchedAt` no longer reads `seenAt`,
+   `apply()` leaves `touchedAt` alone for an act "seen", and `listing.js` `touchedOf` likewise. A session only
+   looked at is not in use; before, a cold session's menu row said "idle 1 min" after a look.
+4. `store.js` `commitFreeze` carries the idle clock onto the stub (`touchedAt`), since the items and turn
+   records it was read from leave; "idle N d" no longer counts from too early.
+5. Reader `coldOthers` and `coldFaultWords`' `others` (the outside review's blocker, `BUILD-NOTES-mod.md`
+   20.5): the writer's sweep now keeps for good any unnamed cold file it cannot prove redundant, so a faulted
+   session may have another file on disk that holds what its missing one held (a store gone back in time, an
+   earlier reset). The panel's fault view names it before the person chooses Use without its older items,
+   and says that the doctor tells what it holds and that the reset leaves it there; since the second review
+   round the dialog's fault words name it too (`detail.js` lists them from `render` and passes `others`).
+6. Tests: `test_detail.mjs` gained the handle-command cases (`open:`, `act:<h>:resolve`, the faulted case)
+   and the fault view's other file (named once listed, only the session's own other files, no sentence with
+   none); `test_list.mjs`'s `touchedOf` case no longer reads `seenAt`; `test_no_keystrokes.py` rule 15; the
+   new `tests/test_seams.mjs` (below).
+
+**Choices.**
+
+- Showing a cold session reads its file and does not bring it back (the contract's default): browsing does
+  not refill the store for another week, and no copy but the writer ever thaws. The first act other than
+  `seen` posts its event, and the writer thaws before it applies.
+- The menu and the loading line count from the stub (`countsOf` over `s.cold.n`, kept by level so any
+  threshold can be counted): the menu reads no file.
+- The cache is keyed by file name, which the writer never reuses: a session that froze again names a new
+  file, so an old record is never merged under it; `mergeColdAll` also checks the record's session, and
+  `store.js` `mergeCold` that the stub names the file.
+- A merge only into a store the copy owns; in fallback mode the panel shows a clone instead.
+- A faulted session is never merged, even when this copy can read the file: what shows is the writer's
+  trouble and what to do about it, since its kept events wait at the writer.
+
+**Tests.** `test_list.mjs` (506 checks, was 392): `parseCold`, `touchedOf`, and the Reader and panel contract
+as text (`wantCold` reads `cold/<file>` within `COLD_READ_MS` through `parseCold`, the demo's fixture).
+`test_detail.mjs` (1,345 at the integration's last run, was 1,003): the demo's cold session and its counts at three thresholds, merged or
+not; `parseCold`'s refusals; the words; `pinning.js` `pinsTarget` taking a stub; the Reader over real files in
+a scratch `ledgr-data/cold/` (read once when asked twice, merged with `s.cold` kept, deep copies, merged again
+from the cache after a reload, an act on a merged item shown and posted naming the cold session, the record
+dropped once no stub names it, nothing written but spool events); drafts kept while a read runs and for 60 s;
+missing and bad files, the 30 s retry, Try again with no event, the cache at 12, a path instead of a name
+refused with no read, a read that gets no answer bounded; faults (never merged, one `cold_retry`, Use without
+arming, lapsing, then one `cold_reset`, shown at once with `coldLost`); Phase 1's archive leaving out merged
+ids; the fallback clone (the writer's store untouched and refused by `mergeColdAll`, a new clone when the
+writer saves, a typed answer on the clone, the writer's own store once warm); the panel's menu, the cold
+session shown (Reading…, its pin, no footer, the pill, then its rows under an open OLDER THAN A DAY, no
+motion, nothing written), a draft handed back for an unread item, `seen` posted and needing no thaw, the
+error and fault views (the fault view naming the session's other file in `cold/`), the commands, the handle commands; the live-shape fixture across `store.js`'s freeze
+(OLDER SESSIONS (20)); the dialog (Reading…, never Gone, Try again, faulted). `test_settings.mjs` (864, was
+800): the row, `coldDaysOf`, `clampColdDays`, `editFor("coldDays", v)` beside `retention.turns`, its
+refusals and saved words, − and +. `test_no_keystrokes.py` rule 15: only `writer.js` and `spool.js` write,
+unlink, make or remove anything under `cold/`; the Reader's `coldOf`, `coldDue`, `coldLoading`, `wantCold`,
+`coldLoaded`, `mergeColdAll`, `dropColdUnnamed`, `trimColdCache` and `coldOthers` only read; `coldRetry` and `coldReset`
+post one event each; `mergeColdAll` guards the writer's store; `wantCold` reads only a name of the writer's
+shape; the Python readers open cold files to read only. Across the seam, `tests/test_seams.mjs` (run by
+`tests/test-seams.sh`, in `run-all.sh`) runs the real writer and the real panel on one scratch `ledgr-data`:
+on the writer's freeze of the live-shape fixture (`fixture_cold.mjs`) the panel lists OLDER SESSIONS (20),
+each row with the counts and the idle clock it had warm; shown, a session is read from exactly the file the
+writer wrote; the panel's Done on one of its items thaws it at the writer; and the panel then shows it warm
+with the same rows and handles. Its other parts (held events, Phase 1 and Phase 2 together, `coldDays` 0,
+Python and JavaScript agreeing) are the writer's side (`BUILD-NOTES-mod.md` 20).
+
+**Known limits.**
+
+- Showing a cold session never brings it back: it stays under OLDER SESSIONS with its "older" pill while it
+  is browsed, and only an act other than `seen` thaws it.
+- `pinUseWords` says "used in Q3" instead of "sent in Q3 at turn N" for a question in a cold session this
+  copy has not read (the pin is in the store; the question is in the file).
+- A draft for an item of a cold session not read here is kept 60 s, or while a read runs, then dropped if
+  its item is still not found.
+- In fallback mode, while a cold record is merged, every change of the writer's text costs one parse of it
+  for the clone.
+
+**Not tried live** (after the install; `Retention.md` 10.12 has the whole path):
+
+1. The session menu on the live store: OLDER SESSIONS (N) at the bottom, each row's count, ◆ and "idle N d".
+2. A cold session shown: "Reading this session's items…", then its lanes and the "older" pill; `store.json`
+   still names it cold (nothing brought back).
+3. Done on one of its items: it comes back (the pill goes, the menu lists it above OLDER SESSIONS again),
+   its rows stay open under OLDER THAN A DAY.
+4. The settings row: − and + write `retention.coldDays`.
+5. `herdr-app do ledgr.demo`: OLDER SESSIONS (1); open it, its lanes; Enter on Ask 1 opens the dialog.
+6. `herdr-app do ledgr.open:<handle>` on a cold session not read yet: "Reading this session's older items
+   for …", then the dialog on that item.
+7. The fault view, in a throwaway session (`Retention.md` 10.12 step 6): its words, the kept events, the three
+   buttons; with a copy of another file of that session in `cold/`, its name in the words.

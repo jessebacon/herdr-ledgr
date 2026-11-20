@@ -43,6 +43,12 @@
 // how it was closed, and read-only: no answer box, no Done, no Defer, no note; one action, Reopen, which posts
 // a `restore` event ({session_id, item, file, reopen: true}) through Reader post and says "reopening…" until
 // the id is back in store.json (then the live item shows as usual), or that the archive file could not be read.
+// Cold sessions (retention Phase 2, 2026-11-19): an item of a session whose items wait in ledgr-data/cold/ is
+// not in store.json; this copy reads that session's file itself (Reader wantCold) and merges it into its own
+// store, saying "Reading this session's items…" meanwhile, never Gone, then shows the item as usual (the late
+// record path), with its lane for ⌘↓ / ⌘↑ from the merged items. Reading never brings the session back; the
+// first act here posts its event and the writer does. A file this copy cannot read is said, with Try again; one
+// the writer cannot read, its words (the panel offers what to do).
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, TextareaState, ScrollHandle } from "gpui-base";
 import { theme, props, shared, setShared, closeOverlay, openOverlay, run, panes, readTextFile, home } from "herdr";
@@ -59,7 +65,7 @@ import { confluenceMessage, conclusionRequest, extractConclusion, leadIn, pinsMe
 import { itemWords as H, paneWords as P, trunkWords, originWords, branchWords, sessionWords, resolvedByWords, dismissedByWords, stageLabels,
   handleWords, pinsWords, pinSourceWords, pinAnchorWords, pinNameWords, pinLabel, pinUseLines, DETAIL_GONE, messageGone, PIN_MESSAGE_GONE,
   copiedWords, detailHints, pasteCutWords, BRANCH_NO_TURN, LINK_WORDS, ARCHIVE_READING, archivedWords, archiveFileWords, reopeningWords, reopenedWords,
-  restoreFailedWords, archiveGoneWords, ARCHIVED_READONLY, reopenSlowWords, archiveFailedWords } from "./words.js";
+  restoreFailedWords, archiveGoneWords, ARCHIVED_READONLY, reopenSlowWords, archiveFailedWords, coldLoadingWords, coldErrorWords, coldFaultWords, COLD_RETRY } from "./words.js";
 import { rowModel, stateOf, laneOf, neighbors, archivedCount } from "./listing.js";
 import { detailProps, kindOf, closesAfterStage, focusAfter, mergeClosed, keptConclude, keepConclude, KEEP_KEY, twoColumns, leftWidth,
   ACTION_STATES, strayBreak, RESTORE_WAIT_MS } from "./detailing.js";
@@ -131,8 +137,11 @@ export class Detail extends Reader {
     if (this.demo) this.buildDemo();
     if (!p.ok) return;
     if (this.demo) {
-      // The demo store and its archive are here at once (herdr-app check renders them).
+      // The demo store and its archive are here at once (herdr-app check renders them), and so is a cold
+      // session's file (fixtures.js FIXTURE_COLD).
       if (this.target.archived) this.arch = { sid: this.target.session, list: this.demoArchiveOf(this.target.session), count: 0, loading: false };
+      const cs = this.coldTarget();
+      if (cs) this.wantCold(cs, cx);
       this.prepare(cx);
     }
     cx.spawn(async (cx) => this.start(cx));
@@ -143,6 +152,9 @@ export class Detail extends Reader {
   async start(cx) {
     await this.startReading(cx);
     this.loaded = this.loaded || Boolean(this.inApp);
+    // An item of a cold session: its file read now (the record comes with a render: the late record path).
+    const cs = this.inApp && !this.demo ? this.coldTarget() : null;
+    if (cs) this.wantCold(cs, cx);
     if (this.inApp && !this.demo && this.target.archived) await this.readArchive(this.target.session, cx);
     if (this.inApp) this.writeOpen();
     if (!this.demo) this.prepare(cx);
@@ -182,6 +194,16 @@ export class Detail extends Reader {
     return ak ? { kind: ak, x: rec, archived: true } : null;
   }
 
+  // The cold session an item target needs read (retention Phase 2): its session, when that session is cold and
+  // its items are not in this copy's store yet (Reader coldOf: loading, error or fault); else null. A pin or a
+  // branch is in the store whatever its session is.
+  coldTarget() {
+    const tg = this.target;
+    if (!tg || !tg.session || tg.id.startsWith("pn_") || tg.id.startsWith("br_")) return null;
+    const c = this.coldOf(tg.session);
+    return c && c.state !== "ok" ? tg.session : null;
+  }
+
   // An archived record of the archive as read, by id (null: none read, or not in it).
   archRecord(id) { return (this.arch?.list ?? []).find((r) => r.id === id) ?? null; }
 
@@ -219,6 +241,8 @@ export class Detail extends Reader {
   lookInArchive(st, cx) {
     const tg = this.target;
     if (!tg || this.demo || !this.loaded || this.released || tg.archived || this.archLooked === tg.id) return;
+    // Its session went cold meanwhile (its file not read here yet): not archived, only elsewhere (render reads it).
+    if (this.coldTarget()) return;
     if (tg.id.startsWith("pn_") || tg.id.startsWith("br_") || st.item(tg.id) || this.preparedFor !== tg.id) return;
     this.archLooked = tg.id;
     const sid = tg.session;
@@ -1174,7 +1198,15 @@ export class Detail extends Reader {
     this.lookInArchive(st, cx);
     const r = this.resolve(st);
     this.archiveAgain(st, r, cx);
-    if (!r) return root.child(this.header(t, st, null)).child(this.nothing(t, this.goneWords()));
+    if (!r) {
+      // An item of a cold session not read here yet: read now (from a timer), "Reading…" meanwhile; unreadable
+      // (here, or by the writer), its words and Try again.
+      const cs = this.coldTarget(), c = cs ? this.coldOf(cs) : null;
+      if (cs && this.loaded && this.coldDue(cs)) cx.timer.after(0, (cx) => { if (!this.released) this.wantCold(cs, cx); });
+      if (c?.state === "fault" && !this.released) this.coldOthers(cs, c.file, cx);   // its other files, named in its words
+      const retry = c && c.state !== "loading" ? btn(t, "dt-cold-retry", COLD_RETRY, (_e, cx) => { const s = this.viewStore().d.sessions[cs]; if (s) this.coldRetry(s, cx); cx.notify(); }) : null;
+      return root.child(this.header(t, st, null)).child(this.nothing(t, this.goneWords(), retry));
+    }
     if (r.kind === "branch") this.pumpBranch(st, r.x, cx);
     // A record that reached the store after the start task (a reload): its fields, its message and the
     // props' open state, made in a timer (never in render); the keyboard as on open, the first time. An
@@ -1232,6 +1264,9 @@ export class Detail extends Reader {
   goneWords() {
     if (!this.loaded) return "Reading the ledger…";
     const tg = this.target;
+    // Its session's items wait in ledgr-data/cold/ (retention Phase 2): read here, or why they cannot be.
+    const cs = this.coldTarget(), c = cs ? this.coldOf(cs) : null;
+    if (c) return c.state === "fault" ? coldFaultWords({ error: c.error, held: c.held, file: c.file, others: this.coldOthers(cs, c.file, null) ?? [] }) : c.state === "error" ? coldErrorWords(c.error, c.file) : coldLoadingWords();
     if (tg?.archived || (tg && this.archLooked === tg.id)) {
       const a = this.arch;
       if (!a || a.loading || a.sid !== tg.session) return ARCHIVE_READING;
@@ -1241,12 +1276,14 @@ export class Detail extends Reader {
     return DETAIL_GONE;
   }
 
-  // A bad shape or a record that is gone: one line and Close.
-  nothing(t, words) {
+  // A bad shape or a record that is gone: one line and Close (and `extra`, a button before it: a cold
+  // session's Try again).
+  nothing(t, words, extra = null) {
     return v_flex().id("dt-nothing").flex_1().min_h(0).px(20).py(18).gap(12)
       .child(div().text_size(t.ts(12.5)).text_color(t.muted).child(words))
       .child(h_flex().gap(8).items_center()
-        .child(btn(t, "dt-x", "Close", (_e, cx) => { this.closedBy = "esc"; this.close(); cx.notify(); }, { primary: true }))
+        .when(Boolean(extra), (el) => el.child(extra))
+        .child(btn(t, "dt-x", "Close", (_e, cx) => { this.closedBy = "esc"; this.close(); cx.notify(); }, { primary: !extra }))
         .child(div().flex_1())
         .child(keyHints(t, [["Esc", "close"]])));
   }
@@ -1282,7 +1319,7 @@ export class Detail extends Reader {
     const esc = div().id("dt-esc").flex_none().px(5).rounded(4).text_size(t.ts(11)).text_color(t.dim).cursor_pointer().hover((x) => x.bg(t.hover).text_color(t.foreground))
       .tooltip("Close (Esc)").on_click((_e, cx) => { cx.stop_propagation(); this.closedBy = "esc"; this.close(); }).child("Esc");
     const demo = this.demo ? pill(t, "demo", t.accent) : null;
-    if (!r) return el.child(div().flex_1().min_w(0).font_semibold().text_size(t.ts(13)).text_color(t.muted).child(this.loaded ? "Gone" : "ledgr")).when(Boolean(demo), (x) => x.child(demo)).child(esc);
+    if (!r) return el.child(div().flex_1().min_w(0).font_semibold().text_size(t.ts(13)).text_color(t.muted).child(this.loaded && !this.coldTarget() ? "Gone" : "ledgr")).when(Boolean(demo), (x) => x.child(demo)).child(esc);
     const x = r.x, here = this.target.session, ctx = rowCtx(this, st, here);
     const state = stateOf(r.kind, x, ctx), model = rowModel(r.kind, x, ctx);
     let mark, name, facts, sess;

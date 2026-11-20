@@ -6,7 +6,9 @@
 // the closing list (asks.handoff, with instruct_block as the installer writes it), Paste into the prompt,
 // Animations, Fold asks while the agent works (ui.*), Open the panel on new asks (surface.openPanelOnAsks),
 // Closed items stay in the list (retention_days, 1 to 30 days, retention 2026-11-19: after that the writer
-// moves them under Closed, archived, where they can still be read and reopened),
+// moves them under Closed, archived, where they can still be read and reopened), Idle sessions move out of
+// store.json (retention.coldDays, retention Phase 2: 0 "never" to 60 days; a session nobody touched that long
+// keeps only its record in store.json, its items in ledgr-data/cold/; set to never, every one comes back),
 // Branch depth (branch.maxDepth, 0 to 4), Open files with (links.editor, 2026-11-10: open, zed, code, or a
 // command of your own typed in its field with shell-style quoting, no shell (links.js splitCommand; an argv
 // array is shown quoted, joinCommand), Enter saves; links.js editorValue refuses a shell, an interpreter, a
@@ -30,23 +32,23 @@ import { v_flex, h_flex, ScrollHandle, Input, InputState } from "gpui-base";
 import { theme, props, shared, setShared, closeOverlay, spaces, focused, home } from "herdr";
 import { Reader } from "./reader.js";
 import { FORCE_DEMO, DEFAULTS, TEXT_SCALE, textScaleOf, stepScale, withScale, handoffOf, HANDOFF_MODES, disabledSpaces, withSpaceOff, configPath, liveHome,
-  RETENTION_DAYS, retentionDays, retentionDaysOf } from "./config.js";
+  RETENTION_DAYS, retentionDays, retentionDaysOf, coldDaysOf } from "./config.js";
 import { LEVELS, thresholdOf } from "./store.js";
 import { maxDepthOf } from "./branch.js";
 import { EDITOR_PRESETS, editorOf, editorValue, editorRefusal, editorWords, isPreset } from "./links.js";
 import { settingsProps, mergeClosed, focusAfter } from "./detailing.js";
 import { DEMO_SPACES, DEMO_OFF } from "./fixtures.js";
 import { THRESHOLD_WORDS, SETTING_WORDS, scaleWords, savedWords, handoffSavedWords, staleSpaceWords, droppedSpaceWords, NO_SPACES,
-  settingsFootWords, SETTINGS_DEMO, EDITOR_PLACEHOLDER, EDITOR_CUSTOM_HINT, editorRefusedWords, daysWords } from "./words.js";
+  settingsFootWords, SETTINGS_DEMO, EDITOR_PLACEHOLDER, EDITOR_CUSTOM_HINT, editorRefusedWords, daysWords, coldDaysWords } from "./words.js";
 import { ICON, btn, pill, segment, keyHints } from "./views.js";
 
 // The rows, in the dialog's order (words.js SETTING_WORDS has a label and a line for each). Closed items
 // stay in the list (retentionDays) sits with the rows about what the list shows.
-export const SETTING_KEYS = ["textScale", "threshold", "handoff", "pasteIntoPrompt", "animations", "foldAsksWhileWorking", "openPanelOnAsks", "retentionDays", "maxDepth", "editor", "spaces"];
+export const SETTING_KEYS = ["textScale", "threshold", "handoff", "pasteIntoPrompt", "animations", "foldAsksWhileWorking", "openPanelOnAsks", "retentionDays", "coldDays", "maxDepth", "editor", "spaces"];
 // Where each lives in config.json.
 export const SETTING_PATHS = { textScale: "ui.textScale", threshold: "extract.threshold", handoff: "asks.handoff", pasteIntoPrompt: "ui.pasteIntoPrompt",
   animations: "ui.animations", foldAsksWhileWorking: "ui.foldAsksWhileWorking", openPanelOnAsks: "surface.openPanelOnAsks", retentionDays: "retention_days",
-  maxDepth: "branch.maxDepth", editor: "links.editor", spaces: "spaces.disabled" };
+  coldDays: "retention.coldDays", maxDepth: "branch.maxDepth", editor: "links.editor", spaces: "spaces.disabled" };
 // Branch depth offered here (config.json may hold more by hand; it is shown as it is and stepped back in).
 export const DEPTH = { min: 0, max: 4 };
 // Days a closed item stays in the list before the writer archives it (retention_days), 1 to 30: the row
@@ -55,6 +57,13 @@ export const DEPTH = { min: 0, max: 4 };
 export const RETENTION = RETENTION_DAYS;
 export const clampDays = (n) => retentionDays(Number.isFinite(Number(n)) ? Number(n) : RETENTION.min);
 export { retentionDaysOf };
+// Days a session nobody touched stays in store.json before the writer moves its items to ledgr-data/cold/
+// (retention.coldDays, retention Phase 2): 0 ("never": the writer brings every cold session back) to 60 here.
+// The row shows config.js coldDaysOf, the reading the writer uses (a hand-written 100 shows as it is, as Branch
+// depth does, and steps back into the range; a word, a negative or past 365 reads as the default, 7).
+export const COLD_RANGE = { min: 0, max: 60 };
+export const clampColdDays = (n) => { const v = Number(n); return !Number.isFinite(v) || v <= 0 ? 0 : Math.min(COLD_RANGE.max, Math.max(1, Math.round(v))); };
+export { coldDaysOf };
 // The three thresholds, strictest first, as the lane head's menu lists them.
 const TH_ORDER = ["blocking", "needed", "optional"];
 const BOOLS = new Set(["pasteIntoPrompt", "animations", "foldAsksWhileWorking", "openPanelOnAsks"]);
@@ -85,6 +94,7 @@ export function settingRows(cfg, live) {
     foldAsksWhileWorking: cfg?.ui?.foldAsksWhileWorking === true,
     openPanelOnAsks: cfg?.surface?.openPanelOnAsks === true,
     retentionDays: retentionDaysOf(cfg),
+    coldDays: coldDaysOf(cfg),
     maxDepth: maxDepthOf(cfg),
     editor: editorOf(cfg),
     spaces: spaceRows(cfg, live),
@@ -110,6 +120,11 @@ export function editFor(key, value) {
   if (key === "retentionDays") {
     const v = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
     return Number.isFinite(v) ? (d) => { d.retention_days = clampDays(v); } : null;
+  }
+  // retention.coldDays: a number (or a numeric string), clamped to 0..60; retention.turns and the rest kept.
+  if (key === "coldDays") {
+    const v = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
+    return Number.isFinite(v) ? (d) => { objIn(d, "retention").coldDays = clampColdDays(v); } : null;
   }
   if (key === "editor") { const v = editorValue(value); return v === null ? null : (d) => { objIn(d, "links").editor = v; }; }
   if (key === "spaces") {
@@ -137,6 +152,7 @@ export function savedLine(key, value, name = null) {
   if (BOOLS.has(key)) return savedWords(label, value ? "on" : "off", path);
   if (key === "maxDepth") { const n = clampDepth(value); return savedWords(label, n === 0 ? "0 (Branch is off)" : String(n), path); }
   if (key === "retentionDays") return savedWords(label, daysWords(clampDays(value)), path);
+  if (key === "coldDays") { const n = clampColdDays(value); return savedWords(label, n === 0 ? "never (the writer brings every older session back)" : `after ${daysWords(n)}`, path); }
   if (key === "editor") return savedWords(label, editorWords(editorValue(value) ?? value), path);
   if (key === "spaces") {
     if (value?.drop) return droppedSpaceWords(value.id);
@@ -343,6 +359,14 @@ export class Settings extends Reader {
         btn(t, "st-days-down", "−", (_e, cx) => this.set("retentionDays", Math.min(RETENTION.max, n) - 1, cx), { disabled: n <= RETENTION.min, tip: `Fewer days (down to ${RETENTION.min})` }),
         div().id("st-days-value").flex_none().min_w(t.ts(56)).flex().justify_center().text_size(t.ts(12)).font_semibold().text_color(t.accent).child(daysWords(n)),
         btn(t, "st-days-up", "+", (_e, cx) => this.set("retentionDays", n + 1, cx), { disabled: n >= RETENTION.max, tip: `More days (up to ${RETENTION.max} here)` }),
+      ]);
+    }
+    if (r.key === "coldDays") {
+      const n = r.value;
+      return group([
+        btn(t, "st-cold-down", "−", (_e, cx) => this.set("coldDays", Math.min(COLD_RANGE.max, n) - 1, cx), { disabled: n <= COLD_RANGE.min, tip: "Fewer days (0: never, and every older session comes back)" }),
+        div().id("st-cold-value").flex_none().min_w(t.ts(56)).flex().justify_center().text_size(t.ts(12)).font_semibold().text_color(n ? t.accent : t.dim).child(coldDaysWords(n)),
+        btn(t, "st-cold-up", "+", (_e, cx) => this.set("coldDays", n + 1, cx), { disabled: n >= COLD_RANGE.max, tip: `More days (up to ${COLD_RANGE.max} here)` }),
       ]);
     }
     if (r.key === "editor") {

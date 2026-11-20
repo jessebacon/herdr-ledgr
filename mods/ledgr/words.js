@@ -279,6 +279,70 @@ export const archiveGoneWords = (file) => `This archived item could not be read 
 // A command that would change an archived record (Done, an answer): it is read-only.
 export const ARCHIVED_READONLY = "Archived: read-only here; Reopen brings it back to the list.";
 
+// ── cold sessions (retention Phase 2, 2026-11-19) ──────────────────────
+// A session nobody touched for retention.coldDays keeps only its record in store.json (a stub with its counts);
+// its items and turn records live in ledgr-data/cold/<file> and come back into the store the moment anything
+// happens to it. The reading copies read that file when the session is shown (reader.js wantCold), never
+// bringing it back themselves; the session menu lists such sessions under OLDER SESSIONS.
+// How long a session has been idle: "idle 9 d" (the session menu), "idle 9 days" (long: the panel's line).
+export function idleWords(ms, long = false) {
+  const m = Math.max(0, Number(ms) || 0) / 60000;
+  if (m < 60) return `idle ${Math.max(1, Math.round(m))} min`;
+  const h = m / 60;
+  if (h < 24) { const v = Math.round(h); return long ? `idle ${plural(v, "hour")}` : `idle ${v} h`; }
+  const d = Math.floor(h / 24);
+  return long ? `idle ${plural(d, "day")}` : `idle ${d} d`;
+}
+// The session menu's folded line at its bottom: "OLDER SESSIONS (3) ›", open "OLDER SESSIONS (3) ▾".
+export const olderSessionsWords = (n, open = false) => `OLDER SESSIONS (${n}) ${open ? "▾" : "›"}`;
+// A session's counts (store.js countsOf) in short: "3 open, 1 blocking", "nothing open".
+export const coldCountWords = (c) => (c && Number(c.open) > 0 ? `${c.open} open${Number(c.b) > 0 ? `, ${c.b} blocking` : ""}` : "nothing open");
+// The header's dim "older" pill: its tooltip names the file.
+export const olderPillTip = (file) => `An older session: nobody touched it for a while, so its items are kept in ledgr-data/cold/${file ?? "?"} and read from there while it is shown. Anything you do here brings it back into store.json.`;
+// While its file is read (the panel's line, the dialog): idleMs and counts optional.
+export const coldLoadingWords = (idleMs = null, counts = null) =>
+  `Reading this session's items (${idleMs === null || idleMs === undefined ? "" : `${idleWords(idleMs, true)}; `}kept in ledgr-data/cold/)…${counts ? ` ${coldCountWords(counts)}.` : ""}`;
+// This copy could not read the file (it is read again in 30 s, or now with Try again): nothing is lost.
+export const coldErrorWords = (why, file = null) =>
+  `This session's items could not be read here (ledgr-data/cold/${file ?? "…"}: ${String(why ?? "unknown error").slice(0, 160)}). Nothing is lost: the file stays, and the ledgr writer reads it again when anything happens to this session. Try again reads it now.`;
+// The writer could not read it (store.js s.cold.fault): its events are kept aside (cold/held/) until it can.
+// others (integration, 2026-11-19): other files of this session in ledgr-data/cold/ (Reader coldOthers), one of
+// which may hold what the missing one held; said before the person chooses Use without its older items.
+export const coldFaultWords = ({ error = null, held = 0, file = null, others = [] } = {}) => {
+  const n = Math.max(0, Math.floor(Number(held) || 0)), o = Array.isArray(others) ? others : [];
+  const also = o.length ? ` Another file of this session is in ledgr-data/cold/ (${o[0]}${o.length > 1 ? ` and ${o.length - 1} more` : ""}): it may hold what is missing; ./install.sh --check says what it holds, and Use without its older items leaves it there.` : "";
+  return `The ledgr writer cannot read this session's older items (ledgr-data/cold/${file ?? "…"}: ${String(error ?? "unknown error").slice(0, 160)}). ${plural(n, "new event")} kept: ${n === 1 ? "it applies" : "they apply"} once the file can be read, or once you go on without its older items or forget the session.${also}`;
+};
+export const COLD_RETRY = "Try again";
+// A command naming an item of a cold session this copy has not read yet (ledgr.open:A3 and the like): it runs
+// once the file is read (panel.js coldWait); the writer cannot read the file: what to do instead.
+export const coldWaitWords = (h) => `Reading this session's older items for ${h}…`;
+export const coldUnreadWords = (h) => `${h} is among this session's older items, which the ledgr writer cannot read: Try again, Use without its older items, or Forget (below).`;
+// Try again, clicked: read here again, and (fault) the writer asked to try at once (a cold_retry event).
+export const coldRetryWords = (file, fault = false) => (fault
+  ? `Trying again: the ledgr writer reads ledgr-data/cold/${file ?? "…"} now; the kept events apply once it can.`
+  : `Reading ledgr-data/cold/${file ?? "…"} again…`);
+export const COLD_RESET = "Use without its older items";
+// Use without its older items, armed (its second click posts cold_reset): n, the items the file holds.
+export const coldResetConfirm = (n) => `Go on without ${Number(n) > 0 ? `its ${plural(Number(n), "older item")}` : "its older items"}? Click again`;
+// Posted: what the person chose.
+export const coldResetWords = (name) => `${name}: going on without its older items. The file stays in ledgr-data/cold/; the kept events apply to the session as it is now.`;
+// After a cold_reset (store.js s.coldLost {file, at, n, error}): a dim line in that session's list.
+export function coldLostWords(lost, now = Date.now()) {
+  const n = Math.max(0, Math.floor(Number(lost?.n?.items) || 0));
+  return `${n ? plural(n, "older item") : "Its older items"} could not be read (ledgr-data/cold/${lost?.file ?? "?"}: ${String(lost?.error ?? "unknown error").slice(0, 120)}); you chose to go on without them ${agoWords(lost?.at, now)}.`;
+}
+// The status line when the writer cannot read one or more sessions' files (store.js coldFaults): names them.
+export function coldFaultsLine(faults, nameOf = (sid) => `session ${String(sid).slice(0, 8)}`) {
+  const list = Array.isArray(faults) ? faults : [];
+  if (!list.length) return null;
+  const held = list.reduce((k, f) => k + (Math.max(0, Math.floor(Number(f?.held) || 0))), 0);
+  const names = list.slice(0, 2).map((f) => nameOf(f.sid)).join(", ") + (list.length > 2 ? ` +${list.length - 2} more` : "");
+  return `ledgr cannot read the older items of ${names}${held ? ` (${plural(held, "new event")} kept)` : ""}: show ${list.length === 1 ? "it" : "them"} from OLDER SESSIONS for Try again`;
+}
+// The settings row's value: "never" or "7 days".
+export const coldDaysWords = (n) => (Number(n) === 0 ? "never" : daysWords(Number(n)));
+
 // A branch whose session has not finished a turn yet (its first one is running): the dialog's message column.
 export const BRANCH_NO_TURN = "The branch has not finished a turn yet: its last message shows here once a turn ends.";
 
@@ -337,6 +401,7 @@ export const SETTING_WORDS = {
   foldAsksWhileWorking: ["Fold asks while the agent works", "The ASKED OF YOU lane folds while the agent works and opens when its turn ends; off, only your clicks fold it."],
   openPanelOnAsks: ["Open the panel on new asks", "When a turn ends with new asks and the panel is hidden, show it."],
   retentionDays: ["Closed items stay in the list", "After that they move under Closed, archived, where they can still be read and reopened; one closed as not needed stays at least 7 days."],
+  coldDays: ["Idle sessions move out of store.json", "After this many days nobody touched a session, its items and turn records move to a file of their own (ledgr-data/cold/) and come back the moment anything happens to it; it is listed under Older sessions. Set to never, every one comes back."],
   maxDepth: ["Branch depth", "How deep branches of branches may go; 0 turns Branch off."],
   editor: ["Open files with", "A file path you click in the detail dialog's message opens here: open (the system's default app; a script opens as text, never run), zed or code at its line, or your own command with {path}, {line} and {col}. Web links open in the browser."],
   spaces: ["Off spaces", "Where ledgr does nothing: no chip, no ⌘J, no instruction or extraction for its agents. Their items are kept."],

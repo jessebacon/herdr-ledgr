@@ -117,15 +117,23 @@ assert K.DEFAULT_CONFIG["ui"]["pasteIntoPrompt"] is True, K.DEFAULT_CONFIG["ui"]
 assert K.DEFAULT_CONFIG["spaces"] == {"disabled": []}, K.DEFAULT_CONFIG.get("spaces")
 merged = K.deep_merge(K.defaults(), {"spaces": {"disabled": ["spA"]}})
 assert merged["spaces"]["disabled"] == ["spA"], merged["spaces"]
-# Retention (2026-11-19): the hooks' defaults hold retention_days 3 and retention.turns 12, and their merge
-# fills retention.turns into a config.json written before it existed (an older install's, holding 14).
-assert K.DEFAULT_CONFIG["retention_days"] == 3 and K.DEFAULT_CONFIG["retention"] == {"turns": 12}, K.DEFAULT_CONFIG
+# Retention (2026-11-19): the hooks' defaults hold retention_days 3, retention.turns 12 and (Phase 2)
+# retention.coldDays 7, and their merge fills both into a config.json written before they existed (an older
+# install's, holding 14), and keeps a 0 the settings dialog or install.sh --thaw-all wrote.
+assert K.DEFAULT_CONFIG["retention_days"] == 3 and K.DEFAULT_CONFIG["retention"] == {"turns": 12, "coldDays": 7}, K.DEFAULT_CONFIG
+assert K.DEFAULT_CONFIG["retention"]["coldDays"] == 7, K.DEFAULT_CONFIG["retention"]
 old = K.deep_merge(K.defaults(), {"v": 1, "retention_days": 14})
-assert old["retention_days"] == 14 and old["retention"] == {"turns": 12}, old
-assert K.deep_merge(K.defaults(), {"retention": {"coldDays": 7}})["retention"] == {"turns": 12, "coldDays": 7}
+assert old["retention_days"] == 14 and old["retention"] == {"turns": 12, "coldDays": 7}, old
+assert K.deep_merge(K.defaults(), {"retention": {"turns": 20}})["retention"] == {"turns": 20, "coldDays": 7}
+assert K.deep_merge(K.defaults(), {"retention": {"coldDays": 0}})["retention"] == {"turns": 12, "coldDays": 0}
 # The extractor's dismissed list looks back as far as archivable's floor for a dismissed item (store.js, 7 days).
 import ledgr_extract as E
 assert E.DISMISSED_DAYS == 7, E.DISMISSED_DAYS
+# A cold file name beginning with "." is read only as its own session's (writer.js readCold, integration 2026-11-19).
+import tempfile as _tf
+_d = _tf.mkdtemp()
+assert E.cold_record(".hidden", ".hidden.1794000000000-abc123.json", _d)[1] == "cold/.hidden.1794000000000-abc123.json is missing"
+assert E.cold_record("other", ".hidden.1794000000000-abc123.json", _d)[1].startswith("not a cold file name")
 # One safe name for a session's folder: config.js safeName (archive/<sid>/), bin/lib safe_name and the MCP
 # server's (mcp/<sid>/) on the names test_store.mjs wrote with what safeName made of them.
 import json, os as _os
@@ -146,6 +154,6 @@ if [ "$rc" = 0 ]; then
   rm -rf "$WTMP"
 fi
 # The store's summary line last (run-all.sh shows the last line), with the parser check on it.
-if [ "$rc" = 0 ]; then echo "${OUT%, 0 failure(s)}; landing parser reads the confluence, the answer sheets (a multi-line answer too) and the pins message (and with their blank line; a sheet after a 45,000-character pins message, a 24,000-character one whole), the ref scan skipping a sheet's lines; the hooks' retention defaults and merge, one safe name for a session's folder (config.js, bin/lib, the MCP server); ${WOUT#OK: }"; else echo "$OUT"; echo "FAIL: store, landing parser or writer"; fi
+if [ "$rc" = 0 ]; then echo "${OUT%, 0 failure(s)}; landing parser reads the confluence, the answer sheets (a multi-line answer too) and the pins message (and with their blank line; a sheet after a 45,000-character pins message, a 24,000-character one whole), the ref scan skipping a sheet's lines; the hooks' retention defaults and merge (coldDays 7), one safe name for a session's folder (config.js, bin/lib, the MCP server); ${WOUT#OK: }"; else echo "$OUT"; echo "FAIL: store, landing parser or writer"; fi
 rm -rf "$TMP"
 exit $rc

@@ -5,6 +5,7 @@ written. Run from the repo: python3 -I -B setup/tests/test_ledgr_setup.py"""
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -609,12 +610,13 @@ def test_retention_migration():
         sys.path.insert(0, lib)
         import ledgr_config as K  # noqa: E402  (the hooks' defaults, from the repo)
         ok(K.DEFAULT_CONFIG["retention_days"] == L.RETENTION_DEFAULTS["retention_days"] == 3
-           and K.DEFAULT_CONFIG["retention"] == {"turns": L.RETENTION_DEFAULTS["turns"]} == {"turns": 12},
-           "retention: the installer's defaults are ledgr_config.py's (3 days, 12 turn records)")
+           and K.DEFAULT_CONFIG["retention"] == {"turns": L.RETENTION_DEFAULTS["turns"], "coldDays": L.RETENTION_DEFAULTS["coldDays"]}
+           == {"turns": 12, "coldDays": 7},
+           f"retention: the installer's defaults are ledgr_config.py's (3 days, 12 turn records, cold after 7 days): {K.DEFAULT_CONFIG['retention']}")
         old = dict(K.defaults(), retention_days=14)
         old.pop("retention")
-        ok(K.deep_merge(K.defaults(), old)["retention"] == {"turns": 12}, "retention: the hooks' merge fills retention.turns into an older file")
-        ok(K.deep_merge(K.defaults(), {"retention": {"coldDays": 7}})["retention"] == {"turns": 12, "coldDays": 7}, "retention: a partial retention keeps turns")
+        ok(K.deep_merge(K.defaults(), old)["retention"] == {"turns": 12, "coldDays": 7}, "retention: the hooks' merge fills retention (turns, coldDays) into an older file")
+        ok(K.deep_merge(K.defaults(), {"retention": {"coldDays": 0}})["retention"] == {"turns": 12, "coldDays": 0}, "retention: a partial retention keeps turns")
         write(os.path.join(ctx.home, "AGENTS.md"), "x\n")
         write(os.path.join(ctx.home, "keys.json"), '{"global": {}}\n')
         f = {"hard": [], "warn": [], "claude": None, "security": None, "layouts": [], "active": None, "claude_configs": [],
@@ -739,9 +741,330 @@ def test_retention_report():
         shutil.rmtree(root)
 
 
+COLD_SID = ["c01d0001-0000-4000-8000-000000000001", "c01d0002-0000-4000-8000-000000000002",
+            "c01d0003-0000-4000-8000-000000000003", "c01d0004-0000-4000-8000-000000000004"]
+
+
+def cold_home(ctx, now, sessions, files=(), held=(), items=None, forgotten=None):
+    """A scratch ledgr-data with store.json (`sessions`, `items`, `forgotten`), cold files and held events."""
+    d = {"v": 1, "items": items or {}, "sessions": sessions, "turns": {}, "forgotten": forgotten or {}}
+    write(os.path.join(ctx.data, "store.json"), json.dumps(d))
+    for name, size in files:
+        write(os.path.join(ctx.data, "cold", name), "x" * size)
+    for sid, name, age in held:
+        p = os.path.join(ctx.data, "cold", "held", L.safe_name(sid), name)
+        write(p, "{}")
+        os.utime(p, (now - age, now - age))
+    return d
+
+
+def test_cold_report():
+    """--check's cold sessions (retention Phase 2): the line (sessions, files, bytes, the loose ones, the days as the
+    mod reads them), held events, mixed sessions; the problems: a faulted session with its held events and what to do,
+    a stub naming a missing file, files of sessions store.json does not know, held events nobody replays. Read-only."""
+    root, ctx, _ = scratch()
+    try:
+        for v, want in ((None, 7), (0, 0), ("0", 0), (0.3, 1), (2.5, 3), ("14", 14), (365, 365), (366, 7), (-1, 7), (True, 7),
+                        ("x", 7), ("", 7), ([], 7)):
+            got = L.cold_days_of({"retention": {"coldDays": v}} if v is not None else {})
+            ok(got == want, f"cold_days_of({v!r}) == {want} ({got})")
+        ok(L.cold_days_of({"retention": None}) == 7 and L.cold_days_of(None) == 7, "cold_days_of: no retention object, the default")
+        ok(L.safe_name("herdr:t4/x") == "herdr_t4_x", "safe_name: config.js safeName")
+        lines, probs = L.cold_report(ctx, {})
+        ok(probs == [] and lines == ["  cold            none; retention.coldDays 7 (the default) (a session nobody touches for 7 days moves to ledgr-data/cold/)"],
+           f"no store, no cold files: none, the default days: {lines} {probs}")
+        lines, _ = L.cold_report(ctx, {"retention": {"coldDays": 0}})
+        ok(any("retention.coldDays 0 (never: the writer brings every cold session back)" in x for x in lines), f"days 0: {lines}")
+        lines, _ = L.cold_report(ctx, {"retention": {"coldDays": "400"}})
+        ok(any('retention.coldDays "400" (read as 7)' in x for x in lines), f"a value the mod reads otherwise: {lines}")
+        now = time.time()
+        s1, s2, s3, s4 = COLD_SID
+        f1 = f"{s1}.1794000000000-aaaaaa.json"
+        f1old = f"{s1}.1793000000000-bbbbbb.json"
+        f2 = f"{s2}.1794000000000-cccccc.json"
+        f3 = f"{s3}.1794000000000-dddddd.json"
+        gone = "c01d00ff-0000-4000-8000-0000000000ff"
+        forgot = "c01d00fe-0000-4000-8000-0000000000fe"
+        fault = {"at": (now - 1200) * 1000, "error": f"cold/{f2} is missing", "tries": 3, "held": 2}   # the writer's words
+        s5 = "c01d0005-0000-4000-8000-000000000005"
+        f5 = f"{s5}.1794000000000-gggggg.json"
+        n1 = {"q": 1, "qNew": 0, "blocking": 2, "needed": 3, "optional": 4, "promoted": 0, "answered": 1, "closed": 5, "items": 16, "turns": 12}
+        sessions = {s1: {"sessionId": s1, "sessionName": "old work", "cold": {"file": f1, "at": 1794000000000, "n": n1}},
+                    s2: {"sessionId": s2, "repo": "ledgr", "cold": {"file": f2, "at": 1794000000000, "n": dict(n1, items=4, blocking=1, q=0), "fault": fault}},
+                    s3: {"sessionId": s3, "cold": {"file": f3, "at": 1794000000000, "n": {}}},
+                    s4: {"sessionId": s4, "sessionName": "warm one", "touchedAt": now * 1000},
+                    s5: {"sessionId": s5, "sessionName": "reset one", "touchedAt": (now - 3 * 3600) * 1000,
+                         "coldLost": {"file": f5, "at": (now - 3 * 3600) * 1000, "frozenAt": 1794000000000, "n": {}, "error": f"cold/{f5} does not parse"}}}
+        items = {"rq_m1": {"id": "rq_m1", "anchor": {"sessionId": s1}}, "rq_w1": {"id": "rq_w1", "anchor": {"sessionId": s4}}}
+        cold_home(ctx, now, sessions, files=[(f1, 1000), (f1old, 500), (f"{gone}.1794000000000-eeeeee.json", 300),
+                                            (f"{forgot}.1794000000000-ffffff.json", 200), (f5, 100), ("notes.txt", 50)],
+                  held=[(s2, "1794100000000-asks-1-aaaaaa.json", 60), (s2, "1794100000001-act-1-bbbbbb.json", 30),
+                        (s4, "1794100000002-prompt-1-cccccc.json", 2 * 3600)],
+                  items=items, forgotten={forgot: (now - 100) * 1000})
+        # Integration (2026-11-19): an unnamed file goes only when it is provably redundant. f1old: an older copy of
+        # s1 whose one item store.json holds (redundant); f4: a file of the warm s4 holding two items store.json lacks
+        # (recoverable, a problem); f4bad: one that cannot be read (kept, a problem); f2new: another file of the
+        # faulted s2 (said with its problem); a forgotten session's (the writer deletes it a day after the Forget).
+        rec = lambda sid, ids, turns=None: json.dumps({"ledgr": "ledgr-cold", "v": 1, "sessionId": sid, "at": 1793000000000, "session": {},
+                                                       "items": [{"id": i, "anchor": {"sessionId": sid}} for i in ids], "turns": turns or {}, "n": {}})
+        write(os.path.join(ctx.data, "cold", f1old), rec(s1, ["rq_m1"]))
+        f4 = f"{s4}.1793000000000-hhhhhh.json"
+        f4bad = f"{s4}.1793500000000-iiiiii.json"
+        f2new = f"{s2}.1794500000000-jjjjjj.json"
+        write(os.path.join(ctx.data, "cold", f4), rec(s4, ["rq_w1", "rq_lost1", "rq_lost2"], {"1": {}}))
+        write(os.path.join(ctx.data, "cold", f4bad), "{not json")
+        write(os.path.join(ctx.data, "cold", f2new), rec(s2, ["rq_x"]))
+        lines, probs = L.cold_report(ctx, {"retention": {"coldDays": 7}})
+        txt = "\n".join(lines)
+        ok("  cold            3 sessions cold in ledgr-data/cold/ (8 files, 2 KB; 2 thawed, forgotten or redundant copies the writer deletes in time); "
+           "retention.coldDays 7" in txt, f"the cold line (a reset session's file is named; an unknown session's is a problem): {lines}")
+        prc = next((p for p in probs if f4 in p), "")
+        ok(f"cold/{f4} (session {s4[:8]} (warm one)) holds 2 items and 1 turn record store.json lacks" in prc and "keeps it for good" in prc
+           and "Retention.md 10.8" in prc, f"a recoverable file: the session, the file, what store.json lacks: {prc}")
+        pbad = next((p for p in probs if f4bad in p), "")
+        ok("cannot be read" in pbad and "keeps it for good" in pbad, f"an unnamed file that cannot be read: kept, said: {pbad}")
+        probs = [p for p in probs if p not in (prc, pbad)]
+        ok("                  they hold 20 items: 3 open blocking asks, 1 open question (the panel's OLDER SESSIONS)" in txt,
+           f"the stubs' counts (cold.n): {lines}")
+        ok(f"  used without    1 session used without its older items (its cold file could not be read): {s5[:8]} (reset one) (cold/{f5}, 3 h ago). "
+           "Each file stays in ledgr-data/cold/" in txt, f"a session used without its older items (coldLost): {lines}")
+        ok("held events     3 kept in ledgr-data/cold/held/ for 2 sessions" in txt, f"the held line: {lines}")
+        ok("1 cold session also holds items or turn records in store.json (an older build wrote them): the writer merges them" in txt,
+           f"a mixed session: {lines}")
+        ok(len(probs) == 4, f"four problems: {probs}")
+        pf = next((p for p in probs if s2[:8] in p), "")
+        ok(f"session {s2[:8]} (ledgr) is cold and the writer cannot read its file (cold/{f2} is missing; tried 3 time(s), last 20 min ago); "
+           f"2 new events kept in ledgr-data/cold/held/{s2}/" in pf and "Try again" in pf and "Use without its older items" in pf and "Forget" in pf,
+           f"a faulted session, its held events (the files on disk) and what to do: {pf}")
+        ok(f"Another file of this session is on disk: cold/{f2new}: it may hold what is missing, and it stays whatever you choose" in pf,
+           f"...and its other file on disk: {pf}")
+        pm = next((p for p in probs if s3[:8] in p), "")
+        ok(f"session {s3[:8]} names cold/{f3}, which is missing: its earlier items cannot come back from it." in pm and "Try again" in pm,
+           f"a stub that names a missing file: {pm}")
+        pu = next((p for p in probs if "does not know" in p), "")
+        ok(pu.startswith(f"1 file in ledgr-data/cold/ names sessions store.json does not know ({gone}.1794000000000-eeeeee.json): kept, the writer never deletes them")
+           and forgot not in pu, f"a file of an unknown session (a forgotten one's is known): {pu}")
+        ph = next((p for p in probs if "not faulted" in p), "")
+        ok(ph.startswith(f"1 held event in ledgr-data/cold/held/{s4}/ waits for a session that is not faulted, the oldest for 2 h 0 min")
+           and "relaunch Herdr" in ph, f"held events nobody replays: {ph}")
+        ok(s1[:8] not in " ".join(probs), "a healthy cold session is no problem")
+        lines, probs = L.cold_report(ctx, {}, running=False)
+        ok(len(probs) == 5 and not any("not faulted" in p for p in probs), f"Herdr not running: held events that wait are not a problem: {probs}")
+        # cold_lacks agrees with store.js coldLacks (second review): the version proves, an id or a turn number does not.
+        it_ = lambda i, **o: dict({"id": i, "anchor": {"sessionId": s1}, "status": "open", "updatedAt": 100}, **o)
+        dd = {"items": {"rq_same": it_("rq_same"), "rq_newer": it_("rq_newer", updatedAt=200), "rq_older": it_("rq_older", updatedAt=50),
+                        "rq_other": dict(it_("rq_other"), anchor={"sessionId": "x"})}, "turns": {s1: {"7": {"stopAt": 1}, "11": {"stopAt": 3}}}}
+        rec_ = {"items": [it_("rq_same"), it_("rq_newer", draft="x"), it_("rq_older", status="answered"), it_("rq_other"), it_("rq_lost"), 7],
+                "turns": {"3": {"stopAt": 0}, "7": {"stopAt": 1}, "11": {"stopAt": 3, "textHead": "h"}}}
+        ok(L.cold_lacks(dd, s1, rec_) == (5, 2), f"cold_lacks: only the identical held; later, older, another session's, absent, not an item lack: {L.cold_lacks(dd, s1, rec_)}")
+        ok(L.cold_lacks(dd, s1, rec_, {"rq_lost": [it_("rq_lost")], "rq_older": [it_("rq_older", updatedAt=160)]}, {"3": [{"stopAt": 0}]}, {"11": "h"}) == (4, 0),
+           "cold_lacks: an identical copy, cut records and moved heads prove; a later copy does not")
+        ok(L.cold_lacks(dd, s4, {"items": [], "turns": {"1": {}}}) == (0, 1), "cold_lacks: no record kept anywhere: every turn record lacks")
+        write(os.path.join(ctx.data, "store.json"), "{half")
+        lines, probs = L.cold_report(ctx, {})
+        ok(probs == [] and lines == ["  cold            store.json could not be read; retention.coldDays 7 (the default)"], f"a store that cannot be read: {lines}")
+    finally:
+        shutil.rmtree(root)
+
+
+class ThawWriter:
+    """A stand-in writer for --thaw-all: once config.json says retention.coldDays 0, it takes `cold` off one
+    session per step (faulted sessions only when `faulted` is true), writing store.json whole each time."""
+
+    def __init__(self, ctx, step=0.1, works=True, faulted=False):
+        import threading
+        self.ctx, self.step, self.works, self.faulted, self.stop = ctx, step, works, faulted, False
+        self.t = threading.Thread(target=self.run, daemon=True)
+        self.t.start()
+
+    def run(self):
+        sp, cp = os.path.join(self.ctx.data, "store.json"), os.path.join(self.ctx.data, "config.json")
+        while not self.stop:
+            time.sleep(self.step)
+            try:
+                cfg = json.loads(read(cp))
+            except (OSError, ValueError):
+                continue
+            if not self.works or (cfg.get("retention") or {}).get("coldDays") != 0:
+                continue
+            d = json.loads(read(sp))
+            for s in d["sessions"].values():
+                if "cold" in s and (self.faulted or "fault" not in s["cold"]):
+                    del s["cold"]
+                    s["thawedAt"] = int(time.time() * 1000)
+                    L.write_atomic(sp, json.dumps(d))
+                    break
+
+    def end(self):
+        self.stop = True
+        self.t.join(2)
+
+
+def test_thaw_all():
+    """./install.sh --thaw-all (retention Phase 2, the rollback's first step): config.json's retention.coldDays to 0
+    (a backup first, the rest of the file kept, asked unless --yes), then store.json polled until no session is cold;
+    exit 0, or 1 with what to do: no writer, or sessions whose file the writer cannot read. Scratch homes only."""
+    saved = (L.THAW_WAIT_S, L.THAW_POLL_S, L.THAW_SAY_S, L.herdr_running, L.THAW_CONFIRM_S)
+    L.THAW_POLL_S, L.THAW_SAY_S, L.THAW_CONFIRM_S = 0.05, 0.5, 0.1
+    L.herdr_running = lambda ctx: False
+
+    def run(ctx, argv=None):
+        out = []
+        say = L.say
+        L.say = lambda m="": out.append(m)
+        t0 = time.time()
+        try:
+            rc = L.main(argv) if argv else L.cmd_thaw_all(ctx, argparse.Namespace())
+        finally:
+            L.say = say
+        return rc, "\n".join(out), time.time() - t0
+
+    s1, s2, s3, _ = COLD_SID
+    cfg0 = {"v": 1, "extract": {"threshold": "blocking"}, "retention_days": 3, "retention": {"turns": 12}}
+    try:
+        # A writer that brings both back.
+        root, ctx, _ = scratch()
+        try:
+            L.THAW_WAIT_S = 10
+            cp = os.path.join(ctx.data, "config.json")
+            write(cp, json.dumps(cfg0, indent=2) + "\n")
+            store = cold_home(ctx, time.time(), {s1: {"sessionId": s1, "cold": {"file": "a", "at": 1, "n": {}}},
+                                                 s2: {"sessionId": s2, "cold": {"file": "b", "at": 1, "n": {}}}, s3: {"sessionId": s3}})
+            w = ThawWriter(ctx)
+            rc, out, dt = run(ctx)
+            w.end()
+            cfg = json.loads(read(cp))
+            ok(rc == 0 and "no cold sessions: every session's items are back in store.json; retention.coldDays stays 0." in out
+               and "To roll back now: check out the older build and run its ./install.sh." in out, f"a writer that thaws: exit 0, the words: {rc} {out}")
+            ok(cfg == dict(cfg0, retention={"turns": 12, "coldDays": 0}) and read(cp).endswith(b"}\n"),
+               f"config.json: retention.coldDays 0, everything else as it was, a final newline: {cfg}")
+            bak = os.path.join(ctx.state_dir, f"backup-{ctx.stamp}", "herdr", "ledgr-data", "config.json")
+            ok(os.path.exists(bak) and json.loads(read(bak)) == cfg0 and "retention.coldDays (the default, 7) -> 0; the file before: " in out,
+               f"the backup first, named: {out}")
+            ok("store.json      2 sessions cold" in out and "Herdr is not running: no writer moves anything until it runs" in out
+               and "waiting         up to 10 s" in out and re.search(r"\n  cold {12}[12] sessions? \(0 s\)\n", out), f"what it prints while waiting: {out}")
+            # Run again: already 0, nothing to back up, nothing cold.
+            ctx.backup_dir = None
+            rc, out, _ = run(ctx)
+            ok(rc == 0 and "retention.coldDays is 0 already" in out and ctx.backup_dir is None and "-> 0" not in out, f"again: {rc} {out}")
+            # Through main() (./install.sh --thaw-all --yes passes `install --thaw-all --yes`).
+            write(cp, json.dumps(cfg0) + "\n")
+            write(os.path.join(ctx.data, "store.json"), json.dumps(store))
+            w = ThawWriter(ctx)
+            rc, out, _ = run(ctx, ["install", "--thaw-all", "--yes", "--herdr-home", ctx.home, "--state-dir", ctx.state_dir,
+                                   "--claude-settings", ctx.settings])
+            w.end()
+            ok(rc == 0 and json.loads(read(cp))["retention"]["coldDays"] == 0 and "no cold sessions" in out, f"through main: {rc} {out}")
+        finally:
+            shutil.rmtree(root)
+        # Integration (2026-11-19, the review's finding 5): a freeze run whose own read of config.json came before the
+        # write of 0 commits and saves after it. Nothing is cold at first; "no cold sessions" waits for the writer's
+        # claim to be renewed after the write and out of housekeeping, and is seen twice.
+        root, ctx, _ = scratch()
+        try:
+            L.THAW_WAIT_S = 10
+            L.herdr_running = lambda ctx: True
+            write(os.path.join(ctx.data, "config.json"), json.dumps(cfg0) + "\n")
+            cold_home(ctx, time.time(), {s1: {"sessionId": s1}})
+            claim = lambda at, step=None: write(os.path.join(ctx.home, "shared.json"), json.dumps(
+                {"ledgr.writer": dict({"id": "w1", "by": "host", "at": int(at * 1000)}, **({"pass": {"at": 0, "step": step, "since": 0}} if step else {}))}))
+            claim(time.time() - 5, "housekeeping: freeze c01d0001")
+            import threading
+            seen = {}
+
+            def late_commit():
+                time.sleep(0.4)                         # the commit's save lands after the write of 0
+                d = json.loads(read(os.path.join(ctx.data, "store.json")))
+                d["sessions"][s1]["cold"] = {"file": "f", "at": 1, "n": {}}
+                L.write_atomic(os.path.join(ctx.data, "store.json"), json.dumps(d))
+                seen["cold"] = time.time()
+                time.sleep(0.4)                         # the writer reads the 0 and brings it back, then its claim renews
+                del d["sessions"][s1]["cold"]
+                L.write_atomic(os.path.join(ctx.data, "store.json"), json.dumps(d))
+                claim(time.time())
+                seen["back"] = time.time()
+            th = threading.Thread(target=late_commit, daemon=True)
+            th.start()
+            rc, out, dt = run(ctx)
+            t_end = time.time()
+            th.join(3)
+            ok(rc == 0 and "none cold yet; waiting for the writer to show it has taken the new value" in out and "cold            1 session" in out
+               and "no cold sessions: every session's items are back" in out and t_end >= seen.get("back", 1e18),
+               f"a freeze committing after the write: seen, waited for, then no cold sessions: {rc} {out}")
+            # A writer alive whose claim never renews after the write: no "no cold sessions"; exit 1, say why.
+            L.THAW_WAIT_S = 0.6
+            write(os.path.join(ctx.data, "config.json"), json.dumps(cfg0) + "\n")
+            claim(time.time() - 5)
+            rc, out, dt = run(ctx)
+            ok(rc == 1 and "the writer has not shown it took retention.coldDays 0" in out, f"no evidence from a live writer: exit 1: {rc} {out}")
+            # A claim not renewed for CLAIM_LIVE_S: no writer alive, nothing can freeze.
+            claim(time.time() - L.CLAIM_LIVE_S - 10)
+            rc, out, _ = run(ctx)
+            ok(rc == 0 and "no cold sessions" in out, f"a writer long gone: nothing can freeze: {rc} {out}")
+            ok(L.writer_settled(None, 0) and not L.writer_settled({"id": "w", "at": (time.time() + 1) * 1000, "pass": {"step": "housekeeping: save"}}, time.time())
+               and L.writer_settled({"id": "w", "at": (time.time() + 1) * 1000, "pass": {"step": "apply"}}, time.time()), "writer_settled")
+        finally:
+            L.herdr_running = lambda ctx: False
+            shutil.rmtree(root)
+        # No writer: exit 1 after the wait, with what to do.
+        root, ctx, _ = scratch()
+        try:
+            L.THAW_WAIT_S = 1.0
+            write(os.path.join(ctx.data, "config.json"), json.dumps(cfg0) + "\n")
+            cold_home(ctx, time.time(), {s1: {"sessionId": s1, "cold": {"file": "a", "at": 1, "n": {}}}})
+            w = ThawWriter(ctx, works=False)
+            rc, out, dt = run(ctx)
+            w.end()
+            ok(rc == 1 and 1.0 <= dt < 4 and "X 1 session still cold after 1 s: show the ledgr panel or relaunch Herdr so a writer runs, then run "
+               "./install.sh --thaw-all again (retention.coldDays is 0 now; nothing else changed)" in out, f"a writer that never thaws: exit 1: {rc} {dt} {out}")
+            # Sessions the writer cannot read: they never thaw by themselves; it stops waiting and says what to do.
+            L.THAW_WAIT_S = 10
+            fault = {"at": time.time() * 1000, "error": "not valid JSON", "tries": 1, "held": 1}
+            cold_home(ctx, time.time(), {s1: {"sessionId": s1, "cold": {"file": "a", "at": 1, "n": {}}},
+                                         s2: {"sessionId": s2, "sessionName": "lost", "cold": {"file": f"{s2}.1794000000000-cccccc.json", "at": 1, "n": {}, "fault": fault}}},
+                      held=[(s2, "1794100000000-asks-1-aaaaaa.json", 5)])
+            w = ThawWriter(ctx)
+            rc, out, dt = run(ctx)
+            w.end()
+            ok(rc == 1 and dt < 5 and f"X session {s2[:8]} (lost) cannot come back: the writer cannot read its file (cold/{s2}.1794000000000-cccccc.json: not valid JSON); 1 event held for it" in out
+               and "Try again (after putting the file back), Use without its older items, or Forget" in out and "still cold after" not in out
+               and "1 the writer cannot read" in out, f"a faulted session: exit 1 at once, what to do: {rc} {dt} {out}")
+            # No store.json: nothing to wait for; the value is written all the same.
+            os.unlink(os.path.join(ctx.data, "store.json"))
+            write(os.path.join(ctx.data, "config.json"), json.dumps(cfg0) + "\n")
+            rc, out, _ = run(ctx)
+            ok(rc == 0 and "nothing to wait for" in out and json.loads(read(os.path.join(ctx.data, "config.json")))["retention"]["coldDays"] == 0,
+               f"no store: exit 0, the value written: {out}")
+            # Asked unless --yes: not a terminal, nothing written; config.json that is not JSON: said, nothing written.
+            write(os.path.join(ctx.data, "config.json"), json.dumps(cfg0) + "\n")
+            ctx.yes = False
+            stdin = sys.stdin
+            sys.stdin = type("NoTty", (), {"isatty": lambda self: False})()
+            try:
+                rc, out, _ = run(ctx)
+            finally:
+                sys.stdin = stdin
+            ok(rc == 2 and "run ./install.sh --thaw-all --yes" in out and json.loads(read(os.path.join(ctx.data, "config.json"))) == cfg0,
+               f"not a terminal without --yes: nothing written: {rc} {out}")
+            ctx.yes = True
+            write(os.path.join(ctx.data, "config.json"), "{nope")
+            rc, out, _ = run(ctx)
+            ok(rc == 1 and "config.json is not valid JSON" in out and read(os.path.join(ctx.data, "config.json")) == b"{nope", f"invalid config.json: {out}")
+            # No config.json at all: made from the hooks' defaults (the installed copy's), coldDays 0.
+            os.unlink(os.path.join(ctx.data, "config.json"))
+            rc, out, _ = run(ctx)
+            made = json.loads(read(os.path.join(ctx.data, "config.json")))
+            ok(rc == 0 and made.get("retention", {}).get("coldDays") == 0, f"no config.json: written with coldDays 0: {made}")
+        finally:
+            shutil.rmtree(root)
+    finally:
+        L.THAW_WAIT_S, L.THAW_POLL_S, L.THAW_SAY_S, L.herdr_running, L.THAW_CONFIRM_S = saved
+
+
 if __name__ == "__main__":
     for t in (test_dump, test_settings_write, test_mend_newline, test_restore_original, test_retire, test_settings_list, test_handoff,
-              test_keep_config_edits, test_mcp, test_recipe, test_writer_report, test_retention_migration, test_retention_report):
+              test_keep_config_edits, test_mcp, test_recipe, test_writer_report, test_retention_migration, test_retention_report,
+              test_cold_report, test_thaw_all):
         t()
     print(f"setup: {PASS} passed, {FAIL} failed" + ("" if FAIL else "  OK"))
     sys.exit(1 if FAIL else 0)

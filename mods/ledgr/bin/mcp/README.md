@@ -109,11 +109,45 @@ need from the user in your reply`; `resolve_asks` closes nothing (`resolved`, `u
 `off <tool> <sid> turn=… space=… by=ledgr_off|spaces.disabled` line. The tools stay listed (a space can
 be switched on mid-session), and the server's `instructions` say: when a ledgr tool answers
 `off: true`, list what you need from the user in your reply instead. Their last sentence (2026-11-19)
-covers a writer that is not applying events: "When a ledgr tool says its writer is not applying events,
-the user cannot see these items in ledgr yet: say so and list them in your reply as well." It is in the
+covers a writer that is not applying events and a cold session whose file cannot be read: "When a ledgr
+tool says its writer is not applying events, or that ledgr cannot read this session's earlier items, the
+user cannot see these items in ledgr yet: say so and list them in your reply as well." It is in the
 server's instructions only, not in `lib/asks-instruction-*.txt`: only a tool result can say the writer
-is stalled, and it says what to do itself; the sentence keeps the instructions' "instead of a closing
-list" from contradicting that result.
+is stalled or a session's file cannot be read, and it says what to do itself; the sentence keeps the
+instructions' "instead of a closing list" from contradicting that result.
+
+## Cold sessions
+
+A session nobody touched for `retention.coldDays` (7 days by default; retention Phase 2) has its items
+and turn records in `ledgr-data/cold/<safe sid>.<ms>-<rand6>.json`, named by `snapshot.json`'s `cold`
+map (`{"<sid>": {"file", "fault"}}`), while its record stays in `store.json`. Every read here goes through
+`lib/ledgr_extract.session_items(sid)`, which reads that file when the map names the session (checked as
+the writer checks it: `ledgr: "ledgr-cold"`, `v: 1`, the session's id) and filters it as the snapshot is
+filtered, so `open_asks`, the repeats, `resolve_asks`' handle map and the handles after a wait are the same
+as for a warm session, with no wait: the writer thaws the session in the pass that applies the event, and
+keeps the file at least an hour after. When the file cannot be read (the map's `fault`, the writer's
+error, or this server's own read, in the writer's words: `cold/<file> is missing`, `… does not parse`,
+`cold/<file>: <store.js coldRecordError>`), the tools still send
+their events, which the writer holds in `cold/held/<safe sid>/` and applies once the session is read again
+(Try again in the panel), used without its older items, or forgotten: nothing is lost, and a retry changes
+nothing. `declare_asks` and `resolve_asks` then stay `ok: true`, add `cold: {file, fault, error}` to the
+data, `writer: "held"` once the writer has held the event (found in `cold/held/` by event id: the writer
+confirms that copy before the spool file goes, and only a replay that applied it removes it), and two lines: "ledgr cannot read
+this session's earlier items (cold/<file>: <why>); what you sent is kept and applied once that is fixed
+(the user's panel offers Try again)." (the why alone when it names the file, as `cold/<file> is
+missing` does) and "Tell the user in your reply, and list these items there." (for
+`resolve_asks`: "…and list there the asks you closed."); the pointer line follows "Then end your reply
+with this line:". A handle `resolve_asks` cannot look up there is sent by handle (`item: null`, listed in
+`unchecked`; `store.js` `on_act` finds it by handle when the event is applied). `open_asks` says which
+asks it could not list instead of "No open or recently dismissed asks", and the server's instructions
+cover both cases in one sentence ("…or that ledgr cannot read this session's earlier items…"). An event
+gone from the spool and not in `cold/held/` was applied: a `snapshot.json` the writer could not write after
+the thaw may still name the session cold (the writer tries it twice, and its status line says so), and the
+result then says `writer: "applied"`, with handles possibly pending, never the two lines (integration,
+2026-11-19: it used to read that as held). A known limit: while the file cannot be read here, a repeat cannot be
+linked to the earlier ask it repeats (its `repeat_of` is noted as ignored and left out); once the session is
+back, the writer still merges one whose text matches an earlier ask of the session (`store.js` `on_asks`, by
+key), but a reworded repeat arrives as a new ask.
 
 ## declare_asks
 
@@ -167,7 +201,8 @@ provide, review. `repeat_of` takes a handle from `open_asks`. There are at most 
     that ledgr's writer is not applying events (relaunching Herdr restarts it; nothing queued is lost),
     and list these items in your reply this time.", then "Then end your reply with this line:" and the
     pointer line.
-  Unless `writer` is `applied`, the result carries `writer_status`: `{state, queued, oldest_s, store_s,
+  A cold session whose file cannot be read gives `writer: "held"` (see "Cold sessions").
+  Unless `writer` is `applied` or `held`, the result carries `writer_status`: `{state, queued, oldest_s, store_s,
   why?, claim?: {by, age_s, step?, step_s?, fault?}}`. The server's instructions say what to do with a
   stalled writer in one sentence: say so and list the items in the reply as well.
 - The turn's declaration is kept in `ledgr-data/mcp/<session>/<turn>.json` (the last 50 turns per
@@ -219,8 +254,9 @@ once, and at most 30 are read. A single string, or the array sent as JSON text, 
   is not a string, or the identity check refuses the call.
 - `note` is squashed to one line and cut at 200 characters. It goes on each event only when given.
 - The server then waits for the writer the way `declare_asks` does (`LEDGR_MCP_WAIT_MS`, no wait when
-  `writer_state` says behind or stalled) and says `writer`: `applied`, `timeout`, `idle` (behind) or
-  `stalled` (null when nothing was sent), with `writer_status` unless applied. Timeout or behind, the
+  `writer_state` says behind or stalled) and says `writer`: `applied`, `timeout`, `idle` (behind),
+  `stalled`, or `held` (a cold session's file cannot be read: see "Cold sessions") (null when nothing
+  was sent), with `writer_status` unless applied or held. Timeout or behind, the
   text says the panel shows the asks closed once the writer applies them; stalled, that the closures are
   queued, the panel still shows the asks open, and to tell the user the writer is not applying events.
 - One `mcp.log` line per call: `resolve <sid> turn=… resolved=[…] already_closed=[…] unknown=[…]
@@ -345,7 +381,7 @@ runtime first probes stdio servers for revision 2026-07-28, and the v1 runtime (
 
 ## Tests
 
-`tests/test_mcp.py` (118 checks, in `tests/run-all.sh`) spawns the server over real stdio with a
+`tests/test_mcp.py` (162 checks, in `tests/run-all.sh`) spawns the server over real stdio with a
 scratch `LEDGR_DATA` and covers the following:
 
 - both handshakes, `tools/list`, the error codes, a batch;
@@ -374,6 +410,15 @@ scratch `LEDGR_DATA` and covers the following:
   `spaces.disabled` (no `ledgr_off`), by the map entry's space, and for a synthetic session by a live
   lookup (a fake `hc`), each writing nothing and logging one line; the same server back on records
   as before;
+- cold sessions (retention Phase 2), in process: `session_items` from the snapshot, from a cold file
+  (each of the snapshot's filters: states, the 7-day dismissal, a numeric-string time, a quote over 200
+  UTF-16 units, draft and pins), a "mixed" session, a faulted one readable here, every unreadable case
+  (missing, not JSON, another session, format or version, no item list, a name of another session or off
+  the pattern) and a snapshot that moved on; `recorded_asks` and `tool_asks` the same warm and cold. Over
+  stdio, with a fake writer that thaws and holds: `open_asks` the same warm and cold; `declare_asks` and
+  `resolve_asks` on a cold session (from the file; thawed: handles at once), on a faulted one (held: ok,
+  `writer: "held"`, `cold`, the two lines, the pointer; `resolve_asks` by handle, `item: null`), a repeat
+  of a file ask while held, `open_asks` and `parked_questions` that cannot list, and with no writer;
 - stdout purity, exit on EOF, no bytecode, the log.
 
 ```sh

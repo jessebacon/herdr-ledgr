@@ -255,6 +255,388 @@ class FakeWriter(threading.Thread):
         wjson(path, snap)
 
 
+class ColdWriter(FakeWriter):
+    """The writer's part of retention Phase 2 (docs: the contract's Thaw and Hold), on snapshot.json alone:
+    before an event of a session snapshot.json lists as cold is applied, its file is read (ledgr_extract's
+    own check) and its items join the snapshot's (the thaw), or, when it cannot be read, the spool file is
+    copied under its own name to cold/held/<safe sid>/, the session's fault is set, and only then is the
+    spool file removed (the hold). An act with no item resolves by handle (store.js on_act)."""
+
+    def __init__(self, stale=False):
+        super().__init__()
+        self.held = []
+        # stale: a thaw whose snapshot.json write failed (writer.js applyPass tries it twice): the event is applied
+        # and its spool file goes, but snapshot.json keeps naming the session cold and gains nothing.
+        self.stale = stale
+
+    def run(self):
+        import ledgr_extract as X
+        while not self.stop:
+            for p in spool_files():
+                ev = rjson(p)
+                if not isinstance(ev, dict):
+                    continue
+                snap = rjson(os.path.join(DATA, "snapshot.json"), {"v": 1, "items": []})
+                sid = ev.get("session_id")
+                ent = (snap.get("cold") or {}).get(sid)
+                if ent:
+                    # A faulted session is not read again until its retry is due (COLD_RETRY_MS): held.
+                    rec, why = (None, ent["fault"]) if ent.get("fault") else X.cold_record(sid, ent.get("file"), DATA)
+                    if why:
+                        d = os.path.join(DATA, "cold", "held", X.safe_name(sid))
+                        os.makedirs(d, exist_ok=True)
+                        shutil.copyfile(p, os.path.join(d, os.path.basename(p)))
+                        ent["fault"] = ent.get("fault") or why
+                        wjson(os.path.join(DATA, "snapshot.json"), snap)
+                        self.held.append(ev)
+                        os.unlink(p)
+                        continue
+                    if self.stale:
+                        self.acts.append(ev)
+                        os.unlink(p)
+                        continue
+                    now = int(time.time() * 1000)
+                    snap["items"] += [c for c in (X.snapshot_copy(it, now) for it in rec["items"]) if c]
+                    del snap["cold"][sid]
+                    wjson(os.path.join(DATA, "snapshot.json"), snap)
+                if ev.get("type") == "asks" and ev.get("source") == "tool":
+                    self.apply(ev)
+                elif ev.get("type") == "act" and ev.get("action") == "resolve":
+                    self.acts.append(ev)
+                    if ev.get("item") is None:
+                        snap = rjson(os.path.join(DATA, "snapshot.json"), {})
+                        it = next((x for x in snap.get("items", []) if x.get("handle") == ev.get("handle")
+                                   and x["anchor"]["sessionId"] == ev["session_id"]), None)
+                        ev = dict(ev, item=it and it["id"])
+                    self.resolve(ev)
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+            time.sleep(0.02)
+
+
+def cold_section():
+    """Retention Phase 2: sessions moved out of store.json into ledgr-data/cold/<file> (snapshot.json's
+    `cold` map). The library (session_items, cold_record, snapshot_copy, recorded_asks, tool_asks) in
+    process, then the server over stdio: a cold session answers as a warm one; one whose file cannot be
+    read (the writer's fault, or this server's read) keeps what it is sent and says so."""
+    import ledgr_extract as X
+    now = int(time.time() * 1000)
+    day = 86400_000
+    SC = "33333333-4444-5555-6666-777777777777"
+    LIB = os.path.join(ROOT, "lib-data")
+    os.makedirs(os.path.join(LIB, "cold"), exist_ok=True)
+    snap_p = os.path.join(LIB, "snapshot.json")
+
+    def raw(h, status, direction="agent_to_human", sid=SC, **kw):
+        it = {"id": "rq_c" + h.lower(), "handle": h, "direction": direction, "text": f"Cold item {h}", "status": status,
+              "level": "needed", "kind": "decide", "anchor": {"sessionId": sid, "turn": 3, "hash": "abc"},
+              "createdTurn": 3, "createdAt": now - 9 * day, "updatedAt": now - 9 * day}
+        it.update(kw)
+        return it
+
+    long_q, q200, emoji_q = "x" * 250, "y" * 200, "\U0001F600" * 150     # 150 emoji: 300 UTF-16 units
+    items = [raw("A1", "open", draft="half an answer", pins=["pn_1"]),
+             raw("A2", "answered", answer="serif"),
+             raw("A3", "resolved", resolvedAt=now - 8 * day),
+             raw("A4", "dismissed", resolvedAt=now - 2 * day),
+             raw("A5", "dismissed", resolvedAt=now - 10 * day),
+             raw("A6", "deferred"),
+             raw("Q1", "open", direction="human_to_agent"),
+             raw("Q2", "rejoin_pending", direction="human_to_agent"),
+             raw("A7", None),
+             raw("A8", "dismissed", updatedAt=None),
+             raw("A9", "dismissed", resolvedAt=str(now - 2 * day)),
+             raw("A10", "open"), raw("A11", "open"), raw("A12", "open")]
+    items[-3]["anchor"]["quote"] = long_q
+    items[-2]["anchor"]["quote"] = q200
+    items[-1]["anchor"]["quote"] = emoji_q
+    items[-1].pop("updatedAt")
+    # What store.js snapshot() writes for each (written out case by case, not computed by the code under test):
+    # open, answered, deferred, rejoin_pending, and dismissed within 7 days (resolvedAt, else updatedAt, as a
+    # number: a numeric string counts, no time is 0); sessionId from the anchor; a quote over 200 UTF-16 units
+    # dropped; no draft, no pins.
+    keep = {"A1", "A2", "A4", "A6", "Q1", "Q2", "A9", "A10", "A11", "A12"}
+    expected = []
+    for it in items:
+        if it["handle"] not in keep:
+            continue
+        c = json.loads(json.dumps(it))
+        c["sessionId"] = SC
+        c.pop("draft", None)
+        c.pop("pins", None)
+        if c["handle"] in ("A10", "A12"):
+            del c["anchor"]["quote"]
+        expected.append(c)
+    other = raw("A1", "open", sid=SID2)
+    name = f"{X.safe_name(SC)}.{now - 9 * day}-ab12cd.json"
+    record = {"ledgr": "ledgr-cold", "v": 1, "sessionId": SC, "at": now - 9 * day, "session": {"sessionId": SC},
+              "items": items, "turns": {"3": {"stopAt": now - 9 * day}}, "n": {"q": 1}}
+    wjson(os.path.join(LIB, "cold", name), record)
+    cold_snap = {"v": 1, "updatedAt": now, "items": [X.snapshot_copy(other, now)], "cold": {SC: {"file": name, "fault": None}}}
+    warm_snap = {"v": 1, "updatedAt": now, "items": [X.snapshot_copy(other, now)] + expected}
+    wjson(snap_p, cold_snap)
+    got, cold = X.session_items(SC, snap_p, now)
+    check("session_items, cold: the file's items filtered as store.js snapshot() filters, each as the snapshot writes it",
+          got == expected, [[g.get("handle") for g in got], [e["handle"] for e in expected],
+                            next((g for g, e in zip(got, expected) if g != e), None)])
+    check("session_items, cold: cold names the file, no fault, no error", cold == {"file": name, "fault": None, "error": None}, cold)
+    check("session_items: another session's items from the snapshot, warm (cold None)",
+          X.session_items(SID2, snap_p, now) == ([X.snapshot_copy(other, now)], None))
+    check("session_items with no session: every warm item of the snapshot, as before", X.session_items(None, snap_p, now)[0] == cold_snap["items"])
+    rc = X.recorded_asks(SC, snap_p, now)
+    wjson(snap_p, warm_snap)
+    rw = X.recorded_asks(SC, snap_p, now)
+    check("recorded_asks: the same open, dismissed and known handles warm and cold",
+          rc == rw and [h for h, _ in rw[0]] == ["A1", "A2", "A6", "A10", "A11", "A12"] and [h for h, _ in rw[1]] == ["A4", "A9"], [rc, rw])
+    check("session_items, warm: the snapshot's items, cold None", X.session_items(SC, snap_p, now) == (expected, None))
+    decl = {"asks": [{"text": "Cold item A1", "level": "blocking", "kind": "decide", "quote": "Pick it."},
+                     {"text": "Something new", "level": "needed", "kind": "do", "repeat_of_handle": "A4"}]}
+    tw = X.tool_asks(decl, SC, 5, "Pick it. More.", snap_p)
+    wjson(snap_p, cold_snap)
+    tc = X.tool_asks(decl, SC, 5, "Pick it. More.", snap_p)
+    check("tool_asks (the Stop hook's check of a declaration): the same warm and cold, repeats found in the file",
+          tw == tc and tc[1].get("repeat_of_handle") == "A4", [tw, tc])
+
+    # A "mixed" session (an older build put an item beside the stub): the snapshot's copy wins, first.
+    mixed = dict(X.snapshot_copy(items[0], now), text="Changed in the store")
+    wjson(snap_p, dict(cold_snap, items=cold_snap["items"] + [mixed]))
+    got, _ = X.session_items(SC, snap_p, now)
+    check("session_items, mixed: the snapshot's copy of an id wins and comes first, the file gives the rest",
+          got[0] == mixed and [g["handle"] for g in got] == ["A1"] + [e["handle"] for e in expected[1:]], [g["handle"] for g in got])
+    # The writer's fault rides on the cold entry; a file readable here is still read.
+    wjson(snap_p, dict(cold_snap, cold={SC: {"file": name, "fault": "the file is missing"}}))
+    got, cold = X.session_items(SC, snap_p, now)
+    check("session_items, faulted but readable here: its items, the fault kept, no error",
+          got == expected and cold == {"file": name, "fault": "the file is missing", "error": None}, cold)
+
+    def bad(fname, rec=None, text=None, why=None, label=None):
+        """An unreadable cold file: no items, cold.error in the writer's words (writer.js readCold, store.js
+        coldRecordError); `why` ending in "(" is a prefix (the parser's own message follows)."""
+        if rec is not None or text is not None:
+            p = os.path.join(LIB, "cold", fname)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(text if text is not None else json.dumps(rec))
+        wjson(snap_p, dict(cold_snap, cold={SC: {"file": fname, "fault": None}}))
+        got, cold = X.session_items(SC, snap_p, now)
+        err = (cold or {}).get("error") or ""
+        check(f"session_items, {label}: no items, cold.error {why!r}",
+              got == [] and cold and cold["file"] == fname and cold["fault"] is None
+              and (err.startswith(why) if why.endswith("(") else err == why), [got, cold])
+
+    stem = f"{X.safe_name(SC)}.{now}"
+    n = lambda k: f"{stem}-zz000{k}.json"  # noqa: E731
+    bad(n(0), why=f"cold/{n(0)} is missing", label="a missing file")
+    bad(n(1), text="{not json", why=f"cold/{n(1)} does not parse (", label="a file that is not JSON")
+    bad(n(2), rec=dict(record, sessionId=SID2), why=f"cold/{n(2)}: the file is session {SID2}'s, not {SC}", label="another session's record")
+    bad(n(3), rec=dict(record, ledgr="ledgr-store"), why=f'cold/{n(3)}: not a cold file (ledgr "ledgr-store")', label="another format")
+    bad(n(4), rec=dict(record, v=2), why=f"cold/{n(4)}: cold file version 2, not 1", label="version 2")
+    bad(n(5), rec=dict(record, v=True), why=f"cold/{n(5)}: cold file version true, not 1", label="version true")
+    bad(n(6), rec=dict(record, items={"a": 1}), why=f"cold/{n(6)}: the file holds no item list", label="no item list")
+    bad(n(7), rec=dict(record, items=items + [raw("A20", "open", sid=SID2)]), why=f"cold/{n(7)}: item rq_ca20 in the file is another session's",
+        label="an item of another session")
+    bad(n(8), rec=dict(record, items=items + [{"text": "no id"}]), why=f"cold/{n(8)}: item {len(items) + 1} of the file has no id", label="an item with no id")
+    bad(n(9), rec=dict(record, turns=[1]), why=f"cold/{n(9)}: the file's turn records are not a map", label="turn records not a map")
+    bad("../snapshot.json", why='not a cold file name: "../snapshot.json"', label="a name with a folder")
+    bad(f"{stem}-ZZ0008.json", rec=record, why=f'not a cold file name: "{stem}-ZZ0008.json"', label="a name off the pattern")
+    wjson(os.path.join(LIB, "cold", f"{X.safe_name(SID2)}.{now}-zz0010.json"), record)
+    wjson(snap_p, dict(cold_snap, cold={SC: {"file": f"{X.safe_name(SID2)}.{now}-zz0010.json", "fault": None}}))
+    check("session_items: a file whose name is not the session's but holds its record reads (the writer checks the record, not the name)",
+          X.session_items(SC, snap_p, now)[0] == expected)
+    # The snapshot moved on between two reads (a thaw saved meanwhile): read once more, then the new one wins.
+    reads = [dict(cold_snap, cold={SC: {"file": n(0), "fault": None}}), warm_snap]
+    real = X.C.read_json
+    X.C.read_json = lambda p, d=None: reads.pop(0) if p == snap_p and reads else real(p, d)
+    try:
+        got, cold = X.session_items(SC, snap_p, now)
+    finally:
+        X.C.read_json = real
+    check("session_items: a file gone because the snapshot moved on (thawed) reads snapshot.json again: warm",
+          got == expected and cold is None, [got, cold])
+
+    # ---- the server over stdio ----
+    print("== cold sessions: the server")
+    take_events()
+    cold_dir = os.path.join(DATA, "cold")
+    os.makedirs(cold_dir, exist_ok=True)
+    snap_path = os.path.join(DATA, "snapshot.json")
+    saved_snap = rjson(snap_path, {"v": 1, "items": []})
+    saved_store = rjson(os.path.join(DATA, "store.json"))
+    if os.path.exists(os.path.join(DATA, "store.json")):
+        os.unlink(os.path.join(DATA, "store.json"))
+    cname = f"{X.safe_name(SC)}.{now - 9 * day}-ab12cd.json"
+    wjson(os.path.join(cold_dir, cname), record)
+    base_items = [it for it in saved_snap.get("items", []) if X.session_of(it) != SC]
+
+    def put(cold_map=None, extra=()):
+        s = {"v": 1, "updatedAt": now, "items": base_items + list(extra)}
+        if cold_map is not None:
+            s["cold"] = cold_map
+        wjson(snap_path, s)
+
+    set_map("t50", SC, 12)
+    c = Client(terminal="t50", wait_ms=2500)
+    c.init()
+    put(extra=expected)
+    ow = c.call("open_asks")
+    put({SC: {"file": cname, "fault": None}})
+    oc = c.call("open_asks")
+    check("open_asks, cold: the same result as warm (read from the file, no wait, no cold key)",
+          ow.get("structuredContent") == oc.get("structuredContent") and text(ow) == text(oc) and "cold" not in oc["structuredContent"]
+          and [x["handle"] for x in oc["structuredContent"]["open"]] == ["A1", "A2", "A6", "A10", "A11", "A12"], [text(ow), text(oc)])
+    r = c.call("declare_asks", {"items": [{"level": "needed", "kind": "decide", "text": "cold item a1."}]})
+    sc, tx = r.get("structuredContent") or {}, text(r)
+    evs = take_events()
+    check("declare_asks, cold and readable, no writer: a repeat of A1 found in the file, its event sent, no cold lines",
+          not r.get("isError") and sc.get("ok") and sc.get("repeats") == [{"item": 1, "of": "A1", "status": "open", "match": "text"}]
+          and "cold" not in sc and "cannot read" not in tx and len(evs) == 1 and evs[0]["asks"][0]["repeat_of"] == "rq_ca1", [sc, tx])
+    r = c.call("resolve_asks", {"handles": ["A2", "A3", "A99"]})
+    sc = r.get("structuredContent") or {}
+    evs = take_events()
+    check("resolve_asks, cold and readable: A2 (answered, in the file) closed by its id; A3 resolved is unknown (the snapshot has no closed item), A99 unknown",
+          sc.get("resolved") == ["A2"] and sc.get("unknown") == ["A3", "A99"] and "cold" not in sc and len(evs) == 1
+          and evs[0]["item"] == "rq_ca2" and evs[0]["handle"] == "A2", [sc, evs])
+    c.close()
+
+    print("== cold sessions: thawed by the writer")
+    put({SC: {"file": cname, "fault": None}})
+    cw = ColdWriter()
+    cw.start()
+    c = Client(terminal="t50", wait_ms=3000)
+    c.init()
+    t0 = time.monotonic()
+    r = c.call("declare_asks", {"items": [{"level": "blocking", "kind": "do", "text": "Thaw and add this"}]})
+    sc, tx = r.get("structuredContent") or {}, text(r)
+    check("declare_asks, cold, the writer thaws: a handle at once (A13 after the file's A12), applied, no cold lines",
+          sc.get("handles") == ["A13"] and sc.get("writer") == "applied" and "cannot read" not in tx and "cold" not in sc
+          and time.monotonic() - t0 < 2.5, [sc, tx])
+    snap = rjson(snap_path, {})
+    check("...and the snapshot holds the session warm (the fake writer's thaw)", SC not in (snap.get("cold") or {})
+          and any(it.get("handle") == "A1" and X.session_of(it) == SC for it in snap.get("items", [])))
+    r = c.call("resolve_asks", {"handles": ["A1"]})
+    sc = r.get("structuredContent") or {}
+    check("resolve_asks after the thaw: applied", sc.get("resolved") == ["A1"] and sc.get("writer") == "applied", sc)
+
+    print("== cold sessions: a file the writer cannot read (faulted)")
+    lost = f"{X.safe_name(SC)}.{now - 9 * day}-lost00.json"
+    missing = f"cold/{lost} is missing"                        # the writer's words (writer.js readCold), and ours
+    put({SC: {"file": lost, "fault": missing}})
+    held_dir = os.path.join(cold_dir, "held", X.safe_name(SC))
+    t0 = time.monotonic()
+    r = c.call("declare_asks", {"items": [{"level": "blocking", "kind": "decide", "text": "Pick the cold region"},
+                                          {"level": "needed", "kind": "do", "text": "Cold item A1"}]})
+    sc, tx = r.get("structuredContent") or {}, text(r)
+    held = sorted(os.listdir(held_dir)) if os.path.isdir(held_dir) else []
+    check("declare_asks, faulted: ok and not an error (a retry changes nothing), writer held, ended as soon as it was held",
+          sc.get("ok") is True and not r.get("isError") and sc.get("writer") == "held" and sc.get("handles") == [None, None]
+          and time.monotonic() - t0 < 2.0 and "writer_status" not in sc, [sc, time.monotonic() - t0])
+    check("declare_asks, faulted: the event is held under its own spool name (cold/held/<session>/), none left in the spool",
+          len(held) == 1 and "-asks-" in held[0] and rjson(os.path.join(held_dir, held[0]), {}).get("id") == sc.get("event_id")
+          and not spool_files(), [held, spool_files()])
+    check("declare_asks, faulted: cold in the data (file, the writer's fault, and the file missing here too)",
+          sc.get("cold") == {"file": lost, "fault": missing, "error": missing}, sc.get("cold"))
+    check("declare_asks, faulted: the two lines, then the pointer as when the writer stalls; no pending words",
+          f"ledgr cannot read this session's earlier items (cold/{lost} is missing); what you sent is kept and "
+          "applied once that is fixed (the user's panel offers Try again)." in tx
+          and "Tell the user in your reply, and list these items there." in tx and "Handles are pending" not in tx
+          and "do not list these items in prose" not in tx
+          and tx.splitlines()[-2:] == ["Then end your reply with this line:", "ledgr: 2 items for you, 1 blocking"], tx)
+    st = rjson(os.path.join(DATA, "mcp", SC, "12.json"), {})
+    check("declare_asks, faulted: the turn's declaration is still kept (mcp/<session>/<turn>.json), for the Stop hook",
+          [a["text"] for a in st.get("asks") or []] == ["Pick the cold region", "Cold item A1"], st)
+    r = c.call("resolve_asks", {"handles": ["A1", "A4", "Q1"]})
+    sc, tx = r.get("structuredContent") or {}, text(r)
+    held = sorted(n for n in os.listdir(held_dir) if "-act-" in n)
+    hev = [rjson(os.path.join(held_dir, n), {}) for n in held]
+    check("resolve_asks, unreadable: A1 and A4 sent by handle (item null), held; Q1 a question; ok, writer held",
+          sc.get("ok") is True and not r.get("isError") and sc.get("resolved") == ["A1", "A4"] and sc.get("unchecked") == ["A1", "A4"]
+          and sc.get("unknown") == ["Q1"] and sc.get("writer") == "held" and len(hev) == 2
+          and all(e.get("item") is None and e.get("actor") == "agent" and e.get("turn") == 12 for e in hev)
+          and sorted(e.get("handle") for e in hev) == ["A1", "A4"], [sc, hev])
+    check("resolve_asks, unreadable: the words (kept, why, Try again, tell the user and list the asks closed); cold in the data",
+          "ledgr kept the closing of A1, A4 (turn 12): it is applied once ledgr can read this session's earlier items." in tx
+          and f"ledgr cannot read this session's earlier items (cold/{lost} is missing); what you sent is kept" in tx
+          and "Tell the user in your reply, and list there the asks you closed." in tx and "ledgr closed" not in tx
+          and "has not applied" not in tx and sc.get("cold", {}).get("file") == lost, tx)
+    r = c.call("open_asks")
+    sc, tx = r.get("structuredContent") or {}, text(r)
+    check("open_asks, unreadable: says it cannot list the earlier asks (not \"no open asks\"), cold in the data, ok",
+          sc.get("ok") is True and sc.get("open") == [] and sc.get("cold", {}).get("error") == missing
+          and "No open or recently dismissed asks" not in tx and f"(cold/{lost} is missing)" in tx
+          and "its earlier asks are not listed here, and what you declare or close is kept and applied once that is fixed" in tx, [sc, tx])
+    r = c.call("parked_questions")
+    check("parked_questions, unreadable: said, cold in the data", "cold" in (r.get("structuredContent") or {})
+          and "its earlier questions are not listed here" in text(r), text(r))
+    # Faulted, but the file reads here: a repeat of a file ask finds its handle at once, yet the session is still
+    # cold after the writer took the event: held (the writer never applies to a cold session), said so.
+    put({SC: {"file": cname, "fault": "not valid JSON"}})
+    r = c.call("declare_asks", {"items": [{"level": "needed", "kind": "decide", "text": "Cold item A1"}]})
+    sc, tx = r.get("structuredContent") or {}, text(r)
+    check("declare_asks, faulted but readable here, a repeat of A1: the handle from the file, yet held and said so",
+          sc.get("handles") == ["A1"] and sc.get("writer") == "held" and sc.get("cold", {}).get("fault") == "not valid JSON"
+          and f"(cold/{cname}: not valid JSON); what you sent is kept" in tx and "- A1 needed/decide" in tx, [sc, tx])
+    cw.stop = True
+    cw.join(2)
+    for n in os.listdir(held_dir):
+        os.unlink(os.path.join(held_dir, n))
+
+    # Integration (2026-11-19): the writer thawed and applied, but its snapshot.json write failed (twice), so the
+    # snapshot still names the session cold, no fault. Gone from the spool and not in cold/held/: applied, never
+    # called held, and no "cannot read" line (the server claims no more than it knows; its handles may read as
+    # pending). The same for resolve_asks.
+    print("== cold sessions: applied, snapshot.json stale")
+    put({SC: {"file": cname, "fault": None}})
+    sw = ColdWriter(stale=True)
+    sw.start()
+    c2 = Client(terminal="t50", wait_ms=800)
+    c2.init()
+    r = c2.call("declare_asks", {"items": [{"level": "needed", "kind": "do", "text": "Applied behind a stale snapshot"}]})
+    sc, tx = r.get("structuredContent") or {}, text(r)
+    check("declare_asks, applied while snapshot.json still names the session cold: writer applied, not held, no cold lines",
+          sc.get("ok") is True and sc.get("writer") == "applied" and "cold" not in sc and "cannot read" not in tx
+          and not spool_files() and (not os.path.isdir(held_dir) or not os.listdir(held_dir)), [sc, tx])
+    r = c2.call("resolve_asks", {"handles": ["A2"]})
+    sc, tx = r.get("structuredContent") or {}, text(r)
+    check("resolve_asks, applied behind a stale snapshot: closed, not kept, no cold lines",
+          sc.get("resolved") == ["A2"] and sc.get("writer") == "applied" and "cold" not in sc and "cannot read" not in tx
+          and "ledgr closed A2" in tx, [sc, tx])
+    sw.stop = True
+    sw.join(2)
+    c2.close()
+
+    print("== cold sessions: no writer running")
+    put({SC: {"file": cname, "fault": "not valid JSON"}})
+    r = c.call("open_asks")
+    sc, tx = r.get("structuredContent") or {}, text(r)
+    check("open_asks, faulted but readable here: listed from the file, with a note; cold in the data",
+          [x["handle"] for x in sc.get("open", [])] == ["A1", "A2", "A6", "A10", "A11", "A12"] and sc.get("cold", {}).get("fault") == "not valid JSON"
+          and f"Note: ledgr's writer cannot read this session's earlier items (cold/{cname}: not valid JSON); they are listed from that file" in tx, tx)
+    r = c.call("declare_asks", {"items": [{"level": "needed", "kind": "do", "text": "Kept while nobody writes"}]})
+    sc, tx = r.get("structuredContent") or {}, text(r)
+    evs = take_events()
+    check("declare_asks, faulted, no writer: the event waits in the spool (timeout), the two lines all the same, ok",
+          sc.get("ok") is True and sc.get("writer") == "timeout" and len(evs) == 1 and sc.get("cold", {}).get("fault") == "not valid JSON"
+          and "what you sent is kept and applied once that is fixed" in tx and "Handles are pending" not in tx, [sc, tx])
+    put({SC: {"file": lost, "fault": None}})
+    r = c.call("resolve_asks", {"handles": ["A2"]})
+    sc, tx = r.get("structuredContent") or {}, text(r)
+    evs = take_events()
+    check("resolve_asks, unreadable here (the writer has not tried yet), no writer: sent by handle, kept, the two lines",
+          sc.get("resolved") == ["A2"] and sc.get("unchecked") == ["A2"] and sc.get("writer") == "timeout"
+          and len(evs) == 1 and evs[0]["item"] is None and evs[0]["handle"] == "A2"
+          and sc.get("cold") == {"file": lost, "fault": None, "error": missing}
+          and f"(cold/{lost} is missing)" in tx, [sc, tx])
+    c.close()
+    put()
+    wjson(snap_path, saved_snap)
+    if saved_store is not None:
+        wjson(os.path.join(DATA, "store.json"), saved_store)
+    shutil.rmtree(cold_dir, ignore_errors=True)
+    take_events()
+
+
 def main():
     os.makedirs(os.path.join(DATA, "terminals"), exist_ok=True)
 
@@ -271,9 +653,11 @@ def main():
           "user personally must do, decide, provide or review" in r.get("instructions", "")
           and "your own subagents" in r.get("instructions", "") and "\"I need\"" in r.get("instructions", ""),
           r.get("instructions"))
-    check("instructions: a writer that is not applying events: say so and list the items in the reply",
-          "When a ledgr tool says its writer is not applying events, the user cannot see these items in ledgr yet: "
-          "say so and list them in your reply as well." in r.get("instructions", ""), r.get("instructions"))
+    check("instructions: a writer that is not applying events, or a session's earlier items ledgr cannot read: say so "
+          "and list the items in the reply",
+          "When a ledgr tool says its writer is not applying events, or that ledgr cannot read this session's earlier "
+          "items, the user cannot see these items in ledgr yet: say so and list them in your reply as well."
+          in r.get("instructions", ""), r.get("instructions"))
     check("notifications/initialized: no response", c.silent())
     r = c.req("initialize", {"protocolVersion": "1999-01-01", "capabilities": {}, "clientInfo": {"name": "x"}})["result"]
     check("initialize: an unknown version is answered with the newest legacy one (2025-11-25)", r.get("protocolVersion") == "2025-11-25", r)
@@ -892,6 +1276,9 @@ def main():
     c.close()
     for p in (cfgp, recp):
         os.unlink(p)
+
+    print("== cold sessions (retention Phase 2): the library")
+    cold_section()
 
     print("== hygiene")
     bad = []

@@ -3,8 +3,12 @@
 // winning; rowModel's handle, pill, text, quick actions and tooltip; the drafted mark (draftPending, an
 // answer not sent: 2026-11-11); entryKey; moveCursor and keepPlace; laneOf and neighbors (the dialog's
 // previous and next, in the panel's order).
+// Cold sessions (retention Phase 2, 2026-11-19): parseCold (a cold file checked as the writer's thaw checks
+// it), touchedOf (the idle clock the session menu says).
 // Then, as text: listing.js is pure (no herdr, no gpui), reader.js holds every Reader member of 5.2, and
-// panel.js extends Reader, defines no `stage` of its own and opens the dialog with detailSpec.
+// panel.js extends Reader, defines no `stage` of its own and opens the dialog with detailSpec; the cold
+// reading (Reader wantCold and its kin) reads only, merges only into a store the copy owns (never the
+// fallback writer's: the panel shows a clone), and merges before overlayLocal.
 // Pure: no Herdr window, no files outside a temp folder.
 //   node tests/test_list.mjs                 (builds its own scratch folder with a stub `herdr`)
 //   node tests/test_list.mjs <folder>        (a folder holding the modules and node_modules/herdr)
@@ -425,17 +429,40 @@ try {
     A.deepEqual(LS.laneOf(st, "item", byH.A4, { archive: [byH.A1] }).ids, [byH.A4.id], "rows that do not hold it: the record alone");
   }
 
+  // ── cold sessions (retention Phase 2, 2026-11-19) ────────────────────────
+  { const { COLD_FORMAT } = await import(`${dir}/store.js`);
+    const CS = "cccccccc-0001-4aaa-8bbb-000000000001", FILE = `${CS}.1794700000000-abc123.json`;
+    const rec = { ledgr: COLD_FORMAT, v: 1, sessionId: CS, at: 1794700000000, session: { sessionId: CS }, items: [ask("A1", { anchor: { sessionId: CS, turn: 3 } })], turns: { 3: { stopAt: 1 } }, n: { items: 1, turns: 1 } };
+    const txt = JSON.stringify(rec);
+    A.equal(COLD_FORMAT, "ledgr-cold", "store.js COLD_FORMAT");
+    A.match(src("listing.js"), /const bad = coldRecordError\(r, sid\);/, "parseCold checks with store.js coldRecordError (the one check thaw and mergeCold make)");
+    A.deepEqual(LS.parseCold(txt, CS, FILE, FILE).record, rec, "a file of the writer's shape: its record");
+    A.ok(LS.parseCold(txt, CS).record, "no file names given: not checked against the stub");
+    A.ok(LS.parseCold(JSON.stringify({ ...rec, turns: undefined }), CS).record, "no turn records: fine");
+    for (const [t, sid, named, why] of [[null, CS, null, /empty/], ["  ", CS, null, /empty/], ["{x", CS, null, /not JSON/], ["null", CS, null, /not a cold file/],
+      [JSON.stringify({ ...rec, ledgr: "ledgr-archive" }), CS, null, /not a cold file/], [JSON.stringify({ ...rec, v: "1" }), CS, null, /cold file version "1", not 1/],
+      [txt, "dddddddd-0001", null, /session cccccccc-0001.*'s, not dddddddd-0001/], [txt, CS, "other.json", /names another file now/], [JSON.stringify({ ...rec, items: null }), CS, null, /no item list/],
+      [JSON.stringify({ ...rec, turns: [1] }), CS, null, /turn records are not a map/],
+      [JSON.stringify({ ...rec, items: [{ ...rec.items[0], anchor: { sessionId: "other" } }] }), CS, null, /another session's/]]) A.match(LS.parseCold(t, sid, FILE, named).error ?? "", why, `refused: ${why}`);
+    // The idle clock as the session menu says it: the store's touchedAt when it has one, else the record's times.
+    const sess = { sessionId: CS, updatedAt: 5, seenAt: 9, promptAt: 7, lastStopAt: 8, touchedAt: 6 };
+    A.equal(LS.touchedOf({ touchedAt: () => 42 }, sess), 42, "store.js touchedAt");
+    A.equal(LS.touchedOf({}, sess), 8, "without it: the latest of the record's own times, never seenAt (a look is not a use)");
+    A.equal(LS.touchedOf({ touchedAt: () => 0 }, sess), 8, "a store that knows nothing of it: the record's");
+    A.equal(LS.touchedOf(null, null), 0); }
+
   // ── the contract, as text (5.2) ──────────────────────────────────────────
   const lsrc = src("listing.js");
   A.ok(!/from "herdr"|from "gpui-|from "\.\/(nav|reader|panel|detail|views|fixtures|writer|spool)\.js"/.test(lsrc), "listing.js is pure: store.js and words.js only");
-  for (const e of ["BR_WORD", "firstLine", "glyphOf", "stateOf", "rowModel", "entryKey", "moveCursor", "keepPlace", "draftPending", "laneOf", "neighbors", "archiveRecords", "archivedCount", "closedAtOf"]) A.ok(new RegExp(`^export (const|function) ${e}\\b`, "m").test(lsrc), `listing.js exports ${e}`);
+  for (const e of ["BR_WORD", "firstLine", "glyphOf", "stateOf", "rowModel", "entryKey", "moveCursor", "keepPlace", "draftPending", "laneOf", "neighbors", "archiveRecords", "archivedCount", "closedAtOf", "parseCold", "touchedOf"]) A.ok(new RegExp(`^export (const|function) ${e}\\b`, "m").test(lsrc), `listing.js exports ${e}`);
   A.ok(!/ARCHIVE_ITEMS =|ARCHIVE_LEGACY =|safe_name.*=>|replace\(\/\[\^A-Za-z0-9\._-\]/.test(lsrc), "listing.js keeps no copy of the archive's names (spool.js's are passed in)");
   const rsrc = src("reader.js");
   A.ok(/^export class Reader \{/m.test(rsrc), "reader.js exports class Reader");
   A.ok(/import \{ writeEvent, archiveDir, within, ARCHIVE_ITEMS, ARCHIVE_LEGACY \} from "\.\/spool\.js";/.test(rsrc), "reader.js takes the archive's folder and names from spool.js (the writer's own), and its time limit");
   for (const name of ["constructor", "startReading", "fallback", "viewStore", "reload", "bump", "overlayLocal", "watchStore", "tickRead", "post", "act", "typeDraft",
     "flushPending", "answerOf", "pasteOn", "demoHow", "stage", "stageAnswers", "copyAnswers", "copyAnswer", "trunkWord", "parentLive", "branchable", "branchLive",
-    "terminalGone", "transcriptOk", "loadPassage", "pinAct", "resume", "pastePending", "sendDraft", "loadArchive", "readArchiveWithin", "demoArchiveOf"]) {
+    "terminalGone", "transcriptOk", "loadPassage", "pinAct", "resume", "pastePending", "sendDraft", "loadArchive", "readArchiveWithin", "demoArchiveOf",
+    "ownStore", "coldOf", "coldDue", "coldLoading", "wantCold", "coldLoaded", "mergeColdAll", "dropColdUnnamed", "trimColdCache", "coldRetry", "coldReset"]) {
     A.ok(new RegExp(`^  (async )?${name}\\(`, "m").test(rsrc), `Reader.${name}`);
   }
   A.ok(/^  constructor\(_?cx, \{ demo/m.test(rsrc), "constructor(cx, {demo})");
@@ -466,8 +493,27 @@ try {
   A.ok(/if \(key && key !== this\.openKey && this\.detailId && open\.overlay === this\.detailId\) this\.pendingCursor = key;/.test(nd),
     "noteDetail: its dialog moving in place (⌘↓ / ⌘↑) moves the cursor (settleCursor applies it when the row is listed)");
   A.ok(/PANEL_IGNORES = new Set\(\[[^\]]*"detail-next", "detail-prev"\]\)/.test(psrc), "the panel ignores detail-next and detail-prev (the dialog's)");
+  // Cold sessions (retention Phase 2): read only; merged before overlayLocal; never into the fallback writer's store.
+  const meth = (text, sig) => (text.match(new RegExp(`^  ${sig} \\{[\\s\\S]*?^  \\}$`, "m")) ?? [""])[0];
+  const rl = meth(rsrc, "async reload\\(\\)");
+  A.ok(rl.indexOf("this.mergeColdAll(st)") > rl.indexOf("this.live = st") && rl.indexOf("this.mergeColdAll(st)") < rl.indexOf("this.overlayLocal()"), "reload: Store.fromText, then mergeColdAll, then overlayLocal");
+  const wc = meth(rsrc, "wantCold\\(sid, cx, \\{ force = false \\} = \\{\\}\\)");
+  A.ok(/fs\.readFile\(coldPath\(file\), "utf8"\)/.test(wc) && /within\(cx, COLD_READ_MS,/.test(wc) && /parseCold\(/.test(wc) && /FIXTURE_COLD\[file\]/.test(wc), "wantCold: fs.readFile of cold/<file>, bounded (within), checked (parseCold); the demo's fixture");
+  for (const name of ["wantCold\\(sid, cx, \\{ force = false \\} = \\{\\}\\)", "coldLoaded\\(cx\\)", "mergeColdAll\\(st = this\\.ownStore\\(\\)\\)", "coldOf\\(sid, st = this\\.viewStore\\(\\)\\)", "dropColdUnnamed\\(st\\)", "trimColdCache\\(\\)"]) {
+    const b = meth(rsrc, name); A.ok(b, `reader.js ${name.replace(/\\/g, "")}`);
+    for (const bad of ["writeTextFile(", "writeFile(", "writeEvent(", "this.post(", "mkdir(", "unlink(", "rm(", "setShared(", "stage(", "run(", "exec("]) A.ok(!b.includes(bad), `${name.replace(/\\/g, "").split("(")[0]} only reads: no ${bad}`);
+  }
+  A.ok(/if \(this\.writer && st === this\.writer\.live\) return 0;/.test(meth(rsrc, "mergeColdAll\\(st = this\\.ownStore\\(\\)\\)")), "mergeColdAll refuses the fallback writer's store");
+  A.ok(/^  ownStore\(\) \{ return this\.demo && this\.demoStore \? this\.demoStore : this\.live; \}$/m.test(rsrc), "ownStore: the demo's or the copy's own (never a writer's)");
+  const cr = meth(rsrc, "coldRetry\\(s, cx\\)"), cz = meth(rsrc, "coldReset\\(s, cx\\)");
+  A.ok(/this\.post\("cold_retry", \{ session_id: sid, file: c\.file \}, null, cx\)/.test(cr) && /if \(fault && !this\.demo\)/.test(cr), "coldRetry posts cold_retry {session_id, file} only for a faulted session");
+  A.ok(/this\.post\("cold_reset", \{ session_id: sid, file: c\.file \}/.test(cz) && /COLD_ARM_MS/.test(cz) && /if \(!c\?\.file \|\| !c\.fault\) return null;/.test(cz), "coldReset: faulted only, two clicks, then cold_reset {session_id, file}");
+  const vs = meth(psrc, "viewStore\\(\\)"), fv = meth(psrc, "fallbackView\\(\\)");
+  A.ok(/return this\.fallbackView\(\) \?\? this\.writer\.live;/.test(vs), "panel viewStore: in fallback mode the clone when a cold record is read");
+  A.ok(/Store\.fromText\(text\)/.test(fv) && /this\.mergeColdAll\(st\)/.test(fv) && !/mergeColdAll\(live\)|mergeColdAll\(w\.live\)|mergeColdAll\(this\.writer\.live\)/.test(fv), "fallbackView merges into a clone made from the writer's text, never its live store");
+  A.ok(/s\.surfaced && shown && this\.seenSent/.test(psrc), "seen posted for a shown surfaced session, a cold one too (store.js: act seen needs no thaw)");
 
-  console.log(`OK: list, ${checks} checks (firstLine, glyphOf, every state word, rowModel pills, text, quick actions and tooltips, the drafted mark, the row's widths at 280 px, entryKey, moveCursor, keepPlace, laneOf and neighbors; the archive's reading rule, rows, count and lane; Reader and panel contract as text), 0 failure(s)`);
+  console.log(`OK: list, ${checks} checks (firstLine, glyphOf, every state word, rowModel pills, text, quick actions and tooltips, the drafted mark, the row's widths at 280 px, entryKey, moveCursor, keepPlace, laneOf and neighbors; the archive's reading rule, rows, count and lane; parseCold and touchedOf; Reader and panel contract as text, cold reading too), 0 failure(s)`);
 } finally {
   if (own) fs.rmSync(dir, { recursive: true, force: true });
 }

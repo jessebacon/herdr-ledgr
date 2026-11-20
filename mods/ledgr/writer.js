@@ -31,6 +31,13 @@
 //     retention.turns move out of store.json into new files under archive/<sid>/, each written once,
 //     read back, and only then removed from the store; a `restore` event gets its archived record
 //     before its batch applies (applyBatch);
+//   - cold sessions (retention Phase 2, 2026-11-19): a session nobody touched for retention.coldDays (7) moves
+//     its items and turn records into ledgr-data/cold/<safe sid>.<ms>-<rand6>.json, written once and read back
+//     before the store names it (freezeRun, from the tick's housekeeping only); a pass brings back every cold
+//     session its events need before it applies them (applyBatch: thaw); a file that cannot be read faults its
+//     session, whose events are kept in cold/held/<safe sid>/ and replayed once it is back, reset or forgotten
+//     (holdEvent, heldIn; coldTick retries); the sweep deletes a file only once the store.json on disk no
+//     longer names it, after a grace (coldSweep). Only this file writes or deletes under cold/;
 //   - track(cx) from the host's render: interrupts and tier-3 status turns (spec 6.5, 2.9);
 //   - respond(cx) from the host's render: answers a panel's shared("ledgr.ping") by re-claiming;
 //   - Phase 2: launches the branches the store accepted from a panel's `branch` event
@@ -55,9 +62,10 @@
 import * as fs from "fs/promises";
 import { randomUUID } from "crypto";
 import { shared, setShared, readTextFile, writeTextFile, watchFolder, agents, terminals, panes, run, exec, hc, openOverlay, appHome, home } from "herdr";
-import { DEFAULTS, LIMITS, loadConfig, dataDir, spoolDir, turnPath, storePath, binDir, agentLabel, panelPlace, panelShown, showPanel, liveHome, disabledSpaces, terminalSpace, textScaleOf, retentionDaysOf } from "./config.js";
-import { Store, isHuman, thresholdOf } from "./store.js";
-import { SpoolReader, readMap, writeAtomic, writeAtomicWith, writeNew, overCap, byteLength, archiveDir, archiveFileOf, archivedRecord, countFailed, listSpool, within, spanWords } from "./spool.js";
+import { DEFAULTS, LIMITS, loadConfig, dataDir, spoolDir, turnPath, storePath, binDir, agentLabel, panelPlace, panelShown, showPanel, liveHome, disabledSpaces, terminalSpace, textScaleOf, retentionDaysOf,
+  coldDaysOf, coldDir, coldPath, heldDir, coldName, COLD_NAME, safeName } from "./config.js";
+import { Store, isHuman, thresholdOf, coldRecordError } from "./store.js";
+import { SpoolReader, readMap, writeAtomic, writeAtomicWith, writeNew, isThere, notFound, overCap, byteLength, archiveDir, archiveFileOf, archivedRecord, countFailed, listSpool, within, spanWords, ARCHIVE_ITEMS } from "./spool.js";
 import { maxDepthOf, hcRunArgs, claudeArgv, resumeArgs, transcriptPathOf } from "./branch.js";
 
 export const ENGINE_FILES = ["config.js", "store.js", "spool.js", "writer.js", "branch.js", "confluence.js"];
@@ -136,6 +144,35 @@ export function archiveChunks(lines, max = ARCHIVE_FILE_MAX) {
   return { chunks: chunks.map((idx) => ({ idx, text: `${idx.map((i) => lines[i]).join("\n")}\n` })), over };
 }
 const rand6 = () => Math.floor(Math.random() * 36 ** 6).toString(36).padStart(6, "0");
+
+// Cold sessions (retention Phase 2, 2026-11-19; docs/design/Retention.md). A freeze run moves at most
+// COLD_RUN_MAX sessions and starts none after COLD_RUN_MS (each await within it limited to saveTimeout); one is
+// due every COLD_EVERY_MS from the tick (coldDue). A pass brings back at most COLD_THAW_MAX sessions and pokes
+// the next pass for the rest. A session whose file could not be read is tried again every COLD_RETRY_MS (and at
+// once on the panel's Try again, `cold_retry`). The sweep keeps a file at least COLD_GRACE_MS after its session
+// came back (a reading copy may be loading it, and the snapshot.json the thaw wrote may still name it) and
+// COLD_KEEP_MS after its session was forgotten, or when a freeze nobody committed left it.
+export const COLD_RUN_MAX = 40;
+export const COLD_RUN_MS = 60000;
+export const COLD_THAW_MAX = 50;
+export const COLD_RETRY_MS = 600000;
+export const COLD_GRACE_MS = 3600000;
+export const COLD_KEEP_MS = 86400000;
+export const COLD_EVERY_MS = 3600000;
+// The unnamed files the sweep reads in one run to prove them redundant (coldSweep step 2), oldest first.
+export const COLD_CHECK_MAX = 4;
+// Reads of one session's cold file that got no answer in a row before the session is faulted (coldPhase).
+export const COLD_TIMEOUT_MAX = 3;
+// The sessions an event names, warm or cold (canFreeze keeps every one of them warm while its pass runs).
+const evSessions = (ev) => [ev?.session_id, ev?.session, ev?.request?.anchor?.sessionId, ev?.parent_session_id, ev?.for_session]
+  .filter((x) => typeof x === "string" && x);
+const sidOf = (ev) => [ev?.session_id, ev?.session, ev?.request?.anchor?.sessionId].find((x) => typeof x === "string" && x) ?? null;
+// A spool file's own name (held copies keep it): an event file, not hidden, not set aside.
+// A map of lists: push v under k.
+const pushTo = (m, k, v) => { if (!m.has(k)) m.set(k, []); m.get(k).push(v); };
+// A Phase 1 turns file's name (writer.js archiveLines: turns-<ms>-<rand6>.jsonl).
+const ARCHIVE_TURNS = /^turns-\d{1,16}-[a-z0-9]{1,16}\.jsonl$/;
+const isEventName = (n) => typeof n === "string" && n.endsWith(".json") && !n.startsWith(".") && !n.startsWith("bad-") && !n.includes("/");
 
 // Replaces path with text past writeTextFile's 1 MiB (spool.js TEXT_FILE_MAX): fs.writeFile to a
 // dotfile beside it, read back and compared (a short write never replaces the file), then `mv -f` over
@@ -268,6 +305,22 @@ export class Writer {
     this.houseMs = 0;
     this.houseRun = null;
     this.preRetention = null;
+    // Cold sessions (Phase 2). wantThaw: sessions to bring back with no event asking (coldDays 0, a "mixed" one
+    // an older build added items beside, a fault whose retry is due). heldSids: the folders under cold/held/
+    // (safe names) that hold events, as last listed or written. heldSkip: held files that do not parse (kept where
+    // they are, not read again; writer.log says so once). coldTried: when each faulted session's file was last tried. passSids:
+    // the sessions the running pass names (canFreeze). coldAt: when the tick's last cold run began.
+    this.wantThaw = new Set();
+    this.heldSids = new Set();
+    this.heldSkip = new Set();
+    this.coldTried = new Map();
+    this.passSids = new Set();
+    this.coldAt = 0;
+    // Cold files the sweep keeps for good (they cannot be read, or hold what store.json lacks): name -> why.
+    this.coldKept = new Map();
+    // Reads of a session's cold file that got no answer, in a row: sid -> {n, at (the last)} (coldPhase;
+    // COLD_TIMEOUT_MAX; forgotten after COLD_RETRY_MS without one).
+    this.coldTimeouts = new Map();
   }
 
   claim() {
@@ -347,6 +400,7 @@ export class Writer {
     this.watching = false;
     this.watchingConfig = false;
     this.house = null;               // a housekeeping run of the old generation writes and removes nothing more
+    this.passSids = new Set();       // the given-up pass keeps no session warm
     return this.gen;
   }
 
@@ -440,12 +494,18 @@ export class Writer {
       const recs = await this.bounded(readMap(), "reading the identity map").catch(() => []);
       if (!live()) return;
       for (const rec of recs) this.live.applyMap(rec);
+      // Cold sessions (Phase 2): the folders of held events, so the first pass replays the ones that may go; a
+      // "mixed" session (an older build added items beside its stub) comes back in that pass too (coldTick). An
+      // unanswered listing keeps the last one known (each cold run lists again).
+      this.mark("cold/held listing");
+      await this.listHeld(gen);
+      if (!live()) return;
       this.mark("save");
       await this.saveStore();
       if (!live()) return;
       this.mark("drain");
       const applied = this.reader.applied;
-      await this.reader.drain(cx);
+      await (this.coldTick(cx, gen) ? this.reader.poke(cx) : this.reader.drain(cx));
       if (!live()) return;
       this.mark("spool/failed");
       this.reader.failed = await this.bounded(countFailed(), "counting spool/failed").catch(() => this.reader.failed);
@@ -515,6 +575,9 @@ export class Writer {
     this.live.spacesOff = new Set(off);
     const ui = { animations: cfg?.ui?.animations !== false, panel: panelPlace(cfg), off, textScale: textScaleOf(cfg) };
     if (this.holds() && JSON.stringify(shared("ledgr.ui") ?? null) !== JSON.stringify(ui)) setShared("ledgr.ui", ui);
+    // retention.coldDays 0 (Settings "never", install.sh --thaw-all): every cold session comes back in the next
+    // pass, poked here (a start pokes its own first pass).
+    if (coldDaysOf(cfg) === 0 && this.thawAll() && this.amWriter() && !this.starting && this.cx?.spawn) this.reader.poke(this.cx);
   }
 
   // What in the config changes the chips: the threshold and the spaces where ledgr is off.
@@ -606,9 +669,9 @@ export class Writer {
       // snapshot.json follows every store change (the extractor reads it at each Stop).
       this.saving("snapshot.json");
       const ok = () => this.current(gen);
-      await writeWhole(`${dataDir()}/snapshot.json`, JSON.stringify(this.live.snapshot()),
+      const snap = await writeWhole(`${dataDir()}/snapshot.json`, JSON.stringify(this.live.snapshot()),
         { cx: this.cx, ms: this.saveTimeout, ok, step: (s) => { if (ok()) this.saving(`snapshot.json ${s}`); } }).catch(() => false);
-      if (gen === this.gen) this.saveStep = null;
+      if (gen === this.gen) { this.saveStep = null; this.snapOk = snap === true; }
       return this.current(gen);
     };
     this.writeChain = this.writeChain.then(go, go);
@@ -697,7 +760,19 @@ export class Writer {
   // the writer, or store.json not written: every file stays), true, or {failed}. Each await is a step
   // of `pass`, and after each one a pass the watchdog gave up (or a lost role) returns false at once:
   // what it applied lives only in a Store the next start no longer uses.
+  // Cold sessions (retention Phase 2): every session the batch names stays warm while the pass runs (passSids,
+  // canFreeze); before anything applies, the held events that may go are read (replayFolders) and every cold
+  // session the events need is brought back, or faulted and its events held (coldPhase); right before the apply
+  // loop, with no await between, no event may need a session still cold (a third round at most, else false and
+  // a poke); after the save, the held copies replayed go (coldDone).
   async applyBatch(batch, cx, pass = null) {
+    if (!this.current(this.gen)) return false;
+    const sids = this.passSids = new Set(batch.flatMap(({ ev }) => evSessions(ev)));
+    try { return await this.applyPass(batch, cx, pass, sids); }
+    finally { if (this.passSids === sids) this.passSids = new Set(); }
+  }
+
+  async applyPass(batch, cx, pass, sids) {
     const gen = this.gen;
     const live = () => this.current(gen);
     if (!live()) return false;
@@ -705,38 +780,36 @@ export class Writer {
     const step = (s) => this.reader.step(pass, s);
     const settles = [], retries = [], launches = [], decisions = [], closes = [], resumes = [];
     let newAsks = false, pending = false;
-    // branch.maxDepth is read again when a branch is asked for (watchConfig also follows the file).
-    if (batch.some(({ ev }) => ev?.type === "branch")) {
-      step("apply: config.json");
-      const cfg = await this.bounded(loadConfig(), "reading config.json").catch(() => this.cfg);
-      if (!live()) return false;
-      this.applyConfig(cfg);
-    }
-    // A `restore` (the dialog's Reopen on an archived item) gets its record here, before the batch
-    // applies: the last line of archive/<sid>/<file> (or a legacy archive/<yyyy-mm>.jsonl) whose id is
-    // ev.item, as ev.record; else ev.record_error. Either way it applies and leaves the spool (store.js
-    // on_restore changes nothing without a record): an event that waited would be one the passes never
-    // apply. Read with fs.readFile (a legacy month file may pass the text-file cap), once per file per batch.
-    const restores = batch.filter(({ ev }) => ev?.type === "restore" && !(ev.id && this.live.d.ingested.includes(ev.id)));
-    if (restores.length) {
-      const texts = new Map();
-      for (const { ev } of restores) {
-        delete ev.record; delete ev.record_error;   // the writer's to attach, never the event's own
-        const loc = archiveFileOf(ev.session_id, ev.file);
-        let got = loc.error ? { error: loc.error } : null;
-        if (!got) {
-          if (!texts.has(loc.rel)) {
-            step(`apply: ${loc.rel}`);
-            texts.set(loc.rel, await this.bounded(fs.readFile(`${dataDir()}/${loc.rel}`, "utf8"), `reading ${loc.rel}`)
-              .catch((e) => ({ error: `${loc.rel} could not be read (${String(e?.message ?? e)})` })));
-            if (!live()) return false;
-          }
-          const text = texts.get(loc.rel);
-          got = typeof text === "string" ? archivedRecord(text, ev.session_id, ev.item) : text;
-        }
-        if (got.record) ev.record = got.record;
-        else { ev.record_error = got.error; this.note = `restore of ${String(ev.item ?? "?").slice(0, 60)}: ${got.error}`; }
+    // ps: the pass's cold state. replays: held events to apply, in name order, ahead of `own` (the batch's).
+    // held: [{e, sid, fresh}] events held this pass. folders: the held folders read. budget: sessions it may
+    // still read (COLD_THAW_MAX). attached: the restores given their record.
+    const ps = { replays: [], own: batch.slice(), held: [], thawed: [], faulted: [], folders: new Set(), tried: new Set(), budget: COLD_THAW_MAX,
+      round: 0, more: false, attached: new WeakSet(), cfgRead: false, sids, batchNames: new Set(batch.map((b) => b.name)) };
+    if (!(await this.replayFolders(ps, gen, step))) return false;
+    let entries;
+    for (;;) {
+      if (!(await this.coldPhase(ps, gen, step))) return false;
+      entries = [...ps.replays, ...ps.own];
+      // branch.maxDepth is read again when a branch is asked for (watchConfig also follows the file).
+      if (!ps.cfgRead && entries.some(({ ev }) => ev?.type === "branch")) {
+        ps.cfgRead = true;
+        step("apply: config.json");
+        const cfg = await this.bounded(loadConfig(), "reading config.json").catch(() => this.cfg);
+        if (!live()) return false;
+        this.applyConfig(cfg);
       }
+      if (!(await this.attachRestores(entries, ps.attached, step, live))) return false;
+      // From here to the apply loop nothing awaits: no event may need a session still cold (one gone cold during
+      // the awaits above, which passSids rules out, or one past this pass's COLD_THAW_MAX). A cold_retry whose
+      // read failed is the store's to drop.
+      const left = this.live.coldNeeded(entries.filter(({ ev }) => ev?.type !== "cold_retry").map(({ ev }) => ev));
+      if (!left.size) break;
+      if (ps.round >= 2 || ps.budget <= 0) {
+        this.note = `${left.size} session(s) to bring back from cold/ first; the next pass goes on`;
+        cx?.timer?.after?.(50, (cx) => { if (this.current(gen)) this.reader.poke(cx); });
+        return false;
+      }
+      ps.round += 1;
     }
     step("apply");
     const failed = [], before = this.live.toText();
@@ -744,7 +817,7 @@ export class Writer {
     for (;;) {
       done = [];
       let threw = false;
-      for (const b of batch) {
+      for (const b of entries) {
         if (failed.some((f) => f.name === b.name)) continue;
         try { done.push({ ev: b.ev, r: this.live.apply(b.ev) }); }
         catch (e) {
@@ -784,6 +857,17 @@ export class Writer {
     // store.json first: the reader unlinks these files only when this resolves true.
     step("save");
     if (!(await this.saveStore()) || !live()) return false;
+    // snapshot.json follows in the save, before the reader unlinks anything. A pass that brought sessions back
+    // tries a snapshot that failed once more: a stale one still names those sessions cold, so the extractor and
+    // the MCP server read them from their files (kept an hour after the thaw) without what this pass applied
+    // (the MCP server says held only when it finds the event's copy in cold/held/, never from the snapshot).
+    if (ps.thawed.length && this.snapOk === false) {
+      step("save: snapshot.json again");
+      const again = await writeWhole(`${dataDir()}/snapshot.json`, JSON.stringify(this.live.snapshot()), { cx: this.cx, ms: this.saveTimeout, ok: live }).catch(() => false);
+      if (!live()) return false;
+      this.snapOk = again === true;
+      if (!this.snapOk) this.note = "snapshot.json not written after sessions came back from cold/; the extractor and the MCP server read them from their files until the next save";
+    }
     this.publish();
     if (pending) cx.timer.after(30500, (cx) => { this.publish(); cx.notify(); });   // pending times out
     this.scheduleSnapshot(cx);
@@ -792,8 +876,229 @@ export class Writer {
     for (const id of closes) this.closeBranch(id, cx);
     for (const sid of resumes) this.resumeSession(sid, cx);
     if (newAsks && this.cfg.surface?.openPanelOnAsks && this.panelShown() === false) showPanel(panelPlace(this.cfg));
+    // Cold, now that store.json holds what this pass applied and held (coldDone).
+    if (!(await this.coldDone(ps, failed, cx, gen, step))) return false;
     cx.notify();
-    return failed.length ? { failed } : true;
+    // The reader's own files only: a replayed held event that threw went to spool/failed in coldDone.
+    const mine = failed.filter((f) => ps.batchNames.has(f.name));
+    return mine.length ? { failed: mine } : true;
+  }
+
+  // A `restore` (the dialog's Reopen on an archived item) gets its record here, before the batch
+  // applies: the last line of archive/<sid>/<file> (or a legacy archive/<yyyy-mm>.jsonl) whose id is
+  // ev.item, as ev.record; else ev.record_error. Either way it applies and leaves the spool (store.js
+  // on_restore changes nothing without a record): an event that waited would be one the passes never
+  // apply. Read with fs.readFile (a legacy month file may pass the text-file cap), once per file per batch.
+  // `attached`: the events already given theirs (a held restore replayed in a later round of the pass gets
+  // its own then). False when the pass was given up.
+  async attachRestores(entries, attached, step, live) {
+    const restores = entries.filter(({ ev }) => ev?.type === "restore" && !attached.has(ev) && !(ev.id && this.live.d.ingested.includes(ev.id)));
+    if (!restores.length) return true;
+    const texts = new Map();
+    for (const { ev } of restores) {
+      attached.add(ev);
+      delete ev.record; delete ev.record_error;   // the writer's to attach, never the event's own
+      const loc = archiveFileOf(ev.session_id, ev.file);
+      let got = loc.error ? { error: loc.error } : null;
+      if (!got) {
+        if (!texts.has(loc.rel)) {
+          step(`apply: ${loc.rel}`);
+          texts.set(loc.rel, await this.bounded(fs.readFile(`${dataDir()}/${loc.rel}`, "utf8"), `reading ${loc.rel}`)
+            .catch((e) => ({ error: `${loc.rel} could not be read (${String(e?.message ?? e)})` })));
+          if (!live()) return false;
+        }
+        const text = texts.get(loc.rel);
+        got = typeof text === "string" ? archivedRecord(text, ev.session_id, ev.item) : text;
+      }
+      if (got.record) ev.record = got.record;
+      else { ev.record_error = got.error; this.note = `restore of ${String(ev.item ?? "?").slice(0, 60)}: ${got.error}`; }
+    }
+    return true;
+  }
+
+  // ── cold sessions in a pass (retention Phase 2) ───────────────────────
+  // The held events that may replay now, before the pass's first round: every folder under cold/held/
+  // (heldSids) whose session is not faulted (back, reset, forgotten, or never cold). False when given up or a
+  // read got no answer.
+  async replayFolders(ps, gen, step) {
+    if (!this.heldSids.size) return true;
+    const faulted = new Set(this.live.coldFaults().map((f) => safeName(f.sid)));
+    for (const folder of [...this.heldSids].sort()) {
+      if (faulted.has(folder)) continue;
+      if ((await this.heldIn(folder, ps, gen, step)) === null) return false;
+    }
+    return true;
+  }
+
+  // One round of a pass's cold work. Every cold session the events need (store.js coldNeeded), and in the first
+  // round every one in wantThaw, is read (readCold) and brought back (store.js thaw), at most COLD_THAW_MAX in the
+  // pass; one whose file cannot be read is faulted (store.js coldFault), and a faulted one is read again only
+  // when its retry is due (COLD_RETRY_MS since coldTried) or the batch carries its cold_retry. A session brought
+  // back has its held events read and put ahead of the batch (heldIn). Then every event that needs a faulted
+  // session is held (holdEvent): copied to cold/held/<that session>/, confirmed, and left out of the apply; the
+  // reader still unlinks its spool file, the copy being its keeper now (a replayed one held again under another
+  // session loses its old copy in coldDone). False (nothing applied, every spool file stays) when a read got no
+  // answer, a copy could not be made, or the pass was given up.
+  async coldPhase(ps, gen, step) {
+    const live = () => this.current(gen), st = this.live, now = Date.now();
+    // A cold_retry (the panel's Try again) asks for a read now; one naming a file the stub no longer names (a thaw
+    // or a newer freeze since the panel looked) is already answered, and asks for nothing.
+    const stale = ({ ev }) => ev?.type === "cold_retry" && typeof ev.file === "string" && ev.file !== st.d.sessions[sidOf(ev)]?.cold?.file;
+    const all = () => [...ps.replays, ...ps.own].filter((e) => !stale(e));
+    const retry = new Set(all().filter(({ ev }) => ev?.type === "cold_retry").map(({ ev }) => sidOf(ev)).filter(Boolean));
+    const due = (sid) => {
+      const f = st.d.sessions[sid]?.cold?.fault;
+      return !f || retry.has(sid) || now - (this.coldTried.get(sid) ?? (Number(f.at) || 0)) >= COLD_RETRY_MS;
+    };
+    for (const sid of [...this.wantThaw]) if (!st.isCold(sid)) this.wantThaw.delete(sid);
+    const evNeed = st.coldNeeded(all().map(({ ev }) => ev)), need = [...evNeed];
+    if (ps.round === 0) for (const sid of this.wantThaw) if (!evNeed.has(sid)) need.push(sid);
+    for (const sid of need) {
+      if (!st.isCold(sid)) continue;
+      if (ps.wantStop && !evNeed.has(sid)) continue;           // a wanted read got no answer this pass
+      if (!due(sid)) { this.wantThaw.delete(sid); continue; }   // the tick brings it back when its retry is due
+      if (ps.budget <= 0) { ps.more = true; break; }
+      ps.budget -= 1;
+      ps.sids.add(sid);
+      ps.tried.add(sid);
+      const file = st.d.sessions[sid].cold.file, sid8 = sid.slice(0, 8);
+      step(`apply: cold ${sid8}`);
+      let r = await this.readCold(sid, file, (s) => step(`apply: cold ${sid8} ${s}`));
+      if (!live()) return false;
+      this.coldTried.set(sid, Date.now());
+      // Reads that get no answer, in a row, for this session (integration, 2026-11-19, second review): the third
+      // faults it like any unreadable file, so its events are held and the rest of the spool moves. Three bounded
+      // reads (saveTimeout each, 20 s) a pass or more apart: a slow disk gets two more chances, and the batch waits
+      // about as long as the watchdog's one restart (PASS_STUCK_MS) before it moves.
+      // A count whose last timeout is older than COLD_RETRY_MS starts again (two today and one next week are not
+      // three in a row).
+      if (r.transient) {
+        const was = this.coldTimeouts.get(sid), t0 = Date.now();
+        const n = (was && t0 - was.at <= COLD_RETRY_MS ? was.n : 0) + 1;
+        this.coldTimeouts.set(sid, { n, at: t0 });
+        if (n >= COLD_TIMEOUT_MAX) r = { error: `cold/${file} got no answer to ${n} reads in a row (${r.transient})` };
+      }
+      if (!r.transient) this.coldTimeouts.delete(sid);
+      if (r.transient) {
+        this.note = `${r.transient}; tried again at the next pass`;
+        if (evNeed.has(sid)) return false;   // an event needs it: the pass waits, every spool file stays
+        // Only wanted (wantThaw): the events go on, and no other wanted read this pass (integration, 2026-11-19:
+        // up to COLD_THAW_MAX reads timing out one after another would hold the pass for minutes); the tick
+        // (coldTick) tries again.
+        ps.wantStop = true;
+        continue;
+      }
+      // The stub is the one read: only a pass changes it, and this is the pass.
+      const t = r.record ? st.thaw(sid, r.record, file, Date.now()) : null;
+      if (!t?.ok) {
+        const error = String(r.error ?? t?.error ?? "not brought back");
+        const was = st.d.sessions[sid].cold?.fault?.error ?? null;
+        st.coldFault(sid, error, Date.now());
+        this.wantThaw.delete(sid);
+        ps.faulted.push({ sid, file, error });
+        if (was !== error) {
+          this.log(`cold: ${sid8}'s cold/${file} cannot be read (${error}); its events are kept in cold/held/${safeName(sid)}/ `
+            + "until Try again, Use without its older items, or Forget (tried again every 10 min)");
+        }
+        continue;
+      }
+      this.coldTried.delete(sid);
+      ps.thawed.push({ sid, file, items: Number(t.items) || 0, turns: Number(t.turns) || 0, why: retry.has(sid) ? "Try again" : null });
+      if ((await this.heldIn(safeName(sid), ps, gen, step)) === null) return false;
+    }
+    const faulted = (sid) => st.isCold(sid) && Boolean(st.d.sessions[sid]?.cold?.fault);
+    for (const list of [ps.replays, ps.own]) {
+      for (let i = 0; i < list.length; i++) {
+        const e = list[i];
+        if (e.ev?.type === "cold_retry") continue;   // never held: its read was tried (the store drops it)
+        const c = [...st.coldNeeded([e.ev])];
+        const own = sidOf(e.ev);
+        const f = own && c.includes(own) && faulted(own) ? own : c.find(faulted);
+        if (!f) continue;   // cold, not faulted: the next round brings it back
+        const r = await this.holdEvent(f, e, gen, step);
+        if (!live()) return false;
+        if (!r) { this.note = `${e.name} could not be kept in cold/held/${safeName(f)}/; it stays in the spool`; return false; }
+        list.splice(i--, 1);
+        ps.held.push({ e, sid: f, fresh: r === "new" });
+        this.heldSids.add(safeName(f));
+        if (r === "new") st.coldFault(f, null, Date.now(), 1);   // held alone: no try
+      }
+    }
+    return true;
+  }
+
+  // The events held under cold/held/<folder>/ (heldEvents) into the pass (ps.replays, name order); one whose
+  // spool file is in the batch too (a copy made before a save that failed, or a crash before the spool file
+  // went) is one event, applied once, and so is the same name in two folders (`also`: its other copies). The
+  // list read, [] for a folder already read this pass, or null (given up, or a read got no answer).
+  async heldIn(folder, ps, gen, step) {
+    if (ps.folders.has(folder)) return [];
+    ps.folders.add(folder);
+    const got = await this.heldEvents(folder, gen, step);
+    if (got === null) return null;
+    for (const e of got) {
+      const twin = ps.replays.find((x) => x.name === e.name);
+      if (twin) { twin.also.push(e.path); continue; }
+      const i = ps.own.findIndex((b) => b.name === e.name);
+      if (i >= 0) { ps.own.splice(i, 1); e.spool = true; }
+      ps.replays.push(e);
+      for (const sid of evSessions(e.ev)) ps.sids.add(sid);
+    }
+    ps.replays.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    return got;
+  }
+
+  // After the pass's save (store.json holds what it applied, and the held counts). The held copies it replayed go:
+  // applied (or dropped by the store, a forgotten session's), or held again under another session (that copy is
+  // confirmed); one that threw goes to spool/failed first (the reader's quarantine, with the held copy's path),
+  // unless its spool twin is the reader's to keep there (this copy replays and follows it next time). Emptied
+  // folders are removed. The sessions brought back leave wantThaw. Sessions still to bring back that this pass
+  // did not try (past its COLD_THAW_MAX), or a held folder that may replay now (a Forget or a reset in this pass):
+  // a poke (the next round of the reader's loop). One it tried and could not read in time waits for the tick
+  // (coldTick), so a host that does not answer reads gets one try a minute, not a loop. False when given up
+  // meanwhile (what is left replays later and is skipped as ingested).
+  async coldDone(ps, failed, cx, gen, step) {
+    const live = () => this.current(gen);
+    const threw = new Map(failed.map((f) => [f.name, f]));
+    const gone = [];
+    for (const e of ps.replays) {
+      if (!threw.has(e.name)) { gone.push(e.path, ...e.also); continue; }
+      if (e.spool) continue;
+      step(`apply: held ${e.name} to spool/failed`);
+      const kept = await this.bounded(this.reader.quarantine(e, threw.get(e.name), live), `keeping ${e.name} in spool/failed`).catch(() => false);
+      if (!live()) return false;
+      if (kept) gone.push(...e.also);
+    }
+    for (const { e, sid } of ps.held) {
+      if (!e.held) continue;
+      const keep = `${heldDir(sid)}/${e.name}`;
+      gone.push(...[e.path, ...e.also].filter((p) => p !== keep));
+    }
+    for (const p of gone) {
+      step(`apply: held ${base(p)} done`);
+      await this.bounded(fs.unlink(p), `removing ${base(p)} from cold/held`).catch(() => {});
+      if (!live()) return false;
+    }
+    for (const folder of ps.folders) {
+      step(`apply: held ${folder.slice(0, 8)} done`);
+      if (await this.bounded(fs.rmdir(`${coldDir()}/held/${folder}`), "removing a held folder").then(() => true, () => false)) this.heldSids.delete(folder);
+      if (!live()) return false;
+    }
+    for (const t of ps.thawed) this.wantThaw.delete(t.sid);
+    const fresh = ps.held.filter((h) => h.fresh);
+    if (ps.thawed.length || fresh.length || ps.replays.length) {
+      const bits = [];
+      if (ps.thawed.length) bits.push(`${ps.thawed.length} session(s) back from cold/ (${ps.thawed.slice(0, 6).map((t) => `${t.sid.slice(0, 8)}: ${t.items} item(s), ${t.turns} turn record(s)${t.why ? `, ${t.why}` : ""}`).join("; ")})`);
+      if (ps.replays.length) bits.push(`${ps.replays.length} held event(s) replayed${threw.size ? ` (${ps.replays.filter((e) => threw.has(e.name)).length} threw: spool/failed)` : ""}`);
+      if (fresh.length) bits.push(`${fresh.length} event(s) held for ${[...new Set(fresh.map((h) => h.sid.slice(0, 8)))].join(", ")}`);
+      this.log(`cold: ${bits.join("; ")}`);
+    }
+    const st = this.live, faulted = new Set(st.coldFaults().map((f) => safeName(f.sid)));
+    // A wanted read that got no answer this pass (ps.wantStop) leaves the other wanted ones to the tick, too.
+    const more = ps.more || (!ps.wantStop && [...this.wantThaw].some((sid) => st.isCold(sid) && !st.d.sessions[sid].cold.fault && !ps.tried.has(sid)))
+      || [...this.heldSids].some((n) => !faulted.has(n) && !ps.folders.has(n));
+    if (more && cx) this.reader.poke(cx);
+    return true;
   }
 
   panelShown() { return panelShown(panelPlace(this.cfg)); }
@@ -876,7 +1181,8 @@ export class Writer {
         note = j ? (j.ok ? `${j.asks} ask${j.asks === 1 ? "" : "s"} extracted (${j.source})` : j.error || "extraction failed")
           : `exited ${r.code}${r.stderr ? `: ${r.stderr.trim().slice(0, 160)}` : ""}`;
       } catch (e) { note = `could not run: ${String(e?.message ?? e)}`; }
-      if (!this.amWriter()) return;
+      // A cold session (Phase 2) gets no turn record beside its stub: its `asks` event brings it back.
+      if (!this.amWriter() || this.live.isCold(sid)) return;
       rec().retry = { at: Date.now(), state: ok ? "done" : "failed", note };
       this.commit(cx);
     });
@@ -1070,19 +1376,29 @@ export class Writer {
 
   // From start (at its end) and every tick: a due run as its own task, so neither waits for it. Returns the
   // run's promise (it resolves with the run's tally, or null), or null when none is due.
-  houseKick(cx) {
-    const now = Date.now(), why = this.houseDue(now);
-    if (!why || !cx?.spawn) return null;
+  // Cold sessions (Phase 2): from the tick only ({tick: true}), a cold run (coldHouse: freeze, then sweep) is due
+  // every COLD_EVERY_MS (coldDue); it goes in the same run, after Phase 1's when both are due, so one run holds
+  // the housekeeping at a time (this.house) and the watchdog sees it move (kind "house"). Its result is the
+  // tally's `cold` ({cold} alone when Phase 1 was not due).
+  houseKick(cx, { tick = false } = {}) {
+    const now = Date.now(), why = this.houseDue(now), cold = tick && this.coldDue(now);
+    if ((!why && !cold) || !cx?.spawn) return null;
     const gen = this.gen;
-    this.houseTry = now;
-    this.house = { gen, at: now, step: "queued", since: now, why };
+    if (why) this.houseTry = now;
+    if (cold) this.coldAt = now;
+    this.house = { gen, at: now, step: "queued", since: now, why: why ?? "cold" };
     let end = null;
     const run = this.houseRun = new Promise((r) => { end = r; });
     cx.spawn(async (cx) => {
       let tally = null;
-      try { tally = await this.housekeep(cx, gen, why); }
-      catch (e) {
-        if (gen === this.gen) { this.note = `housekeeping: ${String(e?.message ?? e)}`; this.log(`housekeeping (${why}) failed: ${String(e?.message ?? e)}`); }
+      try {
+        if (why) tally = await this.housekeep(cx, gen, why);
+        if (cold && this.current(gen) && !this.starting) {
+          const c = await this.coldHouse(cx, gen);
+          tally = tally ? Object.assign(tally, { cold: c }) : { cold: c };
+        }
+      } catch (e) {
+        if (gen === this.gen) { this.note = `housekeeping: ${String(e?.message ?? e)}`; this.log(`housekeeping (${why ?? "cold"}) failed: ${String(e?.message ?? e)}`); }
       } finally {
         if (this.house?.gen === gen) { this.house = null; if (this.claimedPass) this.beat(); }
         end(tally);
@@ -1221,11 +1537,416 @@ export class Writer {
     return done;
   }
 
+  // ── cold sessions: files, holding, freezing, the sweep (retention Phase 2) ──
+  // A session's cold file, read and checked (store.js coldRecordError: the format, the version, the session,
+  // its items): {record}; {error} when it is missing, unreadable, unparseable or not this session's (the
+  // session is then faulted); {transient} when the read, or the listing that tells missing from unreadable, got
+  // no answer within saveTimeout (the pass waits and tries again). fs.readFile: no 1 MiB cap. A name that is
+  // not a cold file's (a hand-edited store) is an error, never a path.
+  async readCold(sid, file, step = null) {
+    const mark = (s) => { try { step?.(s); } catch { /* diagnostics only */ } };
+    // A name beginning with "." only as this session's own (one frozen before freezeBlocker refused such ids).
+    const m = typeof file === "string" ? COLD_NAME.exec(file) : null;
+    if (!m || file.includes("/") || file.includes("\\") || (file.startsWith(".") && m[1] !== safeName(sid))) {
+      return { error: `not a cold file name: ${JSON.stringify(file ?? null).slice(0, 80)}` };
+    }
+    const path = coldPath(file);
+    let text;
+    try { mark("read"); text = await this.bounded(fs.readFile(path, "utf8"), `reading cold/${file}`); }
+    catch (e) {
+      // Only a read that got no answer is transient (the pass waits and tries again; coldPhase faults the session
+      // after COLD_TIMEOUT_MAX of them in a row). Any other error faults the session, which holds its events and
+      // lets every other session's apply (integration, 2026-11-19, second review: a lasting error, a file at mode
+      // 000, an I/O error, or a "not found" in words notFound does not know, must not hold the whole spool). A
+      // listing tells "missing" from "there but not readable", so the words never invite "Use without its older
+      // items" for a file that is there; Try again and the tick's retry read it again.
+      if (e?.timedOut) return { transient: String(e.message) };
+      const why = String(e?.message ?? e).slice(0, 160);
+      let there = null;
+      try { mark("listing"); there = await isThere(path, { cx: this.cx, ms: this.saveTimeout }); }
+      catch (e2) { if (e2?.timedOut) return { transient: String(e2.message) }; }
+      if (there === false) return { error: `cold/${file} is missing` };
+      return { error: there ? `cold/${file} is there but could not be read (${why})` : `cold/${file} could not be read (${why})` };
+    }
+    let record;
+    try { record = JSON.parse(text); } catch (e) { return { error: `cold/${file} does not parse (${String(e?.message ?? e).slice(0, 120)})` }; }
+    const bad = coldRecordError(record, sid);
+    return bad ? { error: `cold/${file}: ${bad}` } : { record };
+  }
+
+  // Event b (a spool file's {name, ev, text}, or a replayed held one) kept under cold/held/<safe sid>/<its own
+  // name>: created (spool.js writeNew, create-only), read back. "new"; "same" when the copy is there already with
+  // the same text (made before a save that failed, or b is that copy); false when it could not be made (the pass
+  // stops, the spool keeps the file). A copy there that is not the event and does not parse was never confirmed
+  // (its spool file still exists): removed and written again, once. Each await limited, a step `apply: hold <name>`.
+  async holdEvent(sid, b, gen = this.gen, mark = null) {
+    const ok = () => this.current(gen);
+    const step = (s) => { try { mark?.(s); } catch { /* diagnostics only */ } };
+    const folder = safeName(sid), dir = heldDir(sid), path = `${dir}/${b?.name}`;
+    if (b?.held && b.path === path) return "same";
+    if (!isEventName(b?.name) || typeof b.text !== "string") return false;
+    step(`apply: hold ${b.name}`);
+    await this.bounded(fs.mkdir(dir, { recursive: true }), `making cold/held/${folder}`).catch(() => {});
+    if (!ok()) return false;
+    for (let i = 0; i < 2; i++) {
+      const err = await writeNew(path, b.text, { cx: this.cx, ms: this.saveTimeout, ok, drop: true, step: (s) => step(`apply: hold ${b.name}: ${s}`) });
+      if (!ok()) return false;
+      if (!err) return "new";
+      const cur = await this.bounded(fs.readFile(path, "utf8"), `reading cold/held/${folder}/${b.name}`).catch(() => null);
+      if (!ok()) return false;
+      if (cur === b.text) return "same";
+      let parses = false;
+      try { JSON.parse(cur); parses = true; } catch { /* a broken copy */ }
+      if (cur === null || parses || i) { this.note = `${b.name} not kept in cold/held/${folder}/: ${err}`; return false; }
+      step(`apply: hold ${b.name}: removing a broken copy`);
+      await this.bounded(fs.unlink(path), `removing cold/held/${folder}/${b.name}`).catch(() => {});
+      if (!ok()) return false;
+    }
+    return false;
+  }
+
+  // The events held for a session (its id, or its folder's safe name: safeName keeps a safe name as it is), in
+  // name order: [{name, ev, text, held: true, path, folder, also: []}]; [] for no folder; null when given up or
+  // a read got no answer. Each read is a step `apply: held <name>`. A file that does not parse is skipped and
+  // kept (heldSkip; writer.log says so once); a folder with nothing to replay leaves heldSids.
+  async heldEvents(sid, gen = this.gen, mark = null) {
+    const step = (s) => { try { mark?.(s); } catch { /* diagnostics only */ } };
+    const folder = safeName(sid), dir = `${coldDir()}/held/${folder}`;
+    step(`apply: held ${folder.slice(0, 8)}`);
+    let names;
+    try { names = await this.bounded(fs.readdir(dir), `listing cold/held/${folder}`); }
+    catch (e) { if (!this.current(gen) || e?.timedOut) return null; this.heldSids.delete(folder); return []; }
+    if (!this.current(gen)) return null;
+    const out = [];
+    for (const name of names.map(base).filter(isEventName).sort()) {
+      if (this.heldSkip.has(`${folder}/${name}`)) continue;
+      const path = `${dir}/${name}`;
+      step(`apply: held ${name}`);
+      let text;
+      try { text = await this.bounded(fs.readFile(path, "utf8"), `reading cold/held/${folder}/${name}`); }
+      catch (e) { if (!this.current(gen) || e?.timedOut) return null; continue; }   // gone meanwhile
+      if (!this.current(gen)) return null;
+      let ev = null;
+      try { ev = JSON.parse(text); } catch { /* below */ }
+      if (!ev || typeof ev !== "object" || Array.isArray(ev)) {
+        this.heldSkip.add(`${folder}/${name}`);
+        this.log(`cold: cold/held/${folder}/${name} does not parse; kept there, not replayed`);
+        continue;
+      }
+      out.push({ name, ev, text, held: true, path, folder, also: [] });
+    }
+    if (!out.length) this.heldSids.delete(folder);
+    return out;
+  }
+
+  // The folders under cold/held/ (heldSids): at start and in each cold run. True when listed (none: an empty set);
+  // false when the listing got no answer (the last known stays) or this generation was given up.
+  async listHeld(gen = this.gen) {
+    let names;
+    try { names = await this.bounded(fs.readdir(`${coldDir()}/held`), "listing cold/held"); }
+    catch (e) { if (e?.timedOut || !this.current(gen)) return false; names = []; }
+    if (!this.current(gen)) return false;
+    // Hidden entries (.DS_Store and the like) are skipped, but not a known session's folder (an id beginning with
+    // "." frozen before freezeBlocker refused it: its held events must still replay).
+    const known = new Set([...Object.keys(this.live.d.sessions), ...Object.keys(this.live.d.forgotten)].map(safeName));
+    this.heldSids = new Set(names.map(base).filter((n) => n && (!n.startsWith(".") || known.has(n))));
+    return true;
+  }
+
+  // The writer's own reasons a session stays warm (store.js planFreeze and commitFreeze ask, with the store's):
+  // an agent in a live pane mapped to it (terminals() lists its terminal live, and the store maps that terminal
+  // to it); the open detail dialog shows it (shared("ledgr.detail").open: its typed answer lives in that copy);
+  // the running pass names it (passSids); or it is to be brought back (wantThaw). And none while
+  // retention.coldDays is 0 in the config in hand: asked again at the commit, so a run planned before Settings
+  // "never" or install.sh --thaw-all wrote 0 commits nothing (its files are removed at once), and --thaw-all's
+  // "no cold sessions" stays true.
+  canFreeze(sid) {
+    if (coldDaysOf(this.cfg) === 0) return false;
+    if (this.passSids.has(sid) || this.wantThaw.has(sid)) return false;
+    const open = shared("ledgr.detail")?.open;
+    if (open && typeof open === "object" && open.session === sid) return false;
+    const s = this.live.d.sessions[sid], t = s?.terminal;
+    if (t && this.live.d.terminals[t]?.sessionId === sid) {
+      const k = (terminals() ?? []).find((x) => x?.address === t);
+      if (k && (!k.state || k.state === "live")) return false;
+    }
+    return true;
+  }
+
+  // Due from the tick (houseKick): the holder, no run of this generation going, not starting, Phase 1's first run
+  // done (d.retention v 1), and none begun for COLD_EVERY_MS (in memory: after a relaunch the first tick runs one).
+  coldDue(now = Date.now()) {
+    if (this.retired || !this.amWriter() || this.starting || (this.house && this.house.gen === this.gen)) return false;
+    if (this.live.d.retention?.v !== 1) return false;
+    return now - this.coldAt >= COLD_EVERY_MS;
+  }
+
+  // The tick's cold run (houseKick, after Phase 1's when both are due): cold/held listed again, a freeze run,
+  // the sweep. {freeze, sweep}, or null when given up.
+  async coldHouse(cx, gen) {
+    if (cx) this.cx = cx;
+    this.houseStep(gen, "cold/held listing");
+    await this.listHeld(gen);
+    if (!this.current(gen) || this.starting) return null;
+    const freeze = await this.freezeRun(gen);
+    if (!this.current(gen)) return null;
+    const sweep = await this.coldSweep(gen);
+    if (!this.current(gen)) return null;
+    return { freeze, sweep };
+  }
+
+  // A freeze run (coldHouse, from the tick's housekeeping only; never in a start, never in a pass, and it never
+  // holds a pass back: drains apply meanwhile). Skipped while starting, with retention.coldDays 0, before Phase 1's
+  // first run, and on a config.json not read as it is (its defaults could freeze where the person said never).
+  // 1. The plan, synchronously (store.js planFreeze: idle past coldDays, the store's rules and canFreeze, oldest
+  //    idle first, at most COLD_RUN_MAX). 2. cold/ made. 3. Per session, none begun after COLD_RUN_MS: its file
+  //    cold/<safe sid>.<ms>-<rand6>.json written once (spool.js writeNew: create-only, or past the cap fs.writeFile
+  //    to that new name; read back; a file not confirmed removed). 4. Synchronously, right after the last await
+  //    and still this generation's (config.json read again just before: coldDays 0 meanwhile commits nothing):
+  //    store.js commitFreeze checks each session again (rules, canFreeze, and its
+  //    items and turn records serialized as planned: a drain that applied an event meanwhile keeps it warm) and
+  //    only then takes them out and names the file; the files not committed are removed. 5. Saved.
+  // Abandoned at any await: nothing names a file before step 4, so a file that landed (or lands late) is an
+  // orphan the sweep deletes only once a read finds an identical copy of all of it (coldSweep); after step 4
+  // the commit lives in a store the restart does not use (it reads store.json, where the sessions are warm). A
+  // save that fails leaves memory ahead of disk, and the next save writes the stubs. Returns its tally, or null
+  // when given up.
+  async freezeRun(gen) {
+    const ok = () => this.current(gen);
+    const step = (s) => this.houseStep(gen, s);
+    if (!ok() || this.starting) return null;
+    const days = coldDaysOf(this.cfg);
+    const cfgOk = this.cfg?._source === "file" || (this.cfg?._source === "defaults" && !this.cfg?._error);
+    if (!days || !cfgOk || this.live.d.retention?.v !== 1) return { skipped: !days ? "coldDays 0" : !cfgOk ? "config.json not read" : "retention not run yet" };
+    const canFreeze = (sid) => this.canFreeze(sid);
+    step("freeze: plan");
+    const plan = this.live.planFreeze(days, Date.now(), { canFreeze, max: COLD_RUN_MAX });
+    const t = { planned: plan.length, frozen: [], files: 0, bytes: 0, largest: 0, failed: [], removed: 0, left: 0, saved: false, before: this.storeText?.length ?? 0 };
+    if (!plan.length) return t;
+    step("freeze: making cold/");
+    await this.bounded(fs.mkdir(coldDir(), { recursive: true }), "making cold/").catch(() => {});
+    if (!ok()) return null;
+    const begun = Date.now(), written = [];
+    for (const p of plan) {
+      if (Date.now() - begun > COLD_RUN_MS) { t.left = plan.length - written.length - t.failed.length; break; }
+      const file = coldName(p.sid, p.record.at, rand6()), text = JSON.stringify(p.record), sid8 = String(p.sid).slice(0, 8);
+      step(`freeze ${sid8}`);
+      const err = await writeNew(coldPath(file), text, { cx: this.cx, ms: this.saveTimeout, ok, drop: true, step: (s) => step(`freeze ${sid8}: ${s}`) });
+      if (!ok()) return null;   // a file that landed is an unreferenced orphan (the sweep's)
+      if (err) { t.failed.push(`${file}: ${err}`); continue; }
+      written.push({ ...p, file });
+      const n = byteLength(text);
+      t.files += 1; t.bytes += n; t.largest = Math.max(t.largest, n);
+    }
+    // config.json read again before the commit (D, install.sh --thaw-all): a coldDays 0 written while the files were
+    // written makes canFreeze say no, so nothing commits after --thaw-all saw no cold session. A read that fails
+    // keeps the config in hand.
+    if (written.length) {
+      step("freeze: config.json");
+      const cfg = await this.bounded(loadConfig(), "reading config.json").catch(() => null);
+      if (!ok()) return null;
+      if (cfg && !cfg._error) this.applyConfig(cfg);
+    }
+    // Nothing awaited since the last ok(): the commit is this generation's, on the store the plan was made from.
+    t.frozen = this.live.commitFreeze(written, Date.now(), { canFreeze }) ?? [];
+    for (const w of written.filter((x) => !t.frozen.includes(x.sid))) {
+      step(`freeze: removing ${w.file}`);
+      await this.bounded(fs.unlink(coldPath(w.file)), `removing cold/${w.file}`).then(() => { t.removed += 1; }, () => {});
+      if (!ok()) return null;
+    }
+    if (t.frozen.length) {
+      step("save");
+      t.saved = await this.saveStore();
+      if (!ok()) return null;
+    }
+    if (t.files || t.failed.length) {
+      this.log(`cold: ${t.frozen.length} session(s) moved out of store.json into cold/ (${t.files} file(s), ${t.bytes} bytes, the largest ${t.largest}); `
+        + `store.json ${t.before} -> ${this.storeText?.length ?? "?"} characters${t.saved || !t.frozen.length ? "" : " (not saved yet)"}`
+        + `${t.removed ? `; ${t.removed} changed meanwhile, kept warm, their files removed` : ""}${t.left ? `; ${t.left} left for the next run (${COLD_RUN_MS / 1000} s)` : ""}`
+        + `${t.failed.length ? `; ${t.failed.length} file(s) not written, those sessions stay (${t.failed[0]})` : ""}`);
+    }
+    return t;
+  }
+
+  // The sweep (coldHouse, after the freeze). cold/ listed. Memory ahead of disk (a thaw or a freeze not saved, or
+  // simply the chips' diag, which publish() adds after every pass's save): saved first, and decided only if memory
+  // is still the text written (a save that failed, or a pass that changed memory meanwhile: no sweep this run).
+  // Then (integration, 2026-11-19: a cold file goes only when it is provably redundant; store.json can go back in
+  // time, a corrupt one set aside or one restored from a copy, and an unnamed file may then hold the only copy):
+  // 1. By name, synchronously (store.js coldGarbage): a file its session's record lists as thawed, COLD_GRACE_MS
+  //    after the thaw; a forgotten session's, COLD_KEEP_MS after the Forget. Each removed (limited); the thawed
+  //    lists then trimmed (trimThawed).
+  // 2. By content, at most COLD_CHECK_MAX a run (store.js coldUnproven: any other unnamed file of one recorded
+  //    session that is not faulted, written over COLD_KEEP_MS ago, oldest first): the file read and checked
+  //    (readCold), then compared with store.json as on disk (storeText), the session's named cold file and its
+  //    Phase 1 archive files (store.js coldLacks); removed only when nothing in it is missing there. A file that
+  //    cannot be read, or holds items or turn records store.json lacks, stays for good ("recoverable": writer.log
+  //    says so once, ./install.sh --check lists it; Retention.md 10.8 says how to bring it back).
+  // cold/held/ is never swept. `now` for the tests. Returns {removed, kept, skipped?}, or null when given up.
+  async coldSweep(gen, now = null) {
+    const ok = () => this.current(gen);
+    const step = (s) => this.houseStep(gen, s);
+    step("cold sweep");
+    let names;
+    try { names = await this.bounded(fs.readdir(coldDir()), "listing cold/"); }
+    catch { return ok() ? { removed: [], kept: [], skipped: "no cold/" } : null; }
+    if (!ok()) return null;
+    const t = { removed: [], kept: [] };
+    // store.json read again first (integration, 2026-11-19, second review): storeText is the text this writer last
+    // read or wrote; a store.json replaced by hand while Herdr runs is not it. Then nothing is saved or decided this
+    // run (a save first would write memory over it, and memory is not what the person put there).
+    step("cold sweep: store.json");
+    const onDisk = this.storeText === null ? null : await this.bounded(fs.readFile(storePath(), "utf8"), "reading store.json").catch(() => null);
+    if (!ok()) return null;
+    if (onDisk === null || onDisk !== this.storeText) {
+      t.skipped = "store.json on disk is not the store this writer last read or wrote";
+      this.note = `cold sweep: nothing removed this run (${t.skipped}); tried again at the next`;
+      if (!this.sweepSaid) { this.sweepSaid = true; this.log(`cold sweep: nothing removed: ${t.skipped}`); }
+      return t;
+    }
+    this.sweepSaid = false;
+    if (this.live.toText() !== this.storeText) {
+      step("save");
+      await this.saveStore();
+      if (!ok()) return null;
+    }
+    // From here to the decision nothing awaits.
+    if (this.live.toText() !== this.storeText) { t.skipped = "the store in memory is not store.json"; return t; }
+    const at = now ?? Date.now();
+    const listed = names.map(base).filter((n) => COLD_NAME.test(n));
+    const del = this.live.coldGarbage(listed, at, { graceMs: COLD_GRACE_MS, keepMs: COLD_KEEP_MS }) ?? [];
+    const unproven = (this.live.coldUnproven(listed, at, { keepMs: COLD_KEEP_MS }) ?? []).filter((c) => !this.coldKept.has(c.name)).slice(0, COLD_CHECK_MAX);
+    const diskText = this.storeText;
+    const named = (name) => Object.values(this.live.d.sessions).some((s) => s?.cold?.file === name || s?.coldLost?.file === name);
+    for (const name of del) {
+      if (named(name)) continue;
+      step(`cold sweep ${name}`);
+      await this.bounded(fs.unlink(coldPath(name)), `removing cold/${name}`).then(() => t.removed.push(name), () => {});
+      if (!ok()) return null;
+    }
+    // 2. By content. Compared with store.json as read from disk when this run decided (diskText), never with the
+    // live store, which a pass may change during the reads: what a later save adds only makes a file more
+    // redundant, and a file no record names is never named again (a freeze makes a new name). Each item and turn
+    // record of the file must be found as it is (or, for an item, in a later version) in that store, the session's
+    // named cold file or its archive (store.js coldLacks).
+    let disk = null;
+    for (const c of unproven) {
+      if (named(c.name)) continue;
+      step(`cold sweep: reading ${c.name}`);
+      const r = await this.readCold(c.sid, c.name, (s) => step(`cold sweep: reading ${c.name} ${s}`));
+      if (!ok()) return null;
+      if (r.transient) continue;                       // tried again next run
+      if (!r.record) { this.keepCold(c, { error: r.error }); t.kept.push(c.name); continue; }
+      try { disk ??= Store.fromText(diskText); } catch { break; }
+      const also = { copies: new Map(), turnCopies: new Map(), heads: new Map() };
+      const ds = disk.d.sessions[c.sid];
+      if (!ds) continue;                                // not in store.json on disk yet: next run
+      if (ds.cold?.file && ds.cold.file !== c.name) {
+        step(`cold sweep: reading ${ds.cold.file}`);
+        const rn = await this.readCold(c.sid, ds.cold.file, (s) => step(`cold sweep: reading ${ds.cold.file} ${s}`));
+        if (!ok()) return null;
+        if (!rn.record) continue;                      // its own file not readable now: nothing proven
+        for (const it of rn.record.items) pushTo(also.copies, it.id, it);
+        for (const [k, rec] of Object.entries(rn.record.turns ?? {})) pushTo(also.turnCopies, k, rec);
+      }
+      let lack = disk.coldLacks(c.sid, r.record, also);
+      if (lack.items || lack.turns) {
+        const arch = await this.archiveCopies(c.sid, gen, step);
+        if (arch === null) { if (!ok()) return null; continue; }
+        for (const [id, list] of arch.copies) for (const x of list) pushTo(also.copies, id, x);
+        for (const [k, list] of arch.turnCopies) for (const x of list) pushTo(also.turnCopies, k, x);
+        for (const [k, h] of arch.heads) also.heads.set(k, h);
+        lack = disk.coldLacks(c.sid, r.record, also);
+      }
+      if (lack.items || lack.turns) { this.keepCold(c, lack); t.kept.push(c.name); continue; }
+      // Named meanwhile? Nothing names an unnamed file again today (a freeze makes a new name); checked all the same.
+      if (named(c.name)) continue;
+      step(`cold sweep ${c.name}`);
+      await this.bounded(fs.unlink(coldPath(c.name)), `removing cold/${c.name}`).then(() => t.removed.push(c.name), () => {});
+      if (!ok()) return null;
+    }
+    const left = listed.filter((n) => !t.removed.includes(n));
+    if (this.live.trimThawed(left, at, { keepMs: COLD_KEEP_MS })) this.commit(this.cx);
+    if (t.removed.length) this.log(`cold sweep: ${t.removed.length} file(s) no session needs removed from cold/ (${t.removed.slice(0, 4).join(", ")}${t.removed.length > 4 ? ", …" : ""})`);
+    return t;
+  }
+
+  // A cold file the sweep keeps for good (it cannot be read, or holds what store.json lacks): remembered for this
+  // writer's life (not read again each hour) and said once in writer.log.
+  keepCold(c, why) {
+    if (this.coldKept.has(c.name)) return;
+    this.coldKept.set(c.name, { sid: c.sid, ...why });
+    this.log(why.error
+      ? `cold sweep: cold/${c.name} could not be read (${why.error}): kept, never deleted`
+      : `cold sweep: cold/${c.name} holds ${why.items} item(s) and ${why.turns} turn record(s) store.json lacks (session ${String(c.sid).slice(0, 8)}): `
+        + "kept, never deleted; ./install.sh --check lists it, and Retention.md 10.8 says how to bring it back");
+  }
+
+  // A session's Phase 1 archive as the sweep's proof needs it (archive/<safe sid>/): its items files' lines by id,
+  // its turns files' cut records and moved heads by turn, each line only when it names this session (as Phase 1's
+  // reading rule does). Each read bounded and a step. null when a listing or a read got no answer or was given up.
+  async archiveCopies(sid, gen, step) {
+    const dir = archiveDir(sid), out = { copies: new Map(), turnCopies: new Map(), heads: new Map() };
+    if (!dir) return out;
+    let names;
+    try { names = await this.bounded(fs.readdir(`${dataDir()}/archive/${dir}`), "listing archive/"); }
+    catch (e) { return !this.current(gen) || e?.timedOut ? null : out; }
+    if (!this.current(gen)) return null;
+    for (const n of names.map(base).filter((x) => ARCHIVE_ITEMS.test(x) || ARCHIVE_TURNS.test(x))) {
+      step(`cold sweep: archive ${n}`);
+      let text;
+      try { text = await this.bounded(fs.readFile(`${dataDir()}/archive/${dir}/${n}`, "utf8"), `reading archive/${n}`); }
+      catch { return null; }
+      if (!this.current(gen)) return null;
+      for (const line of text.split("\n")) {
+        if (!line.trim()) continue;
+        let r = null;
+        try { r = JSON.parse(line); } catch { continue; }    // a bad line proves nothing
+        if (!r || typeof r !== "object") continue;
+        if (ARCHIVE_ITEMS.test(n)) { if (typeof r.id === "string" && r.anchor?.sessionId === sid) pushTo(out.copies, r.id, r); continue; }
+        if (r.sessionId !== sid || r.turn === undefined || r.turn === null) continue;
+        if (r.rec && typeof r.rec === "object") pushTo(out.turnCopies, String(r.turn), r.rec);
+        else if (typeof r.textHead === "string") out.heads.set(String(r.turn), r.textHead);
+      }
+    }
+    return out;
+  }
+
+  // From the tick before its drain, and the start before its first: what the next pass has to do with no event
+  // asking (wantThaw): with retention.coldDays 0 every cold session not faulted (thawAll), a faulted one whose
+  // retry is due (COLD_RETRY_MS since it was last tried), a "mixed" one (store.js mixedCold: an older build added
+  // items beside its stub; not faulted). True when that pass is wanted (the caller pokes): wantThaw not empty, or
+  // a held folder whose session is not faulted (back, reset, forgotten) waits to replay.
+  coldTick(cx, gen = this.gen) {
+    if (!this.current(gen)) return false;
+    const st = this.live, now = Date.now();
+    for (const sid of [...this.wantThaw]) if (!st.isCold(sid)) this.wantThaw.delete(sid);
+    if (coldDaysOf(this.cfg) === 0) this.thawAll();
+    const faults = st.coldFaults();
+    for (const f of faults) if (now - (this.coldTried.get(f.sid) ?? (Number(f.at) || 0)) >= COLD_RETRY_MS) this.wantThaw.add(f.sid);
+    for (const sid of st.mixedCold()) if (!st.d.sessions[sid]?.cold?.fault) this.wantThaw.add(sid);
+    const faulted = new Set(faults.map((f) => safeName(f.sid)));
+    return this.wantThaw.size > 0 || [...this.heldSids].some((n) => !faulted.has(n));
+  }
+
+  // retention.coldDays 0 (Settings "never", install.sh --thaw-all): every cold session the writer can read comes
+  // back (wantThaw); a faulted one's retry brings it. True when one was added.
+  thawAll() {
+    let added = false;
+    for (const sid of this.live.coldSessions()) {
+      if (this.live.d.sessions[sid]?.cold?.fault || this.wantThaw.has(sid)) continue;
+      this.wantThaw.add(sid);
+      added = true;
+    }
+    return added;
+  }
+
   // The host's 60 s timer: a back-off first (cooling), then the watchdog (a pass or a start stuck in one
-  // step: restarted, nothing else this tick), then the safety rescan, the waiting check, the heartbeat (the
+  // step: restarted, nothing else this tick), then the safety rescan (a poke when there is cold work: coldTick),
+  // the waiting check, the heartbeat (the
   // claim renewed with the writer's health and its pass), deferred items waking, config.json and every
   // identity-map record read again (the safety net for watchConfig), housekeeping when due (its own task,
-  // houseKick). After each await nothing more unless this tick's generation is still the writer's. A host
+  // houseKick; the cold run from here only). After each await nothing more unless this tick's generation is still the writer's. A host
   // that does not hold the role checks instead that the holder is alive (probe).
   tick(cx) {
     this.cx = cx;
@@ -1234,7 +1955,8 @@ export class Writer {
     if (!this.amWriter()) { this.probe(cx); return; }
     const gen = this.gen;
     cx.spawn(async (cx) => {
-      await this.reader.drain(cx);
+      // Cold sessions (Phase 2): a pass even with nothing in the spool when there is cold work (coldTick).
+      await (this.coldTick(cx, gen) ? this.reader.poke(cx) : this.reader.drain(cx));
       if (!this.current(gen)) return;
       const failed = await this.bounded(countFailed(), "counting spool/failed").catch(() => this.reader.failed);
       if (!this.current(gen)) return;
@@ -1252,7 +1974,7 @@ export class Writer {
       const spaces = await this.refreshSpaces(null, gen);
       if (!this.current(gen)) return;
       if (changed || spaces) this.commit(cx); else this.publish();
-      this.houseKick(cx);
+      this.houseKick(cx, { tick: true });
     });
   }
 
@@ -1372,14 +2094,16 @@ export class Writer {
     if (!this.amWriter()) return;
     const live = new Map(agents().map((a) => [a.address, a.status]));
     for (const s of Object.values(this.live.d.sessions)) {
-      if (!s.terminal) continue;
+      // A cold session (Phase 2) is not tracked: its items are in its file. A status turn of a hookless one is
+      // not counted until an event brings it back (an agent in a live pane keeps its session warm: canFreeze).
+      if (!s.terminal || s.cold) continue;
       const now = live.get(s.terminal) ?? null, prev = this.lastStatus.get(s.terminal);
       this.lastStatus.set(s.terminal, now);
       if (s.turnSource === "herdr-status") {
         if (now && now !== prev && this.live.d.terminals[s.terminal]?.sessionId === s.sessionId) {
           this.pendingStatus.push([s.sessionId, now]);
           if (this.pendingStatus.length === 1) cx.timer.after(0, (cx) => {
-            const list = this.pendingStatus.splice(0);
+            const list = this.pendingStatus.splice(0).filter(([sid]) => !this.live.isCold(sid));
             if (list.map(([sid, st]) => this.live.statusTurn(sid, st)).some(Boolean)) this.commit(cx);
           });
         }
@@ -1388,7 +2112,7 @@ export class Writer {
       if (prev === "working" && (now === "idle" || now === "done") && s.state === "working") {
         const sid = s.sessionId;
         cx.timer.after(6000, (cx) => {
-          if (!this.amWriter() || this.live.d.sessions[sid]?.state !== "working") return;
+          if (!this.amWriter() || this.live.d.sessions[sid]?.state !== "working" || this.live.isCold(sid)) return;
           this.live.interrupted(sid);
           this.commit(cx);
         });

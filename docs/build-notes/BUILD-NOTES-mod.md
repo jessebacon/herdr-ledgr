@@ -1042,4 +1042,161 @@ filter on archived rows).
   typings); the first run on the real store; a new reading copy beside an old host engine before a
   relaunch (the old writer ignores a `restore`); the live check list is `Retention.md` 8.3.
 
+## 20. Retention Phase 2: cold sessions (2026-11-19, uncommitted)
+
+The spec is `docs/design/Retention.md` 10; this section is the store's, the writer's and the Python side's
+half as built (the reading copies' half is `BUILD-NOTES-detail.md` 18). A session idle more than
+`retention.coldDays` (7) moves its items and turn records to `ledgr-data/cold/<safe sid>.<ms>-<rand6>.json`
+and keeps its record in `store.json` as a stub with its counts. Four builders worked in parallel against
+one contract (A the store, B the writer and the spool, C the reading copies, D the Python readers, the
+installer and the doctor); the integration put their files together, fixed what crossed the seams, closed
+the design holes they reported, and wrote `tests/test_seams.mjs`. Function names, not line numbers.
+
+### 20.1 The store (`store.js`, `config.js`, `ledgr_config.py`)
+
+| What | Where |
+|---|---|
+| `retention.coldDays`, read one way: a whole number, 0 kept (never; every cold session comes back), any other value rounded and at least 1, a number or a numeric string; missing, not a number, negative or over 365: 7 | `config.js` `coldDaysOf`, `COLD_DAYS`; `DEFAULTS.retention.coldDays`; `ledgr_config.py` `DEFAULT_CONFIG["retention"]["coldDays"]`; the doctor's `cold_days_of` |
+| The names | `config.js` `coldDir`, `coldPath`, `heldDir`, `COLD_NAME`, `coldName` |
+| The record check every reader makes (format, version, session, items of that session with ids, turn records a map) | `coldRecordError` (Python's `cold_record_error` word for word) |
+| The events that never need a session warm; the error `apply()` throws rather than apply to a cold session | `COLD_FREE` (the pin ops, `forget`, `cold_reset`), `ColdError` (`.cold`: the sessions); `OWN_EVENTS` gains `cold_retry`, `cold_reset` |
+| Lookups | `isCold`, `isMerged`, `coldSessions`, `coldFaults`, `mixedCold` |
+| The idle clock: the record's times (not `seenAt`), every item's `updatedAt`, every turn record's `stopAt`, `asks.at`, `retry.at`; `apply()` moves `touchedAt` for every event of a warm session but the pin ops and an act `seen` | `touchedAt(sid)` |
+| Counts by level, and the counts at the threshold (from the stub's `n` for a cold session not merged) | `coldCounts(sid)`, `countsOf(sid)`; `chips()` reads `countsOf` and `n.qNew`, and leaves out `o` |
+| Why a session cannot go cold, whatever its clock | `freezeBlocker(sid)`, `safeNames()` |
+| The plan (changes nothing; oldest idle first; each `{sid, record, sig}`) | `planFreeze(days, now, {canFreeze, max})`, `coldSig` |
+| The commit: everything checked again, then in one step the clock carried onto the stub (`touchedAt`), the items and turn records out, `cold: {file, at, n}` in | `commitFreeze(done, now, {canFreeze})` |
+| Which cold sessions an event or a batch needs (an act `seen` needs none) | `coldOf(ev)`, `coldNeeded(events)` |
+| Back: the store's copies win, a gone branch's mark dropped, `nextHandle` raised past the file's and every handle held, a file item whose handle the store's own items hold renumbered (`handleWas`), `thawedAt = touchedAt = now`, the file added to `coldThawed` (the newest `COLD_THAWED_MAX`, 8) | `thaw(sid, record, file, now)`, `raiseHandles` |
+| A reading copy's view (copies beside the stub, `cold` unchanged, out of `toText()` and `snapshot()`) | `mergeCold`, `unmerge`, `unmerged`, `mergedIds`; `this.merged` on the instance, never in `d` |
+| A file the writer could not read | `coldFault(sid, error, now, heldDelta)` |
+| Try again; Use without its older items (`coldLost: {file, at, frozenAt, n, error}`) | `on_cold_retry` (changes nothing), `on_cold_reset` |
+| The sweep's proof: by name only a file the record lists as thawed (past the grace) or a forgotten session's (past the keep time); the unnamed rest a read must prove (one recorded session, not faulted, not listed, over the keep time, oldest first); what a file holds that the store lacks (items by id, also in `ids`; turn records by key, also in `turns`, or older than the oldest kept); the thawed lists trimmed | `coldGarbage`, `coldUnproven`, `coldLacks(sid, record, {ids, turns})`, `trimThawed(present, now, {keepMs})`, `coldNames`, `coldFileOf`, `thawedEntry` |
+| `snapshot()` gains `cold: {sid: {file, fault}}`; `restoreItem` returns null for a cold session; Forget drops a merge | `snapshot`, `restoreItem`, `on_forget` |
+
+### 20.2 The writer (`writer.js`, `spool.js`)
+
+| Constant | Value | What |
+|---|---|---|
+| `COLD_RUN_MAX` | 40 | sessions per freeze run |
+| `COLD_RUN_MS` | 60 000 | no session begun in a freeze run after this |
+| `COLD_THAW_MAX` | 50 | sessions read per pass; the rest go to the next, which the writer pokes |
+| `COLD_RETRY_MS` | 600 000 | how often a faulted session's file is tried again |
+| `COLD_GRACE_MS` | 3 600 000 | a thawed file kept at least this long after the thaw |
+| `COLD_KEEP_MS` | 86 400 000 | a forgotten session's file, or a stale one nobody committed, kept at least this long |
+| `COLD_EVERY_MS` | 3 600 000 | one cold run (freeze, then sweep) an hour, from the tick (in memory: the first tick after a relaunch runs one) |
+| `COLD_CHECK_MAX` | 4 | unnamed files the sweep reads in one run to prove them redundant |
+| `COLD_TIMEOUT_MAX` | 3 | reads of one session's file that got no answer, in a row, before it is faulted (three bounded reads a pass or more apart: about the watchdog's one restart) |
+
+- `spool.js` `writeNew(path, text, {cx, ms, ok, step, drop})`: create-only through `writeTextFile`'s
+  expected null at or under the cap; past it, `isThere` (a listing) then `fs.writeFile` to the new name and
+  `fs.readFile` back. `drop` removes a file this call may have written and could not confirm. Called in
+  exactly three places: `archiveLines` (Phase 1), `freezeRun`, `holdEvent` (`test_no_keystrokes.py` rule
+  14). `SpoolReader.poke(cx)`: a pass even with nothing in the spool (`want`). `quarantine` takes a held
+  event's own `path`.
+- State on the `Writer`: `wantThaw`, `heldSids` (the folders under `cold/held/`), `heldSkip` (held files
+  that do not parse), `coldTried`, `passSids`, `coldAt`, `snapOk`, `coldKept` (files the sweep keeps for good:
+  read once per writer, said once).
+- The freeze: `houseKick(cx, {tick: true})` → `coldHouse` (`listHeld`, `freezeRun`, `coldSweep`), after
+  Phase 1's run when both are due, in the same `this.house` so one run holds the housekeeping at a time.
+  `coldDue` (the holder, not starting, no run of this generation, Phase 1's first run done, an hour since
+  `coldAt`). `freezeRun` and `canFreeze` as `Retention.md` 10.2 and 10.4.
+- The pass: `applyBatch` sets `passSids` and calls `applyPass`: `replayFolders`, then rounds of
+  `coldPhase` (`readCold`, `store.js` `thaw` or `coldFault`, `heldIn`, `holdEvent`), the config read for a
+  `branch`, `attachRestores` (Phase 1's restore pre-read, now per round), the synchronous `coldNeeded`
+  check (at most three rounds), the apply loop, the save, a second `snapshot.json` write when a session came
+  back and the first failed, then `coldDone`. `readCold` → `{record}`, `{error}` or `{transient}`;
+  `heldEvents(folder)` → the held events in name order.
+- The sweep: `coldSweep` (`Retention.md` 10.8): `store.json` read again first (not the text last read or
+  written: nothing saved or removed), by name, then by content (`readCold` of the file, of the session's named
+  file, `archiveCopies` of its archive, `store.js` `coldLacks`, version by version, against `store.json` as
+  read), then `trimThawed`; `keepCold` logs a file kept for good once. `readCold`: only a read with no answer
+  is transient (`coldTimeouts` counts them; the third in a row is an error); any other read error is an error,
+  worded "missing" only when a listing (`spool.js` `isThere`) shows the file is not there, else "is there but
+  could not be read". A wanted read that is transient sets `ps.wantStop`: no other wanted read that pass, and
+  no poke for them (the tick tries again).
+- The tick and the start: `coldTick` (`wantThaw` from `coldDays` 0 through `thawAll`, due retries and
+  `mixedCold`; true when a pass is wanted, then a `poke` instead of a `drain`); the start lists `cold/held/`
+  and pokes once. `applyConfig` with `coldDays` 0 pokes at once.
+- Left alone while cold: `track` (and its pending status turns), the interrupt check, `runRetry`'s result.
+- Step names (the claim's `pass`, `progress()`): in a start `start: cold/held listing`; in a pass `apply:
+  cold <sid8>` (` read`, ` listing`), `apply: held <folder8>`, `apply: held <name>`, `apply: hold <name>`
+  (`: write`, `: read back`, `: removing a broken copy`), `apply: held <name> to spool/failed`, `apply: held
+  <name> done`, `apply: held <folder8> done`, `save: snapshot.json again`; in housekeeping (shown as
+  `housekeeping: …`) `cold/held listing`, `freeze: plan`, `freeze: making cold/`, `freeze <sid8>` (`: write`,
+  `: read back`, `: listing`, `: removing`), `freeze: config.json`, `freeze: removing <file>`, `save`,
+  `cold sweep`, `cold sweep <name>`, `cold sweep: reading <name>` (` read`, ` listing`), `cold sweep: archive
+  <items file>`.
+- `writer.log` lines: `Retention.md` 10.13. The writer's note (the fallback panel's status line): `N
+  session(s) to bring back from cold/ first; the next pass goes on`, `<name> could not be kept in
+  cold/held/<folder>/; it stays in the spool`, `<why>; tried again at the next pass` (a read with no answer),
+  `snapshot.json not written after sessions came back from cold/; the extractor and the MCP server read them
+  from their files until the next save`.
+
+### 20.3 The Python side (`ledgr_extract.py`, `ledgr_mcp.py`, `setup/ledgr_setup.py`)
+
+- `ledgr_extract.session_items(sid)` → `(items, cold)`, `snapshot_copy`, `cold_record_error`,
+  `cold_record`, `session_of`; `recorded_asks` and `tool_asks` read through it.
+- `ledgr_mcp.py`: every session read through `session_items`; `held_ids(kind, ev_ids)` (the server's own
+  event copies in `cold/held/`, by id); `wait_handles` and `wait_applied` return `held` when found there;
+  `cold_now`, `cold_broken`, `cold_words`, `cold_why`; `resolve_asks` sends an ask it cannot look up by
+  handle (`item: null`, `unchecked`). The instructions' sentence covers "ledgr cannot read this session's
+  earlier items". `bin/mcp/README.md`, Cold sessions.
+- `setup/ledgr_setup.py`: `cold_report` in `--check` (with `cold_file`, `cold_lacks`, `archive_ids`: every
+  unnamed file classified as the writer would, recoverable ones as problems); `--thaw-all` (`cmd_thaw_all`,
+  `write_cold_days`, `writer_claim_of`, `writer_settled`, `THAW_WAIT_S` 120, `THAW_POLL_S` 1, `THAW_CONFIRM_S` 2,
+  `CLAIM_LIVE_S` 300, `HELD_STALE_S` 3600); `RETENTION_DEFAULTS` gains `coldDays` 7.
+
+### 20.4 What the integration changed
+
+- `test_no_keystrokes.py`: rule 14's `writeNew` check names its three callers; rule 15 is new (only
+  `writer.js` and `spool.js` write, unlink, make or remove anything under `cold/`, and in `writer.js` only in
+  `freezeRun`, `coldSweep`, `holdEvent` and `coldDone`; `readCold`, `heldEvents`, `listHeld` only read; a cold
+  file is unlinked in two places; `heldDir(` is the writer's; the Reader's cold methods only read and
+  `coldRetry`/`coldReset` post one event each; the Python readers open cold files to read only). Its method
+  finder now takes one level of parentheses in a parameter list (`st = this.viewStore()`).
+- `test-store.sh`: the Python defaults hold `coldDays` 7, and the merge fills and keeps it.
+- The idle clock (`store.js` `touchedAt`, `apply()`, `listing.js` `touchedOf`): `seenAt` and an act `seen`
+  no longer move it; `commitFreeze` carries the clock onto the stub. Builder C found both: a stub read only
+  its record's times, and a look at a cold session made its menu row say "idle 1 min".
+- `panel.js` `coldWait`: a handle command on a cold session not read yet reads the file and then runs,
+  instead of "No A1 in this session" (C); `olderAuto`: the OLDER THAN A DAY fold stays open a day after a
+  thaw, found by `test_seams.mjs` (the first act folded every row away).
+- `ledgr_mcp.py` `wait_handles` and `cold_now`: `held` only from the event's copy in `cold/held/`. Builders
+  B and D found that a `snapshot.json` the writer could not write after a thaw (twice) still names the
+  session cold, and the server then called an applied event held. The writer's note says what it means now.
+- `bin/mcp/README.md`: the held rule, the repeat limit, the count.
+- `tests/test_seams.mjs` and `tests/test-seams.sh` (in `run-all.sh`): `Retention.md` 10.12.
+
+### 20.5 The outside review's findings (2026-11-19, the same day)
+
+| Finding | As built | Tests |
+|---|---|---|
+| Blocker: the sweep deleted the only copy of a cold session's items once `store.json` had lost its stub (a corrupt store at a start, a store put back from an older copy, a reset with another file on disk) | `Retention.md` 10.8: by name only a file the record lists as thawed (`coldThawed`, new) after the grace, or a forgotten session's after the keep time; every other unnamed file read and deleted only when nothing in it is missing from `store.json` as on disk, the session's named file or its archive; otherwise kept for good, said once in writer.log, listed by the doctor; a reset lists nothing; the fault view and the doctor name a faulted session's other files; the manual recovery documented, and a merged file's clashing handles renumbered | `test_store.mjs` 13; `test_writer.mjs` 52a (the three triggers, an orphan proven through the store and the archive, a self-mutation of `coldLacks`); `test_seams.mjs` f; `test_detail.mjs` (the fault view's other file); `setup/tests` (`cold_report`, `cold_lacks`) |
+| A safe name beginning with "." could be frozen but never read back | `freezeBlocker` refuses it; `readCold` and `ledgr_extract.cold_record` take such a name only as its own session's; `listHeld` keeps a known session's dot folder | `test_store.mjs`; `test_writer.mjs` 52b; `test-store.sh` |
+| An fs error other than "not found" faulted the session as missing | after the second review: every read error but a timeout faults that session alone, worded "is there but could not be read" when a listing finds the file; three timeouts in a row fault too | `test_writer.mjs` 38, 52c |
+| Third review: a later `updatedAt` counted as proof, so a backup put back and touched once (Done, Promote) deleted the file holding the draft and the resolution | identical copies only, in `coldLacks` and `cold_lacks`; the doctor's line says such a file may also be an older version of items the store still has; the skip note says "tried again at the next"; a timeout count forgotten after `COLD_RETRY_MS` | `test_store.mjs` 13; `test_writer.mjs` 38, 52a, 52f (the reviewer's two, the later version flipped to kept); `setup/tests` |
+| Second review: the proof checked ids, not versions; turn records "older than the oldest kept" counted as cut; archive lines of other sessions counted; the sweep decided from the text last written, not store.json as on disk | `coldLacks`/`cold_lacks` version by version (identical copies only since the third review), turn records only by an identical copy or the turns archive, per-session lines, store.json read again first | `test_store.mjs` 13; `test_writer.mjs` 52f (the reviewer's state loss, a later version, turn records, another session's line, a replaced store, the two content-step guards each killing its mutant); `setup/tests` |
+| Wanted-only thaws could hold a pass for minutes | the first transient wanted read stops the others and their poke | `test_writer.mjs` 52d (it also caught the poke loop the first version of the fix made) |
+| `--thaw-all` could say "no cold sessions" while a freeze commit was still saving | `writer_settled`: the claim renewed after the write and out of housekeeping, or no writer alive; none cold seen twice | `setup/tests` (a late commit, a live writer that never renews, a writer long gone); `test_seams.mjs` g (against the real writer) |
+| Rollback without `--thaw-all`: an `[A1]` answer to a cold ask dropped, a re-raised ask duplicated | documented (`Retention.md` 10.11) | `test_seams.mjs` h with `LEDGR_OLD_BUILD` (nothing lost, handles unique, turns merged) |
+| Two guards masked by others (`heldIn`'s spool-twin dedupe, by `ingested`; `parent_session_id` and `for_session` in `passSids`, by the pre-apply check) | unchanged | `test_writer.mjs` 52e, each killing its mutant |
+
+### 20.6 Tests
+
+`test_store.mjs` 1,809 checks (689 cold sessions); `test_writer.mjs` 1,151 (sections 30 to 52);
+`test_seams.mjs` 136 (143 with `LEDGR_OLD_BUILD`); `test_mcp.py` 162; `test_no_keystrokes.py` 1,082;
+`setup/tests` 217. The reading copies' counts are in `BUILD-NOTES-detail.md` 18. Mutations checked by hand: a
+reading-copy method that unlinks under `cold/`, a write in `canFreeze`, and a Python cold read opened for
+writing each fail rule 15; D's `cold_now` restored fails the two stale-snapshot cases of `test_mcp.py`;
+`coldLacks` switched off fails 52a; the two masked guards removed fail 52e; `writer_settled` always true fails
+the late-commit case of `setup/tests`.
+
+### 20.7 Known limits, not tried live
+
+`Retention.md` 10.12 (not tried live) and 10.14 (known limits). The dry run of 10.12 found that the live
+`config.json` still says `retention_days` 14 and Phase 1 has not run on the live store: Phase 2 freezes
+nothing before Phase 1's first run has finished, and the installer's move to 3 days decides how far under
+the cap the store lands.
+
 Pins (2026-11-07: the PINS lane, search, Ask here, the hold control, the box's ⌘S): `BUILD-NOTES-pins.md`.
