@@ -850,3 +850,97 @@ One line per behaviour change; each has its test.
 9. Defensive, unverified live: when the answer box's latest change, under 300 ms ago (`STRAY_MS`), only inserted one line break (`detailing.js:218` `strayBreak`), ⌘Enter puts the text before it back into the box and the draft before the sheet is made (`detail.js:204` `unbreak`, from `pasteSheet` on both the command and the box's submit); a one-line-break change arriving under 300 ms after the paste is put back as it arrives (the order of the two signals is not known); an Enter typed on purpose earlier stays. Tests: `test_detail.mjs` (`strayBreak`; mid-text, end and start of text, the command and the submit, the break after the paste, an Enter typed a second before).
 
 Still to see live: whether ⌘↓ from the dialog's handle reaches `detail-next` after a step (and on open, where the keyboard still goes to the answer box first: if the box keeps ⌘↓ / ⌘↑, the first one there moves its caret, and Tab to the dialog or the header's next → steps), and whether ⌘Enter inserts a line break in the box at all, and before or after the command.
+
+## 17. The archive in the reading copies (2026-11-19, uncommitted)
+
+Retention Phase 1 (`docs/design/Retention.md`): closed items past `retention_days` (3 days) leave
+`store.json` for `ledgr-data/archive/<session>/items-<ms>-<rand6>.jsonl`, written by the writer's
+housekeeping (`BUILD-NOTES-mod.md`). Before this, an archived item vanished from CLOSED and nothing could
+read or reopen it. This section is the reading copies' half: the panel lists archived items under CLOSED,
+the dialog shows one whole and read-only, and Reopen asks the writer to bring it back. Built by the
+reading-copies builder against the contract while the store and the writer were built beside it, then
+integrated with an end-to-end test across the seam (`test_writer.mjs` section 28) and an outside review's
+fixes. Line numbers are left out: the review fixes moved them.
+
+**Reading the archive.**
+
+| What | Where |
+|---|---|
+| The reading rule as a pure function: files ordered by name (legacy month files before items files, items files by `<ms>`), the newest file's last line wins for an id, other sessions' lines left out, malformed ones skipped and counted, the store's ids left out through `has`, newest closed first, each with `archiveFile` | `mods/ledgr/listing.js` `archiveRecords`, `closedAtOf` |
+| The CLOSED line's number: the rows read, else the store's `session.archived` | `listing.js` `archivedCount` |
+| A copy's read: both folders listed (`namesIn`), each items file read once by name (written once, never changed), a legacy month file once per copy, `fs.readFile` (a legacy file may pass 1 MiB), the store's ids left out by `viewStore()`; the panel's and the dialog's read bounded as a whole (`ARCHIVE_READ_MS`, 10 s, the copy's own timer through `spool.js` `within`), said when it fails or gets no answer, and read again after `ARCHIVE_RETRY_MS` (15 s) | `mods/ledgr/reader.js` `loadArchive`, `readArchiveWithin`, `namesIn`; `panel.js` and `detail.js` `readArchive`, `detail.js` `archiveAgain` |
+| The demo's archive, at once and with no file: `fixtures.js` `demoArchive` through the same rule | `reader.js` `demoArchiveOf`; `mods/ledgr/fixtures.js` `demoArchive`, `DEMO_ARCHIVE_FILES`, the demo session's `archived: 3` |
+
+The name shapes are the writer's (`ARCHIVE_ITEMS`, `ARCHIVE_LEGACY`, in `config.js` and re-exported by
+`spool.js`), passed into `archiveRecords` so `listing.js` stays pure. A turns file is never read here.
+
+**The list.**
+
+| What | Where |
+|---|---|
+| CLOSED's last line, `archived (N) · show` / `hide`, entry `arch:items` (Enter toggles it), per session in memory (`archShown`); hidden at 0 unless the archive holds rows anyway (read once at a count of 0 to find out) | `mods/ledgr/panel.js` `archivedLines` |
+| The rows read in a timer from render, read again when the count changes; meanwhile "Reading the archive…", nothing read: why | `panel.js` `readArchive`; `mods/ledgr/words.js` `ARCHIVE_READING`, `archiveEmptyWords`, `archiveFailedWords`, `archivedLineWords`, `ARCHIVED_LINE_TIP` |
+| An archived row: state word "archived" (dim, before every other state), no quick action, `archived: true`, its tooltip's last line | `listing.js` `stateOf`, `rowModel` |
+| A click or Enter opens the dialog with `props.archived` | `panel.js` `openOf`, `openDetail` (`o.archived`) |
+| `open:<handle>` and `cursor:<handle>` reach an archived row once read; the `archived` command | `panel.js` `resolveHandle`, `command` |
+
+**The dialog.**
+
+| What | Where |
+|---|---|
+| `props.archived` checked: an ask or a question, a plain `.jsonl` name of at most 128 characters that the writer's shapes take | `mods/ledgr/detailing.js` `detailProps` (its third argument), `detailSpec`; `detail.js` constructor |
+| The session's archive read by the dialog itself; `resolve` looks in the store first, then among the records read (`archRecord`); a target that leaves the store while open is looked for in the archive once | `mods/ledgr/detail.js` `readArchive`, `archiveFor`, `lookInArchive`, `resolve` |
+| Read-only: no answer box whatever the status, only "whole" of the open states, no open actions; `detail:done`, `detail:pick:`, `detail:answer:` say `ARCHIVED_READONLY` | `detail.js` `prepare`, `applyOpen`, `runOpenAction`, `command` |
+| The ARCHIVED section first (`archivedWords`, `archiveFileWords`, a badge), the rest as for a live item, the related ask's sub-row from the archive | `detail.js` `itemParts`, `resultLines` |
+| One action, Reopen | `detail.js` `archivedActions`, `reopenArchived`, `settleReopen`; `detailing.js` `RESTORE_WAIT_MS` (15 s); `words.js` `reopeningWords`, `reopenedWords`, `restoreFailedWords` |
+| A record that comes back is prepared again as the live item (`prepKey` marks an archived one apart) | `detail.js` `prepKey`, `render` |
+| ⌘↓ / ⌘↑ through the archived rows as read | `listing.js` `laneOf` (lane `"archive"`, opts `archive`); `detail.js` `laneSpot`, `step`, `retarget` (its `archived` argument) |
+| Why nothing shows: the ledger not read, the archive being read, no file holding the record, else `DETAIL_GONE` | `detail.js` `goneWords`; `words.js` `archiveGoneWords` |
+
+Reopen posts one `restore` event, `{session_id, item, file, reopen: true}`, through `Reader.post` (kept in
+`unwritten`, so `release()` writes it again if the dialog closes first), and says "Reopening …". Once
+`store.json` holds the id, even late, "… reopened from the archive", and the live item shows. When the
+writer has ingested the event and the id is not back, "… was not reopened: the archive file … could not
+be read". After 15 s with neither, it keeps waiting and says the writer has not taken the event yet. The
+dialog stays open throughout; the demo restores into its own store.
+
+**Settings.** One row, "Closed items stay in the list", N days with − and + (1 to 30), after "Open the
+panel on new asks", written to `retention_days` through `Reader.saveConfig`; the value shown is
+`config.js` `retentionDaysOf`, the clamp the store and the writer use (`mods/ledgr/settings.js`
+`SETTING_KEYS`, `editFor`, `savedLine`, the row's controls `st-days-down`, `st-days-value`,
+`st-days-up`; `words.js` `SETTING_WORDS.retentionDays`, `daysWords`).
+
+**Choices.**
+
+- Props, not a shared request: a dialog is opened per record and reads its props once, owned by that
+  copy alone; a shared key would be every copy's and racy between two opens.
+- Each copy reads the archive itself, as it reads `store.json`: no writer, no claim, no request to the
+  writer. An items file is never rewritten, so its parsed lines are kept by name; only new names are
+  read. A legacy month file is never written again, so it is read once per copy.
+- The rows are read only when shown (and once at a count of 0), never at every render.
+- The CLOSED line counts what was read once it was read: the legacy files' rows have no count in the
+  store.
+
+**Tests.** `test_list.mjs` (392 checks): the reading rule (newest file, last line,
+legacy order, other sessions, malformed lines, the shapes passed in), the archived row (state word, no
+quick action, tooltip), `archivedCount`, the `archive` lane, a file given parsed. `test_detail.mjs` (1,003): `props.archived`;
+the demo's `archived (3)`; `Reader.loadArchive` over real files in a scratch `ledgr-data/archive/` (a
+missing folder, the newest file and the store winning, a legacy month file, the cache); the CLOSED line
+(hidden at 0, a legacy file's rows, reading, nothing read) and its rows (no quick action, the cursor and
+Enter, `open:<handle>`) and the demo's; the dialog on an archived record (read-only, marked, its lane,
+its links) and Reopen (the demo's store; a live one posting exactly the contract's event;
+"reopening…"; back as the live item; "could not be read"), and the review's: a slow writer ("not taken
+yet", then "reopened" when it comes late), an item archived while its dialog is open, an archived line
+that says open, a read that never answers (bounded, said, read again), a `herdr:` session's folder, the
+panel's own store-wins filter, each items file read once. `test_settings.mjs` (800): the row, its value
+and edits (one clamp: 0 is 1 day, 45 is 30), its saved line, − and +. `test_no_keystrokes.py` rule 14: `loadArchive`, `demoArchiveOf`,
+`namesIn` and both `readArchive`s only read; `reopenArchived` posts one restore event and stages, copies,
+runs and execs nothing. Across the seam, `test_writer.mjs` section 28: the files the writer's run writes
+are exactly the files `loadArchive` reads, and the event Reopen posts is the one the writer restores
+from.
+
+**Not tried live.** Everything above (`Retention.md` 8.3): the line and the rows at the panel's width,
+the keys on them, the dialog on a real archived record (selection, links, Reopen against a running
+writer, the message read from a turn file whose record was cut), and a Reopen while a new reading copy
+runs beside an old host engine before Herdr is relaunched (the old writer ignores a `restore`; the dialog
+says it could not be read).

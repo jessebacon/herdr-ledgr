@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const MOD = path.resolve(HERE, "../..");                 // mods/ledgr (repo or live install)
-const FILES = ["listing.js", "words.js", "store.js", "config.js", "branch.js", "confluence.js"];
+const FILES = ["listing.js", "words.js", "store.js", "config.js", "branch.js", "confluence.js", "spool.js"];
 let dir = process.argv[2] ?? null, own = false;
 if (!dir) {
   own = true;
@@ -28,7 +28,7 @@ if (!dir) {
   fs.writeFileSync(path.join(dir, "node_modules/herdr/index.js"), [
     "export const appHome = () => \"/tmp/nowhere\";", "export const readTextFile = async () => null;", "export const layout = () => null;",
     "export const run = () => null;", "export const shared = () => null;", "export const agents = () => [];", "export const terminals = () => [];",
-    "export const focused = () => null;",
+    "export const focused = () => null;", "export const writeTextFile = async () => null;",
   ].join("\n"));
 }
 
@@ -338,15 +338,104 @@ try {
     A.deepEqual(LS.neighbors(ids, "rq_none"), { at: 0, of: 8, prev: null, next: null }, "not in the lane"); A.deepEqual(LS.neighbors(null, "x"), { at: 0, of: 0, prev: null, next: null });
   }
 
+  // ── the archive (retention, 2026-11-19): the reading rule, the rows, the line's count, the lane ──
+  {
+    const AS = "cccccccc-1111-4222-8333-000000000003", OTHER = "dddddddd-1111-4222-8333-000000000004";
+    const rec = (h, o = {}) => ({ id: `rq_ar${h.toLowerCase()}`, handle: h, direction: h.startsWith("A") ? "agent_to_human" : "human_to_agent",
+      kind: h.startsWith("A") ? "decide" : "question", status: "resolved", text: `Archived ${h}`, anchor: { sessionId: AS, turn: 3, settled: true },
+      createdAt: NOW - 9 * DAY, updatedAt: NOW - 8 * DAY, resolvedAt: NOW - 8 * DAY, ...o });
+    const jl = (...xs) => xs.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join("\n") + "\n";
+    const F1 = "items-1794700000000-aaaaaa.jsonl", F2 = "items-1794790000000-bbbbbb.jsonl", F10 = "items-1794800000000-cccccc.jsonl";
+    const LEG1 = "2026-09.jsonl", LEG2 = "2026-10.jsonl";
+    // A1: in F1, then again (newer) in F2: F2's line wins, whatever order the files come in. A2: twice in F1:
+    // its last line wins. A3: only in a legacy file (older than any items file); a later month's line wins over
+    // an earlier month's. A4: in a legacy file AND an items file: the items file wins. Q1: a question. A5: in
+    // the store: the store wins. Another session's line (in a legacy file, or in this folder: two session ids
+    // may name one folder), a line naming no session (in either kind of file), a corrupt line, an array, a
+    // line without an id or a direction: none listed (the malformed counted). The files' shapes are spool.js's.
+    const files = [
+      { name: F2, text: jl(rec("A1", { status: "dismissed", resolvedAt: NOW - 2 * DAY, updatedAt: NOW - 2 * DAY, note: "the newer line" })) },
+      { name: F1, text: jl(rec("A1", { note: "the older line" }), rec("A2", { note: "first" }), "{ not json", rec("A2", { note: "last", resolvedAt: NOW - 5 * DAY, updatedAt: NOW - 5 * DAY }),
+        "[1, 2]", { id: "rq_noway", handle: "A9" }, { direction: "agent_to_human" }, rec("Q1", { status: "dismissed", dismissedBy: "clear", resolvedAt: NOW - 3 * DAY, updatedAt: NOW - 3 * DAY }),
+        rec("A5"), { ...rec("A10"), anchor: { turn: 3 } }, rec("A11", { anchor: { sessionId: OTHER, turn: 3 } })) },
+      { name: LEG2, text: jl(rec("A3", { note: "october" }), rec("A6", { anchor: { sessionId: OTHER, turn: 1 } }), { ...rec("A7"), anchor: { turn: 1 } }) },
+      { name: LEG1, text: jl(rec("A3", { note: "september" }), rec("A4", { note: "legacy" })) },
+      { name: F10, text: jl(rec("A4", { note: "items file", resolvedAt: NOW - 4 * DAY, updatedAt: NOW - 4 * DAY })) },
+      { name: "turns-1794700000000-dddddd.jsonl", text: jl({ sessionId: AS, turn: 2, rec: { stopAt: 1 } }) },
+      { name: "notes.txt", text: jl(rec("A8")) },
+      { name: "items-1794900000000-eeeeee.jsonl", text: null },
+    ];
+    const inStore = new Set(["rq_ara5"]);
+    const SP = await import(`${dir}/spool.js`), SH = { items: SP.ARCHIVE_ITEMS, legacy: SP.ARCHIVE_LEGACY };
+    const got = LS.archiveRecords(files, { sessionId: AS, has: (id) => inStore.has(id), ...SH });
+    const byH = Object.fromEntries(got.map((r) => [r.handle, r]));
+    A.deepEqual(Object.keys(byH).sort(), ["A1", "A2", "A3", "A4", "Q1"], "the session's archived records: the store's A5 left out, other sessions' lines (A6, A11), lines of no session (A7, A10) and malformed ones too");
+    A.equal(byH.A1.note, "the newer line", "newest file wins (the larger <ms>), whatever order the files are given in"); A.equal(byH.A1.archiveFile, F2, "...and names it");
+    A.equal(byH.A2.note, "last", "within one file, the last line wins"); A.equal(byH.A2.archiveFile, F1);
+    A.equal(byH.A3.note, "october", "legacy: a later month wins over an earlier one"); A.equal(byH.A3.archiveFile, LEG2);
+    A.equal(byH.A4.note, "items file", "an items file wins over a legacy month file"); A.equal(byH.A4.archiveFile, F10);
+    A.equal(byH.Q1.direction, "human_to_agent", "a closed parked question archives like an ask");
+    A.equal(got.skipped, 4, "the malformed lines counted: not JSON, an array, no direction, no id");
+    A.deepEqual(got.map((r) => r.handle), ["A1", "Q1", "A4", "A2", "A3"], "newest first, by when each was closed");
+    A.ok(got.every((r) => typeof r.archiveFile === "string"), "each with archiveFile");
+    A.equal(LS.archiveRecords(files, { sessionId: AS, ...SH }).length, 6, "without has: A5 too");
+    A.equal(LS.archiveRecords(files, { sessionId: AS }).length, 0, "without the shapes (spool.js's) no file is read");
+    A.deepEqual([...LS.archiveRecords([], { sessionId: AS, ...SH })], [], "no files (a missing folder): an empty archive");
+    A.deepEqual([...LS.archiveRecords(null)], []); A.equal(LS.archiveRecords([{ name: F1, text: "" }], { sessionId: AS, ...SH }).skipped, 0, "an empty file: nothing");
+    // A file given parsed (parseArchiveText's result, which a reading copy keeps per items file: they are
+    // written once) reads as its text does (review, 2026-11-19).
+    const parsedFiles = files.map((f) => (typeof f.text === "string" && /^items-/.test(f.name) ? { name: f.name, parsed: LS.parseArchiveText(f.text) } : f));
+    const fromParsed = LS.archiveRecords(parsedFiles, { sessionId: AS, has: (id) => inStore.has(id), ...SH });
+    A.deepEqual([...fromParsed], [...got], "parsed files: the same records"); A.equal(fromParsed.skipped, got.skipped, "...and the same skipped count");
+    A.deepEqual(LS.parseArchiveText('{"id":"rq_1","direction":"agent_to_human"}\n{broken\n[1]\n\n'), { records: [{ id: "rq_1", direction: "agent_to_human" }], skipped: 2 });
+    A.equal(LS.archiveRecords([{ name: LEG1, text: jl(rec("A6", { anchor: { sessionId: OTHER, turn: 1 } })) }], { sessionId: OTHER, ...SH })[0]?.handle, "A6", "a legacy file read for the other session: its line");
+    A.deepEqual(LS.archiveRecords(files.slice(0, 2), { sessionId: AS, ...SH }).map((r) => r.archiveFile), LS.archiveRecords([...files.slice(0, 2)].reverse(), { sessionId: AS, ...SH }).map((r) => r.archiveFile), "the files' order given does not matter");
+    // The writer reads a restore event's record from the same file by the same rule (spool.js archivedRecord):
+    // what a row shows is what Reopen brings back.
+    for (const r of got) { const f = files.find((x) => x.name === r.archiveFile); const w = SP.archivedRecord(f.text, AS, r.id);
+      A.ok(w.record, `${r.handle}: the writer finds it in ${r.archiveFile}`); A.equal(JSON.stringify({ ...r, archiveFile: undefined }), JSON.stringify({ ...w.record, archiveFile: undefined }), `${r.handle}: the same line`); }
+    A.ok(SP.ARCHIVE_ITEMS.test(F1) && !SP.ARCHIVE_ITEMS.test("items-12-ABCDEF.jsonl") && !SP.ARCHIVE_ITEMS.test("turns-1-aaaaaa.jsonl"), "spool.js ARCHIVE_ITEMS: items-<ms>-<rand>.jsonl");
+    A.ok(SP.ARCHIVE_LEGACY.test(LEG1) && !SP.ARCHIVE_LEGACY.test("2026-1.jsonl"), "spool.js ARCHIVE_LEGACY: <yyyy-mm>.jsonl");
+    A.equal(SP.archiveDir("ab/c d:é.x-y_z"), "ab_c_d__.x-y_z", "spool.js archiveDir: the session's folder as bin/lib safe_name names it"); A.equal(SP.archiveDir(AS), AS); A.equal(SP.archiveDir(".."), null);
+    A.equal(LS.closedAtOf({ resolvedAt: 5, updatedAt: 9 }), 5); A.equal(LS.closedAtOf({ updatedAt: 9 }), 9); A.equal(LS.closedAtOf(null), 0);
+
+    // The rows: state "archived" (dim) for both kinds, their own glyph and handle, no quick action.
+    const actx = { threshold: "needed", now: NOW, here: AS, store: st, branchLive: () => null };
+    A.equal(W("item", byH.A1, actx), "archived|dim", "an archived ask: archived, dim"); A.equal(W("item", byH.Q1, actx), "archived|dim", "an archived question: archived, dim");
+    const mA = LS.rowModel("item", byH.A2, actx), mQ = LS.rowModel("item", byH.Q1, actx), mD = LS.rowModel("item", byH.A1, actx);
+    A.equal(mA.kind, "ask"); A.equal(mA.handle, "Ask 2"); A.deepEqual(mA.glyph, ["✓", "done", null], "a resolved one keeps its ✓");
+    A.equal(mQ.kind, "question"); A.equal(mQ.handle, "Question 1"); A.deepEqual(mQ.glyph, ["✕", "dim", null], "a cleared question keeps its ✕");
+    A.deepEqual(mD.state, { word: "archived", tone: "dim" });
+    for (const m of [mA, mQ, mD]) { A.deepEqual(m.quick, { done: false, paste: false, promote: false }, `${m.handle}: no Done, Paste or Promote`); A.equal(m.archived, true); A.equal(m.key, `item:${m.id}`, "its entry key is the item's (a reopened one keeps the cursor)"); }
+    A.ok(mA.tip.includes("Archived"), "its tooltip says it is archived");
+    A.equal(LS.rowModel("item", { ...byH.A2, archiveFile: undefined, status: "open", draft: "x" }, actx).quick.paste, true, "the same record live: its quick actions back");
+    A.equal(W("item", { ...byH.A1, archiveFile: null }, actx), "not needed|dim", "without its file: the word it had in CLOSED");
+
+    // CLOSED's line counts the store's count until the rows are read, then the rows (hidden at 0).
+    A.equal(LS.archivedCount(3), 3); A.equal(LS.archivedCount(undefined), 0, "absent: 0 (hidden)"); A.equal(LS.archivedCount("4"), 4); A.equal(LS.archivedCount(-2), 0);
+    A.equal(LS.archivedCount(2.7), 2); A.equal(LS.archivedCount(3, got), 5, "read: the rows (legacy ones included, the store's left out)"); A.equal(LS.archivedCount(0, []), 0);
+    A.equal(LS.archivedCount(2, []), 2, "nothing could be read: the count stays (the panel says why below the line)");
+    A.equal(LS.archivedCount(0, [byH.A3]), 1, "count 0 but a legacy file holds one: shown");
+
+    // The lane the dialog steps through: the archived rows as read, in their order.
+    const lr = LS.laneOf(st, "item", byH.A4, { archive: got });
+    A.equal(lr.lane, "archive"); A.deepEqual(lr.ids, got.map((r) => r.id), "the archive lane: the rows as listed, newest first");
+    A.deepEqual(LS.neighbors(lr.ids, byH.A4.id), { at: 3, of: 5, prev: byH.Q1.id, next: byH.A2.id }, "Q1 before it, A2 after it");
+    A.deepEqual(LS.laneOf(st, "item", byH.A4, {}).ids, [byH.A4.id], "no rows given: the record alone");
+    A.deepEqual(LS.laneOf(st, "item", byH.A4, { archive: [byH.A1] }).ids, [byH.A4.id], "rows that do not hold it: the record alone");
+  }
+
   // ── the contract, as text (5.2) ──────────────────────────────────────────
   const lsrc = src("listing.js");
   A.ok(!/from "herdr"|from "gpui-|from "\.\/(nav|reader|panel|detail|views|fixtures|writer|spool)\.js"/.test(lsrc), "listing.js is pure: store.js and words.js only");
-  for (const e of ["BR_WORD", "firstLine", "glyphOf", "stateOf", "rowModel", "entryKey", "moveCursor", "keepPlace", "draftPending", "laneOf", "neighbors"]) A.ok(new RegExp(`^export (const|function) ${e}\\b`, "m").test(lsrc), `listing.js exports ${e}`);
+  for (const e of ["BR_WORD", "firstLine", "glyphOf", "stateOf", "rowModel", "entryKey", "moveCursor", "keepPlace", "draftPending", "laneOf", "neighbors", "archiveRecords", "archivedCount", "closedAtOf"]) A.ok(new RegExp(`^export (const|function) ${e}\\b`, "m").test(lsrc), `listing.js exports ${e}`);
+  A.ok(!/ARCHIVE_ITEMS =|ARCHIVE_LEGACY =|safe_name.*=>|replace\(\/\[\^A-Za-z0-9\._-\]/.test(lsrc), "listing.js keeps no copy of the archive's names (spool.js's are passed in)");
   const rsrc = src("reader.js");
   A.ok(/^export class Reader \{/m.test(rsrc), "reader.js exports class Reader");
+  A.ok(/import \{ writeEvent, archiveDir, within, ARCHIVE_ITEMS, ARCHIVE_LEGACY \} from "\.\/spool\.js";/.test(rsrc), "reader.js takes the archive's folder and names from spool.js (the writer's own), and its time limit");
   for (const name of ["constructor", "startReading", "fallback", "viewStore", "reload", "bump", "overlayLocal", "watchStore", "tickRead", "post", "act", "typeDraft",
     "flushPending", "answerOf", "pasteOn", "demoHow", "stage", "stageAnswers", "copyAnswers", "copyAnswer", "trunkWord", "parentLive", "branchable", "branchLive",
-    "terminalGone", "transcriptOk", "loadPassage", "pinAct", "resume", "pastePending", "sendDraft"]) {
+    "terminalGone", "transcriptOk", "loadPassage", "pinAct", "resume", "pastePending", "sendDraft", "loadArchive", "readArchiveWithin", "demoArchiveOf"]) {
     A.ok(new RegExp(`^  (async )?${name}\\(`, "m").test(rsrc), `Reader.${name}`);
   }
   A.ok(/^  constructor\(_?cx, \{ demo/m.test(rsrc), "constructor(cx, {demo})");
@@ -361,14 +450,24 @@ try {
   for (const name of ["post", "act", "typeDraft", "reload", "overlayLocal", "watchStore", "stageAnswers", "copyAnswers", "copyAnswer", "loadPassage", "pinAct"]) {
     A.ok(!new RegExp(`^  ${name}\\(`, "m").test(psrc), `panel.js does not define ${name} again`);
   }
-  A.ok(/openOverlay\(detailSpec\(\{ session: sid, kind, id, open: o\.open \?\? null, sel, opener: this\.panelId, demo: this\.demo \}\)\)/.test(psrc), "openDetail opens detailSpec with the props of 5.2");
+  A.ok(/openOverlay\(detailSpec\(\{ session: sid, kind, id, open: o\.open \?\? null, sel, opener: this\.panelId, demo: this\.demo, archived: o\.archived \?\? null \}\)\)/.test(psrc), "openDetail opens detailSpec with the props of 5.2 (and an archived row's file)");
+  // The archive (retention, 2026-11-19): reader.js reads it with this copy's own reads, never the writer's; CLOSED ends with its line.
+  const la = (rsrc.match(/^  async loadArchive\(sessionId\) \{[\s\S]*?^  \}$/m) ?? [""])[0];
+  A.ok(la.includes("archiveRecords(") && la.includes("namesIn(own, ARCHIVE_ITEMS)") && la.includes("namesIn(root, ARCHIVE_LEGACY)") && /fs\.readFile\(path, "utf8"\)/.test(la),
+    "Reader.loadArchive lists the session's folder and the legacy files and reads them with fs.readFile (past the text cap), through archiveRecords");
+  A.ok(!/writeEvent|this\.post\(|setShared|writerClaim|bounded/.test(la), "loadArchive posts, claims and bounds nothing");
+  A.ok(/async function namesIn\(dir, re\) \{\s*const names = await fs\.readdir\(dir\)\.catch\(\(\) => \[\]\);/.test(rsrc), "a missing folder is an empty archive (readdir's error caught)");
+  const al = (psrc.match(/^  archivedLines\(out, t, st, s\) \{[\s\S]*?^  \}$/m) ?? [""])[0];
+  A.ok(al.includes('"arch:items"') && al.includes("archivedLineWords(n, shown)") && al.includes('this.rowEntry(out, t, st, s, "item", r)'), "panel.js archivedLines: the line is an entry (arch:items), its rows item rows");
+  A.ok(/if \(key === "closed"\) this\.archivedLines\(out, t, st, s\);/.test(psrc), "CLOSED ends with the archived line");
+  A.ok(/openOf\(x\) \{ return x\?\.archiveFile \? \{ archived: x\.archiveFile \} : \{\}; \}/.test(psrc), "an archived row opens its dialog with its file");
   A.ok(/track_focus\(this\.keys\)\.on_key_down\(/.test(psrc) && /track_scroll\(this\.listScroll\)/.test(psrc), "the root tracks the list's focus, the list its scroll");
   const nd = (psrc.match(/^  noteDetail\(cx\) \{[\s\S]*?^  \}$/m) ?? [""])[0];
   A.ok(/if \(key && key !== this\.openKey && this\.detailId && open\.overlay === this\.detailId\) this\.pendingCursor = key;/.test(nd),
     "noteDetail: its dialog moving in place (⌘↓ / ⌘↑) moves the cursor (settleCursor applies it when the row is listed)");
   A.ok(/PANEL_IGNORES = new Set\(\[[^\]]*"detail-next", "detail-prev"\]\)/.test(psrc), "the panel ignores detail-next and detail-prev (the dialog's)");
 
-  console.log(`OK: list, ${checks} checks (firstLine, glyphOf, every state word, rowModel pills, text, quick actions and tooltips, the drafted mark, the row's widths at 280 px, entryKey, moveCursor, keepPlace, laneOf and neighbors; Reader and panel contract as text), 0 failure(s)`);
+  console.log(`OK: list, ${checks} checks (firstLine, glyphOf, every state word, rowModel pills, text, quick actions and tooltips, the drafted mark, the row's widths at 280 px, entryKey, moveCursor, keepPlace, laneOf and neighbors; the archive's reading rule, rows, count and lane; Reader and panel contract as text), 0 failure(s)`);
 } finally {
   if (own) fs.rmSync(dir, { recursive: true, force: true });
 }

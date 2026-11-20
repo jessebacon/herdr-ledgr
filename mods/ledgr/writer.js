@@ -25,8 +25,12 @@
 //   - ingests ledgr-data/spool with watchFolder, writes store.json after every change and before
 //     unlinking the files it applied (past Herdr's 1 MiB text-file cap through spool.js writeLarge);
 //     an event whose apply throws is left out of the store and moved to spool/failed (applyBatch);
-//     publishes shared("ledgr.chips"); writes snapshot.json and archive/; runs the extractor's
-//     --retry for `retry` events;
+//     publishes shared("ledgr.chips"); writes snapshot.json; runs the extractor's --retry for `retry`
+//     events;
+//   - retention (2026-11-19, housekeep): closed items past retention_days and turn records past
+//     retention.turns move out of store.json into new files under archive/<sid>/, each written once,
+//     read back, and only then removed from the store; a `restore` event gets its archived record
+//     before its batch applies (applyBatch);
 //   - track(cx) from the host's render: interrupts and tier-3 status turns (spec 6.5, 2.9);
 //   - respond(cx) from the host's render: answers a panel's shared("ledgr.ping") by re-claiming;
 //   - Phase 2: launches the branches the store accepted from a panel's `branch` event
@@ -51,9 +55,9 @@
 import * as fs from "fs/promises";
 import { randomUUID } from "crypto";
 import { shared, setShared, readTextFile, writeTextFile, watchFolder, agents, terminals, panes, run, exec, hc, openOverlay, appHome, home } from "herdr";
-import { DEFAULTS, loadConfig, dataDir, spoolDir, turnPath, storePath, binDir, agentLabel, panelPlace, panelShown, showPanel, liveHome, disabledSpaces, terminalSpace, textScaleOf } from "./config.js";
+import { DEFAULTS, LIMITS, loadConfig, dataDir, spoolDir, turnPath, storePath, binDir, agentLabel, panelPlace, panelShown, showPanel, liveHome, disabledSpaces, terminalSpace, textScaleOf, retentionDaysOf } from "./config.js";
 import { Store, isHuman, thresholdOf } from "./store.js";
-import { SpoolReader, readMap, writeAtomic, writeAtomicWith, overCap, countFailed, listSpool, within, spanWords } from "./spool.js";
+import { SpoolReader, readMap, writeAtomic, writeAtomicWith, writeNew, overCap, byteLength, archiveDir, archiveFileOf, archivedRecord, countFailed, listSpool, within, spanWords } from "./spool.js";
 import { maxDepthOf, hcRunArgs, claudeArgv, resumeArgs, transcriptPathOf } from "./branch.js";
 
 export const ENGINE_FILES = ["config.js", "store.js", "spool.js", "writer.js", "branch.js", "confluence.js"];
@@ -86,8 +90,52 @@ export const BACKOFF_MAX_MS = 1800000;
 export const WRITER_CHECK_MS = 15000;
 // ledgr-data/log/writer.log keeps its last this many bytes.
 export const WRITER_LOG_MAX = 65536;
-// The temporary copies writeLarge makes beside store.json and snapshot.json.
-const LARGE_TMP = /^\.(store|snapshot)\.json\.large-/;
+// The temporary copies writeLarge makes beside store.json and snapshot.json (and beside the one-time
+// store.pre-retention-<ms>.json, whose move, should it run late, would only fail).
+const LARGE_TMP = /^\.(store|snapshot)(\.pre-retention-\d+)?\.json\.large-/;
+
+// Retention (2026-11-19). store.json had reached 1.76 MB, so every save went through writeLarge, the path
+// the writer stalled on. Housekeeping (housekeep) runs once a day, at the first start after the upgrade
+// (d.retention v 1 missing), and within the hour once the saved store passes HOUSE_SIZE bytes and has grown
+// by HOUSE_GROWTH since the last run ended. No archive file passes ARCHIVE_FILE_MAX bytes, half of Herdr's
+// text-file cap, so each is written with writeTextFile (create-only) and read back with readTextFile.
+// HOUSE_GROWTH: on the live data the store stays over HOUSE_SIZE after its trim (open items are never
+// archived), so the size alone would start a run every hour, each writing small files for every session that
+// had a turn; 64 KiB is about fifteen hours of the store's growth (some 100 KB a day), a quarter of the room
+// between HOUSE_SIZE and the 1 MiB cap, so a busy day still gets a run or two before the cap and an idle
+// one none but the daily run.
+export const HOUSE_SIZE = 768 * 1024;
+export const HOUSE_GROWTH = 64 * 1024;
+export const ARCHIVE_FILE_MAX = 512 * 1024;
+const HOUR = 3600e3;
+
+// retention.turns (config.json: the turn records kept per session), checked: a whole number from
+// LIMITS.turnHeads (the newest records keep their textHead; fewer would cut the turn a live session is in)
+// to 60 (store.js turnRec's cap); not a number, the default (config.js DEFAULTS). retention_days goes to
+// store.js archivable, which reads it as config.js retentionDays does (whole days, 1 to 30).
+export function turnsKept(cfg) {
+  const v = cfg?.retention?.turns;
+  const n = v === null || v === undefined || v === "" || typeof v === "boolean" || !Number.isFinite(Number(v)) ? null : Number(v);
+  return n === null ? Number(DEFAULTS.retention?.turns) || 12 : Math.min(60, Math.max(Number(LIMITS.turnHeads) || 2, Math.floor(n)));
+}
+
+// Lines into archive files: chunks whose text (the lines, each ending in a newline) stays within max bytes.
+// {chunks: [{idx, text}], over: [idx]}: idx the lines' indexes; a line alone longer than max is in `over`
+// (written nowhere: what it stands for stays in the store).
+export function archiveChunks(lines, max = ARCHIVE_FILE_MAX) {
+  const chunks = [], over = [];
+  let cur = [], size = 0;
+  lines.forEach((line, i) => {
+    const b = byteLength(line) + 1;
+    if (b > max) { over.push(i); return; }
+    if (cur.length && size + b > max) { chunks.push(cur); cur = []; size = 0; }
+    cur.push(i);
+    size += b;
+  });
+  if (cur.length) chunks.push(cur);
+  return { chunks: chunks.map((idx) => ({ idx, text: `${idx.map((i) => lines[i]).join("\n")}\n` })), over };
+}
+const rand6 = () => Math.floor(Math.random() * 36 ** 6).toString(36).padStart(6, "0");
 
 // Replaces path with text past writeTextFile's 1 MiB (spool.js TEXT_FILE_MAX): fs.writeFile to a
 // dotfile beside it, read back and compared (a short write never replaces the file), then `mv -f` over
@@ -192,7 +240,7 @@ export class Writer {
     // The watchdog (2026-11-19). gen: the generation; a pass, a save or a loop of an older one changes
     // nothing more (current()). starting / startAt / startStep / startSince: a start running, the step it
     // waits in. saveStep: {step, since}, the await the save chain waits in (null when idle). stall: the last
-    // finding, {at, step, ms, n, kind: "pass" | "start" | "spool", ok, back?, name?, retryAt?, tries?}.
+    // finding, {at, step, ms, n, kind: "pass" | "start" | "house" | "spool", ok, back?, name?, retryAt?, tries?}.
     // coolUntil: backing off until then (backOff), no restart before it.
     this.gen = 0;
     this.coolUntil = 0;
@@ -209,6 +257,17 @@ export class Writer {
     this.lastUnstick = 0;
     this.waitedOn = null;           // the spool event a restart was already tried for
     this.logChain = Promise.resolve();
+    // Housekeeping (retention, 2026-11-19). house: the run of generation `gen` going, {gen, at, step,
+    // since, why} (progress() shows it, so the watchdog sees it move file by file), else null. houseTry: when
+    // this copy last began one (none again within the hour: a run the watchdog gave up is not begun again by
+    // the restart). houseMs: the last run's <ms> in its file names (each run's larger). houseRun: the last
+    // run's promise (tests). preRetention: the one-time copy this copy wrote (not written twice).
+    this.house = null;
+    this.houseTry = 0;
+    this.houseEnd = null;           // store.json's bytes when the last run ended (houseDue's growth; in memory)
+    this.houseMs = 0;
+    this.houseRun = null;
+    this.preRetention = null;
   }
 
   claim() {
@@ -246,12 +305,21 @@ export class Writer {
   // An await of the save chain or of a start, limited to saveTimeout (a timer of the latest cx).
   bounded(p, what) { return within(this.cx, this.saveTimeout, p, what); }
 
-  // What this copy is waiting in now: the running pass, else a start. {at, step, since}, or null.
+  // What this copy is waiting in now: the running pass, else a start, else a housekeeping run of this
+  // generation. {at, step, since}, or null.
   progress() {
     const p = this.reader?.pass;
     if (p) return { at: p.at, step: p.step, since: p.since };
     if (this.starting) return { at: this.startAt, step: `start: ${this.startStep ?? "?"}`, since: this.startSince || this.startAt };
+    const h = this.house;
+    if (h && h.gen === this.gen) return { at: h.at, step: `housekeeping: ${h.step}`, since: h.since };
     return null;
+  }
+
+  // The housekeeping run of generation gen is about to wait in step s.
+  houseStep(gen, s) {
+    const h = this.house;
+    if (h && h.gen === gen) { h.step = s; h.since = Date.now(); }
   }
 
   // A start is about to wait in step s.
@@ -264,6 +332,8 @@ export class Writer {
     const p = this.reader.pass;
     if (p && String(p.step).startsWith("save")) this.reader.step(p, `save: ${s}`);
     else if (!p && this.starting && String(this.startStep).startsWith("save")) this.mark(`save: ${s}`);
+    const h = this.house;
+    if (h && h.gen === this.gen && String(h.step).startsWith("save")) this.houseStep(h.gen, `save: ${s}`);
   }
 
   // A new generation: the running pass is given up (spool.js abandon), the save chain starts afresh (a
@@ -276,6 +346,7 @@ export class Writer {
     this.saveStep = null;
     this.watching = false;
     this.watchingConfig = false;
+    this.house = null;               // a housekeeping run of the old generation writes and removes nothing more
     return this.gen;
   }
 
@@ -389,8 +460,9 @@ export class Writer {
       this.scheduleSnapshot(cx);
       if (this.reader.missing) this.waitForSpool(cx); else this.watch(cx);
       this.watchConfig(cx);
-      this.mark("housekeeping");
-      await this.housekeep().catch((e) => { this.note = `housekeeping: ${String(e?.message ?? e)}`; });
+      // Its own task, not a step of the start: a start answers no ping while it runs (respond), and a
+      // first run after the upgrade writes dozens of files.
+      this.houseKick(cx);
       cx.notify();
     } finally {
       if (gen === this.gen) {
@@ -432,6 +504,10 @@ export class Writer {
   // read by the capture box before it has read config.json; textScale is ui.textScale, checked, which the
   // chip, the host button and the box draw their text with).
   applyConfig(cfg) {
+    // Retention changed (the settings row, or the installer moving the old 14 to 3): the size trigger may run
+    // again without waiting for HOUSE_GROWTH (houseDue), so a shorter retention applies within the hour.
+    const ret = (c) => `${retentionDaysOf(c)}|${turnsKept(c)}`;
+    if (this.cfg && ret(this.cfg) !== ret(cfg)) this.houseEnd = null;
     this.cfg = cfg;
     this.live.maxDepth = maxDepthOf(cfg);
     this.live.threshold = thresholdOf(cfg);
@@ -636,6 +712,32 @@ export class Writer {
       if (!live()) return false;
       this.applyConfig(cfg);
     }
+    // A `restore` (the dialog's Reopen on an archived item) gets its record here, before the batch
+    // applies: the last line of archive/<sid>/<file> (or a legacy archive/<yyyy-mm>.jsonl) whose id is
+    // ev.item, as ev.record; else ev.record_error. Either way it applies and leaves the spool (store.js
+    // on_restore changes nothing without a record): an event that waited would be one the passes never
+    // apply. Read with fs.readFile (a legacy month file may pass the text-file cap), once per file per batch.
+    const restores = batch.filter(({ ev }) => ev?.type === "restore" && !(ev.id && this.live.d.ingested.includes(ev.id)));
+    if (restores.length) {
+      const texts = new Map();
+      for (const { ev } of restores) {
+        delete ev.record; delete ev.record_error;   // the writer's to attach, never the event's own
+        const loc = archiveFileOf(ev.session_id, ev.file);
+        let got = loc.error ? { error: loc.error } : null;
+        if (!got) {
+          if (!texts.has(loc.rel)) {
+            step(`apply: ${loc.rel}`);
+            texts.set(loc.rel, await this.bounded(fs.readFile(`${dataDir()}/${loc.rel}`, "utf8"), `reading ${loc.rel}`)
+              .catch((e) => ({ error: `${loc.rel} could not be read (${String(e?.message ?? e)})` })));
+            if (!live()) return false;
+          }
+          const text = texts.get(loc.rel);
+          got = typeof text === "string" ? archivedRecord(text, ev.session_id, ev.item) : text;
+        }
+        if (got.record) ev.record = got.record;
+        else { ev.record_error = got.error; this.note = `restore of ${String(ev.item ?? "?").slice(0, 60)}: ${got.error}`; }
+      }
+    }
     step("apply");
     const failed = [], before = this.live.toText();
     let done;
@@ -664,6 +766,8 @@ export class Writer {
       // A session in a space where ledgr is off does not open the panel (its asks are kept, hidden).
       if (ev?.type === "asks" && Array.isArray(ev.asks) && ev.asks.length && !this.offEvent(ev)) newAsks = true;
       if (ev?.type === "pending") pending = true;
+      if (r.restore && !r.restore.ok) this.note = `restore of ${String(r.restore.item ?? "?").slice(0, 60)}: ${r.restore.error ?? "not restored"}`;
+      if (r.note) this.note = r.note;   // an act for an item no longer in the store (store.js on_act)
     }
     for (const s of settles) {
       step("apply: re-anchor");
@@ -947,44 +1051,182 @@ export class Writer {
     });
   }
 
-  // Once a day: closed items past retention move to archive/<yyyy-mm>.jsonl (spec 3.2).
-  async housekeep() {
-    const now = Date.now();
-    const last = Number(this.live.d.houseAt) || 0;
-    if (now - last < DAY || !this.amWriter() || !(await this.bounded(fs.exists(dataDir()), "ledgr-data").catch(() => false))) return;
+  // ── housekeeping: retention (2026-11-19) ──────────────────────────────
+  // Why a run is due now, or null. Only the holder, and one run per generation (this.house). A run this
+  // copy began less than an hour ago holds every trigger back. Then: the first start after the upgrade
+  // (d.retention v 1 missing), a day since the last run (d.houseAt), or the store as last saved over
+  // HOUSE_SIZE bytes with the last run over an hour ago and HOUSE_GROWTH bytes more than when the last run
+  // this copy saw ended (houseEnd; none recorded, after a relaunch or a takeover: one run is allowed).
+  houseDue(now = Date.now()) {
+    if (this.retired || !this.amWriter() || (this.house && this.house.gen === this.gen)) return null;
+    if (now - this.houseTry < HOUR) return null;
+    const d = this.live.d, last = Number(d.houseAt) || 0;
+    if (d.retention?.v !== 1) return "first run";
+    if (now - last >= DAY) return "daily";
+    if (now - last >= HOUR && overCap(this.storeText, HOUSE_SIZE)
+      && (this.houseEnd === null || byteLength(this.storeText) >= this.houseEnd + HOUSE_GROWTH)) return "size";
+    return null;
+  }
+
+  // From start (at its end) and every tick: a due run as its own task, so neither waits for it. Returns the
+  // run's promise (it resolves with the run's tally, or null), or null when none is due.
+  houseKick(cx) {
+    const now = Date.now(), why = this.houseDue(now);
+    if (!why || !cx?.spawn) return null;
     const gen = this.gen;
-    this.live.d.houseAt = now;
-    const old = this.live.archivable(Number(this.cfg.retention_days) || 14, now);
-    const byMonth = new Map();
-    for (const it of old) {
-      const d = new Date(it.resolvedAt ?? it.updatedAt ?? now);
-      const k = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-      byMonth.set(k, [...(byMonth.get(k) ?? []), it]);
+    this.houseTry = now;
+    this.house = { gen, at: now, step: "queued", since: now, why };
+    let end = null;
+    const run = this.houseRun = new Promise((r) => { end = r; });
+    cx.spawn(async (cx) => {
+      let tally = null;
+      try { tally = await this.housekeep(cx, gen, why); }
+      catch (e) {
+        if (gen === this.gen) { this.note = `housekeeping: ${String(e?.message ?? e)}`; this.log(`housekeeping (${why}) failed: ${String(e?.message ?? e)}`); }
+      } finally {
+        if (this.house?.gen === gen) { this.house = null; if (this.claimedPass) this.beat(); }
+        end(tally);
+      }
+    });
+    return run;
+  }
+
+  // One run (houseKick). Closed items past retention_days (store.js archivable) and turn records past
+  // retention.turns, with the textHead of kept records past the newest LIMITS.turnHeads (planSlim), leave
+  // store.json for new files under archive/<sid>/ (spool.js archiveDir), per session: items-<ms>-<rand6>.jsonl
+  // (each item as it was) and turns-<ms>-<rand6>.jsonl ({sessionId, turn, rec} or {sessionId, turn,
+  // textHead}), split so none passes ARCHIVE_FILE_MAX. Each file is created, never written over (spool.js
+  // writeNew: a name already taken fails the write), and read back whole; only then, this generation still
+  // the writer's, are its items removed (removeItems) and its records cut (applySlim, once, after the last
+  // session), and store.json is saved when the run changed it. A file not written or not confirmed leaves
+  // what it holds in the store for the next run. The first run after the upgrade first keeps the store as
+  // it was in store.pre-retention-<ms>.json (writeLarge: it is over the cap), and without that copy
+  // archives nothing.
+  // Drains run meanwhile (they are not held back, so no event waits behind a run but for one save in the
+  // chain): an item reopened or changed while its file was written is not removed (removeItems takes only
+  // one still closed and exactly as planned) and a record changed is not cut (applySlim compares), so
+  // the file holds a stale line, harmless (the store wins over any archive line). Every await is limited
+  // (bounded, writeNew, writeLarge) and named (houseStep: progress() shows it, so the watchdog sees the run
+  // move file by file); after each one, a run whose generation was given up writes and removes nothing
+  // more: abandoned at any await, the store is the one on disk and at worst a file holds a duplicate.
+  async housekeep(cx, gen, why) {
+    if (cx) this.cx = cx;
+    const ok = () => this.current(gen);
+    const step = (s) => this.houseStep(gen, s);
+    const ms = this.houseMs = Math.max(Date.now(), this.houseMs + 1);   // each run's files newer than the last's
+    step("ledgr-data");   // none yet (no hook has run): nothing to keep, and no folder made for it
+    if (!(await this.bounded(fs.readdir(dataDir()), "listing ledgr-data").then(() => true, () => false)) || !ok()) return null;
+    const first = this.live.d.retention?.v !== 1;
+    const sizeBefore = this.storeText?.length ?? 0;
+    let kept = null;
+    if (first && !this.live.empty && !this.preRetention) {
+      // store.json as this writer last read or saved it, byte for byte (what is only in memory is not yet the store).
+      const name = `store.pre-retention-${ms}.json`, text = this.storeText ?? this.live.toText();
+      step(`keeping ${name}`);
+      const err = await writeLarge(`${dataDir()}/${name}`, text, { cx: this.cx, ms: this.saveTimeout, ok, step: (s) => step(`keeping ${name}: ${s}`) });
+      if (!ok()) return null;
+      if (err) {
+        this.note = `housekeeping: ${name} not written (${err}); nothing archived, it tries again within the hour`;
+        this.log(`housekeeping (${why}): ${name} not written (${err}); nothing archived`);
+        return null;
+      }
+      this.preRetention = kept = name;
     }
-    if (old.length) await this.bounded(fs.mkdir(`${dataDir()}/archive`, { recursive: true }), "making archive/").catch(() => {});
-    for (const [k, list] of byMonth) {
-      if (!this.current(gen)) return;
-      const path = `${dataDir()}/archive/${k}.jsonl`;
-      // An item's line once: one already there (an earlier write that got no answer and landed) is not
-      // added again; made again from the file at each try (writeAtomicWith).
-      const lines = list.map((it) => JSON.stringify(it));
-      const add = (cur) => {
-        const have = new Set(cur.split("\n"));
-        const fresh = lines.filter((l) => !have.has(l));
-        return fresh.length ? `${cur}${cur && !cur.endsWith("\n") ? "\n" : ""}${fresh.join("\n")}\n` : null;
-      };
-      if (await this.bounded(writeAtomicWith(path, add), `writing archive/${k}.jsonl`).catch(() => false)
-        && this.current(gen)) this.live.removeItems(list);
+    // The plan, from the store as it is now; grouped per session (an item or record with no usable session
+    // id stays in the store).
+    step("plan");
+    const plan = this.live.planSlim(turnsKept(this.cfg));
+    const per = new Map();
+    const group = (sid) => { let g = per.get(sid); if (!g) per.set(sid, g = { items: [], cut: [], heads: [] }); return g; };
+    // archivable's items are copies as the store holds them now: each one's line, and what removeItems
+    // compares the store with once its file is confirmed. Only with a config.json read as it is (or none:
+    // the defaults are then the config): when its read failed or timed out, this.cfg may be the defaults in
+    // place of the person's days (30 read as 3), so this run archives no item (turn records still go).
+    const cfgOk = this.cfg?._source === "file" || (this.cfg?._source === "defaults" && !this.cfg?._error);
+    const items = cfgOk ? this.live.archivable(this.cfg?.retention_days, Date.now()) : [];
+    for (const it of items) if (archiveDir(it.anchor?.sessionId)) group(it.anchor.sessionId).items.push(it);
+    for (const c of plan.cut ?? []) if (archiveDir(c.sessionId)) group(c.sessionId).cut.push(c);
+    for (const h of plan.heads ?? []) if (archiveDir(h.sessionId)) group(h.sessionId).heads.push(h);
+    const t = { items: 0, stayed: 0, cut: 0, heads: 0, files: 0, failed: [], cfgSkipped: !cfgOk };
+    const slim = { cut: [], heads: [] };   // confirmed in a turns file: applied once, after the last session
+    for (const sid of [...per.keys()].sort()) {
+      const g = per.get(sid), dir = archiveDir(sid);
+      step(`making archive/${dir}`);
+      await this.bounded(fs.mkdir(`${dataDir()}/archive/${dir}`, { recursive: true }), `making archive/${dir}`).catch(() => {});
+      if (!ok()) return null;
+      if (g.items.length) {
+        const done = await this.archiveLines(gen, dir, "items", ms, g.items.map((it) => [JSON.stringify(it), it]), t);
+        if (done === null || !ok()) return null;
+        if (done.length) { const gone = this.live.removeItems(done) ?? []; t.items += gone.length; t.stayed += done.length - gone.length; }
+      }
+      const lines = [...g.cut.map((c) => [JSON.stringify({ sessionId: c.sessionId, turn: c.turn, rec: c.rec }), { cut: c }]),
+        ...g.heads.map((h) => [JSON.stringify({ sessionId: h.sessionId, turn: h.turn, textHead: h.textHead }), { head: h }])];
+      if (lines.length) {
+        const done = await this.archiveLines(gen, dir, "turns", ms, lines, t);
+        if (done === null || !ok()) return null;
+        for (const x of done) (x.cut ? slim.cut.push(x.cut) : slim.heads.push(x.head));
+      }
     }
-    await this.saveStore();
+    if (!ok()) return null;
+    // Once, for every session: applySlim makes every record it leaves lean (a default textPath, null fields:
+    // lossless), so a call per session would leave the next session's planned records changed, not cut.
+    const pre = this.live.toText();
+    const r = this.live.applySlim(slim);
+    t.cut = Number(r?.cut) || 0;
+    t.heads = Number(r?.heads) || 0;
+    // Saved when this run changed the store: items removed, records cut or made lean, or the first run's
+    // d.retention. A run that found nothing writes no file and saves nothing; its houseAt (and whatever else
+    // waits unsaved, the chips' diag) goes with the next save. houseEnd, the store's bytes now, is what the
+    // size trigger measures growth from (on today's data the store stays over HOUSE_SIZE after its trim).
+    const changed = first || t.items > 0 || this.live.toText() !== pre;
+    this.live.d.houseAt = Date.now();
+    if (first) this.live.d.retention = { v: 1, at: Date.now() };
+    t.saved = false;
+    if (changed) {
+      step("save");
+      t.saved = await this.saveStore();
+      if (!ok()) return null;
+    }
+    this.houseEnd = byteLength(this.storeText ?? "");
+    if (t.files || t.failed.length || first || t.cfgSkipped) {
+      this.log(`housekeeping (${why}): ${t.items} closed item(s) and ${t.cut} turn record(s) archived, ${t.heads} textHead(s) moved, in ${t.files} file(s); `
+        + `store.json ${sizeBefore} -> ${this.storeText?.length ?? "?"} characters${t.saved ? "" : " (not saved yet)"}`
+        + `${kept ? `; the store as it was kept in ${kept}` : ""}${t.stayed ? `; ${t.stayed} changed meanwhile, kept` : ""}`
+        + `${t.cfgSkipped ? `; config.json not read (${String(this.cfg?._error ?? "no answer").slice(0, 80)}), so no closed item archived` : ""}`
+        + `${t.failed.length ? `; ${t.failed.length} file(s) not written, their contents kept in the store (${t.failed[0]})` : ""}`);
+    }
+    if (t.failed.length) this.note = `housekeeping: ${t.failed.length} archive file(s) not written (${t.failed[0]}); the next run tries again`;
+    else if (t.cfgSkipped) this.note = "housekeeping: config.json could not be read, so no closed item was archived this run";
+    return t;
+  }
+
+  // One kind of a session's lines ([line, payload]) into new archive/<dir>/<kind>-<ms>-<rand6>.jsonl files:
+  // the payloads of the lines in files written and read back whole, or null when the run was given up. A
+  // file that failed, or a line too long for any file, goes in t.failed; its payloads are not returned.
+  async archiveLines(gen, dir, kind, ms, entries, t) {
+    const ok = () => this.current(gen);
+    const { chunks, over } = archiveChunks(entries.map(([line]) => line), ARCHIVE_FILE_MAX);
+    if (over.length) t.failed.push(`${over.length} line(s) of archive/${dir} over ${ARCHIVE_FILE_MAX} bytes`);
+    const done = [];
+    for (const { idx, text } of chunks) {
+      if (!ok()) return null;
+      const rel = `archive/${dir}/${kind}-${ms}-${rand6()}.jsonl`;
+      const err = await writeNew(`${dataDir()}/${rel}`, text, { cx: this.cx, ms: this.saveTimeout, ok,
+        step: (s) => this.houseStep(gen, `${s === "write" ? "writing" : "reading back"} ${rel}`) });
+      if (!ok()) return null;
+      if (err) { t.failed.push(`${rel}: ${err}`); continue; }
+      t.files += 1;
+      for (const i of idx) done.push(entries[i][1]);
+    }
+    return done;
   }
 
   // The host's 60 s timer: a back-off first (cooling), then the watchdog (a pass or a start stuck in one
   // step: restarted, nothing else this tick), then the safety rescan, the waiting check, the heartbeat (the
   // claim renewed with the writer's health and its pass), deferred items waking, config.json and every
-  // identity-map record read again (the safety net for watchConfig), housekeeping. After each await nothing
-  // more unless this tick's generation is still the writer's. A host that does not hold the role checks
-  // instead that the holder is alive (probe).
+  // identity-map record read again (the safety net for watchConfig), housekeeping when due (its own task,
+  // houseKick). After each await nothing more unless this tick's generation is still the writer's. A host
+  // that does not hold the role checks instead that the holder is alive (probe).
   tick(cx) {
     this.cx = cx;
     if (this.cooling(cx)) return;
@@ -1009,9 +1251,8 @@ export class Writer {
       if (this.chipKey() !== before) this.publish();
       const spaces = await this.refreshSpaces(null, gen);
       if (!this.current(gen)) return;
-      await this.housekeep().catch((e) => { this.note = `housekeeping: ${String(e?.message ?? e)}`; });
-      if (!this.current(gen)) return;
       if (changed || spaces) this.commit(cx); else this.publish();
+      this.houseKick(cx);
     });
   }
 
@@ -1034,7 +1275,8 @@ export class Writer {
   }
 
   // The watchdog, from tick (sync: it runs even while every await of the writer waits). Stuck: this
-  // copy's pass, or its start, has waited in one step longer than PASS_STUCK_MS (progress()); or a start
+  // copy's pass, its start, or its housekeeping run (kind "house"), has waited in one step longer than
+  // PASS_STUCK_MS (progress()); or a start
   // ended without starting while this copy holds the claim (it threw: a read that got no answer). Then
   // unstick. A start of a copy that does not hold the claim is given up too, without taking the role.
   watchdog(cx) {
@@ -1042,7 +1284,7 @@ export class Writer {
     const now = Date.now(), p = this.progress();
     let f = null;
     if (p && now - p.since > PASS_STUCK_MS && (this.starting || this.amWriter())) {
-      f = { step: p.step, ms: now - p.since, kind: this.reader.pass ? "pass" : "start" };
+      f = { step: p.step, ms: now - p.since, kind: this.reader.pass ? "pass" : this.starting ? "start" : "house" };
     } else if (!this.starting && !this.started && this.holds() && this.startAt) {
       f = { step: `start: ${this.startStep ?? "?"} (it ended without starting)`, ms: now - this.startAt, kind: "start" };
     }

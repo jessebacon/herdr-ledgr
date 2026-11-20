@@ -7,10 +7,12 @@
 // A drain is one pass (2026-11-19): `pass` names the step it is in and since when, which the writer's
 // watchdog reads (writer.js PASS_STUCK_MS); abandon() gives a pass up, and an abandoned pass changes
 // nothing more, whenever its await settles, if ever.
+// Also the names under ledgr-data/archive/ and their create-only write (writeNew), which the writer's
+// housekeeping and its `restore` reads use (retention, 2026-11-19).
 import * as fs from "fs/promises";
 import { randomUUID } from "crypto";
 import { readTextFile, writeTextFile } from "herdr";
-import { LIMITS, spoolDir, terminalsDir, terminalFile } from "./config.js";
+import { LIMITS, spoolDir, terminalsDir, terminalFile, safeName, ARCHIVE_ITEMS, ARCHIVE_LEGACY } from "./config.js";
 
 const base = (p) => String(p).split("/").pop();
 const isEvent = (n) => n.endsWith(".json") && !n.startsWith(".") && !n.startsWith("bad-");
@@ -33,6 +35,7 @@ export function spanWords(ms) {
 export function within(cx, ms, p, what) {
   let task = null, fire = null;
   const limit = new Promise((_, reject) => { fire = reject; });
+  limit.catch(() => {});   // a timer whose task came back empty still fires: nothing then listens to the limit
   try {
     task = cx?.timer?.after?.(ms, () => {
       const e = new Error(`${what}: no answer in ${spanWords(ms)}`);
@@ -62,6 +65,78 @@ export function overCap(text, max = TEXT_FILE_MAX) {
     n += c < 0x800 || (c >= 0xd800 && c <= 0xdfff) ? 1 : 2;
   }
   return n > max;
+}
+
+// text's length in bytes as UTF-8 (overCap's count, whole): how much of an archive file a line takes.
+export function byteLength(text) {
+  const s = String(text ?? "");
+  let n = s.length;
+  for (const ch of s.match(/[^\x00-\x7f]/g) ?? []) {
+    const c = ch.charCodeAt(0);
+    n += c < 0x800 || (c >= 0xd800 && c <= 0xdfff) ? 1 : 2;
+  }
+  return n;
+}
+
+// ── archive/ (retention, 2026-11-19) ──
+// ledgr-data/archive/<sid>/items-<ms>-<rand6>.jsonl (one item per line, as it was in the store) and
+// turns-<ms>-<rand6>.jsonl (a cut turn record {sessionId, turn, rec}, or a stripped head {sessionId, turn,
+// textHead}), each written once by the writer's housekeeping (writer.js housekeep) and never again; the
+// legacy archive/<yyyy-mm>.jsonl (any session) is only read. Reading rule: an id the store holds wins over
+// any archive line; among lines for one id, the newest file's (largest <ms>) last line.
+// The folder of a session's archive files: its id made safe (config.js safeName, as bin/lib safe_name
+// names bin/mcp's folders); null for no id, or one that would name "." or "..".
+export function archiveDir(sid) {
+  if (typeof sid !== "string" || !sid) return null;
+  const d = safeName(sid);
+  return d === "." || d === ".." ? null : d;
+}
+// The two names a restore's file may have (config.js, which the store reads them from too).
+export { ARCHIVE_ITEMS, ARCHIVE_LEGACY };
+
+// Where a `restore` event's file is, under ledgr-data: archive/<archiveDir(sid)>/<file> for an item file,
+// or the legacy archive/<yyyy-mm>.jsonl. A plain name of one of those two shapes only (no separator, no
+// "..", not hidden): {rel, legacy}, or {error}.
+export function archiveFileOf(sid, file) {
+  const dir = archiveDir(sid), f = typeof file === "string" ? file : "";
+  if (!dir) return { error: "the event names no session" };
+  if (ARCHIVE_LEGACY.test(f)) return { rel: `archive/${f}`, legacy: true };
+  if (ARCHIVE_ITEMS.test(f)) return { rel: `archive/${dir}/${f}`, legacy: false };
+  return { error: `not an archive file name: ${JSON.stringify(f).slice(0, 80)}` };
+}
+
+// The archived item `item` of session `sid` in an archive file's text: the last line whose id is item,
+// which must be that session's (a legacy file holds every session's). {record} or {error}.
+export function archivedRecord(text, sid, item) {
+  if (typeof item !== "string" || !item) return { error: "the event names no item" };
+  const lines = String(text ?? "").split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i] || !lines[i].includes(item)) continue;
+    let r;
+    try { r = JSON.parse(lines[i]); } catch { continue; }
+    if (!r || typeof r !== "object" || r.id !== item) continue;
+    return r.anchor?.sessionId === sid ? { record: r } : { error: `${item} in that file is another session's` };
+  }
+  return { error: `${item} is not in that file` };
+}
+
+// Creates path with text, never over a file already there: writeTextFile's expected null means "create"
+// (herdr.d.ts: "null creates a new file"; it rejects on a stale snapshot), so a name already taken, by a
+// write that landed late or by chance, fails this write instead of replacing that file. Then reads it back
+// (readTextFile; text stays under the cap). Resolves null when the file holds exactly text, else the error's
+// text. ok() is asked right before the write (a run given up writes nothing more); each await waits at most
+// ms (within, with cx's timer); step(s) names each wait.
+export async function writeNew(path, text, { cx = null, ms = 20000, ok = null, step = null } = {}) {
+  const mark = (s) => { try { step?.(s); } catch { /* diagnostics only */ } };
+  if (overCap(text)) return `${base(path)} over the text-file cap, not written`;
+  if (ok && !ok()) return "given up before the write";
+  try { mark("write"); await within(cx, ms, writeTextFile(path, text, null), `writing ${base(path)}`); }
+  catch (e) { return `${base(path)} not written: ${String(e?.message ?? e)}`; }
+  let back;
+  try { mark("read back"); back = await within(cx, ms, readTextFile(path), `reading ${base(path)} back`); }
+  catch (e) { return `${base(path)} not read back: ${String(e?.message ?? e)}`; }
+  if (back !== text) return back === null ? `${base(path)} not there when read back` : `${base(path)} read back other text (${back.length} of ${text.length} characters)`;
+  return null;
 }
 
 // Events whose apply threw: spool/failed/<name>, with <name without .json>.error.txt beside it.
@@ -281,7 +356,8 @@ export async function writeEvent(type, payload) {
 }
 
 // Replaces a file atomically with writeTextFile's compare-and-swap (one retry on a race). For a text
-// that does not depend on what the file holds (a whole snapshot); an append uses writeAtomicWith.
+// that does not depend on what the file holds (a whole snapshot); an append uses writeAtomicWith; a file
+// that must never replace another (an archive file) writeNew.
 export async function writeAtomic(path, text) {
   for (let i = 0; i < 2; i++) {
     const cur = await readTextFile(path).catch(() => null);

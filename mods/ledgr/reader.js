@@ -10,20 +10,36 @@
 // Never pings, never claims ledgr.writer, never runs a Writer: the panel adds its fallback writer on
 // top (fallback, viewStore). The one writer of ledgr-data/config.json is here too (editConfig, through
 // saveConfig): the panel's threshold menu and space switch, and the settings dialog (settings.js, a
-// Reader too). Not an engine file.
+// Reader too). The archive (retention, 2026-11-19): loadArchive reads a session's archived items back from
+// ledgr-data/archive/ for the panel's Closed fold and the dialog (listing.js archiveRecords decides which
+// line counts). Not an engine file.
 import { readTextFile, writeTextFile, watchFolder, agents, terminals, home } from "herdr";
 import * as fs from "fs/promises";
 import { randomUUID } from "crypto";
 import { DEFAULTS, loadConfig, dataDir, turnPath, storePath, configPath, liveHome } from "./config.js";
 import { Store, isAgentAsk, isClosed } from "./store.js";
-import { writeEvent } from "./spool.js";
+import { writeEvent, archiveDir, within, ARCHIVE_ITEMS, ARCHIVE_LEGACY } from "./spool.js";
 import { stageMessage, promptText, PASTE } from "./nav.js";
-import { FIXTURE_TURNS } from "./fixtures.js";
+import { FIXTURE_TURNS, demoArchive } from "./fixtures.js";
+import { archiveRecords, parseArchiveText } from "./listing.js";
 import { liveStatus, transcriptPathOf } from "./branch.js";
 import { answersSheet, answersLeadIn, sheetOverCap } from "./confluence.js";
 import { itemWords as H, paneWords as P, sessionWords } from "./words.js";
 
 const squash = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
+// ledgr-data/archive/: a folder per session (spool.js archiveDir) of items files, and the legacy month files.
+const archiveRoot = () => `${dataDir()}/archive`;
+// The archive files' shapes, as the writer names and checks them (spool.js), for listing.js archiveRecords.
+const ARCHIVE_SHAPES = { items: ARCHIVE_ITEMS, legacy: ARCHIVE_LEGACY };
+// A reading copy's archive read: at most this long (readArchiveWithin), then again after ARCHIVE_RETRY_MS.
+export const ARCHIVE_READ_MS = 10000;
+export const ARCHIVE_RETRY_MS = 15000;
+// A folder's names (Herdr may hand back paths: the last part), those matching re, in order; [] when the
+// folder does not exist (an empty archive, not an error).
+async function namesIn(dir, re) {
+  const names = await fs.readdir(dir).catch(() => []);
+  return (Array.isArray(names) ? names : []).map((n) => String(n).split("/").pop()).filter((n) => re.test(n)).sort();
+}
 
 // ── ledgr-data/config.json, the one writer (2026-11-10) ────────────────────
 // Why a write did not happen when the file changed between this copy's read and its write (the hooks
@@ -78,6 +94,9 @@ export class Reader {
     this.cfgBusy = false;          // a task is writing them (cfgIdle resolves when it is done)
     this.cfgIdle = null;
     this.cfgGen = 0;               // bumped by every queued change: a read of config.json older than one is dropped
+    this.archives = new Map();     // session id -> {sig, all}: its archive as last read (loadArchive), the store's ids not left out yet
+    this.legacyTexts = new Map();  // legacy month file name -> its text (never written again: read once per copy)
+    this.archiveFiles = new Map(); // "<folder>/<items file name>" -> its lines parsed (written once: read once per copy)
   }
 
   // ── reading ──────────────────────────────────────────────────────────
@@ -450,6 +469,63 @@ export class Reader {
       this.passages.set(k, await readTextFile(p).catch(() => null));
       cx.notify();
     });
+  }
+
+  // ── the archive (retention, 2026-11-19) ──────────────────────────────
+  // A session's archived items, read back from ledgr-data/archive/: its folder's items-*.jsonl (spool.js
+  // archiveDir names the folder) and the legacy <yyyy-mm>.jsonl files (any session's), through listing.js
+  // archiveRecords (an id the store holds wins; for one id, the newest file's last line; only this session's
+  // lines), newest first, each with `archiveFile` (the name a restore event sends back). This copy's own
+  // reads: fs.readdir and fs.readFile (not Herdr's capped text read: a legacy month file may be past 1 MiB);
+  // nothing claimed, nothing asked of the writer. Worked out again when the store's count for the session
+  // (session.archived) or either folder's listing changed; an items file is written once and never changes,
+  // so each is read and parsed once per copy, by name (only names not seen before are read: the hourly and
+  // daily runs add files, they never rewrite one); a legacy file is read once per copy too (never written
+  // again). A missing folder or file is an empty archive, not an error (a file that could not be read is
+  // read again next time). The demo's are fixtures.js demoArchive (no file is read). readArchiveWithin
+  // bounds the whole read for the panel and the dialog.
+  async loadArchive(sessionId) {
+    const sid = typeof sessionId === "string" && sessionId ? sessionId : null;
+    if (!sid) return [];
+    if (this.demo) return this.demoArchiveOf(sid);
+    const st = this.viewStore();
+    const root = archiveRoot(), dir = archiveDir(sid), own = dir ? `${root}/${dir}` : null;
+    const mine = own ? await namesIn(own, ARCHIVE_ITEMS) : [], legacy = await namesIn(root, ARCHIVE_LEGACY);
+    const sig = JSON.stringify([Number(st.d.sessions[sid]?.archived) || 0, mine, legacy]);
+    let c = this.archives.get(sid);
+    if (!c || c.sig !== sig) {
+      const read = (path) => fs.readFile(path, "utf8").then((t) => (typeof t === "string" ? t : null), () => null);
+      const files = [];
+      for (const n of mine) {
+        const key = `${dir}/${n}`;
+        if (!this.archiveFiles.has(key)) { const text = await read(`${own}/${n}`); if (text !== null) this.archiveFiles.set(key, parseArchiveText(text)); }
+        files.push({ name: n, parsed: this.archiveFiles.get(key) ?? null });
+      }
+      for (const n of legacy) {
+        if (!this.legacyTexts.has(n)) { const text = await read(`${root}/${n}`); if (text !== null) this.legacyTexts.set(n, text); }
+        files.push({ name: n, text: this.legacyTexts.get(n) ?? null });
+      }
+      c = { sig, all: archiveRecords(files, { sessionId: sid, ...ARCHIVE_SHAPES }) };
+      this.archives.set(sid, c);
+    }
+    const store = this.viewStore(), out = c.all.filter((r) => !store.item(r.id));
+    out.skipped = c.all.skipped ?? 0;
+    return out;
+  }
+
+  // loadArchive within ARCHIVE_READ_MS (spool.js within, on cx's timer): a read that never answers rejects
+  // ("reading the archive: no answer in 10 s") instead of leaving "Reading the archive…" for ever; the
+  // caller says so and tries again after ARCHIVE_RETRY_MS. The read itself goes on, and fills the cache if
+  // it ever ends.
+  readArchiveWithin(sessionId, cx) {
+    return within(cx, ARCHIVE_READ_MS, this.loadArchive(sessionId), "reading the archive");
+  }
+
+  // The demo's archive of a session, at once (fixtures.js demoArchive through the same reading rule): the
+  // panel's demo rows and the demo dialog's record (which a check renders before any task runs).
+  demoArchiveOf(sid) {
+    const st = this.viewStore(), a = demoArchive();
+    return archiveRecords([...(a.sessions[sid] ?? []), ...a.legacy], { sessionId: sid, has: (id) => Boolean(st.item(id)), ...ARCHIVE_SHAPES });
   }
 
   // pin_note, pin_archive, pin_restore, pin_delete: a spool event (session_id: the pin's session), shown

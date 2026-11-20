@@ -4,7 +4,104 @@
 
 First public shape of the mod. Built on Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311.
 
-### A writer that holds its claim but does not move (2026-11-19)
+### Retention: closed items and old turn records leave store.json (2026-11-19)
+
+- `store.json` had reached 1.76 MB and grew about 100 KB a day, so every save went through `writeLarge`,
+  the path the writer stalled on (2026-11-12, twice on 2026-11-19). Measured: closed items 46 %, turn
+  records 30 %, open asks below the threshold 18 %. The old archive (`writer.js` `housekeep`, 14 days,
+  `archive/<yyyy-mm>.jsonl`) had two defects: nothing read it, so an archived item left Closed and could
+  not be reopened, and its month file, appended through the capped write, would have passed 1 MiB; with
+  14 days nothing on the live store was ever old enough. Spec `docs/design/Retention.md`. Built by three
+  builders in parallel against one contract, then integrated.
+- What leaves the store (`store.js`): a closed item past `retention_days` (default 3, was 14; whole days
+  1 to 30, one reading for the store, the writer and the settings row, `config.js` `retentionDays`; a
+  dismissed one never before 7 days, as far as the extractor's dismissed list and `snapshot()` look back),
+  as a copy (`archivable`); `removeItems` takes only one still closed and still the planned JSON, and
+  counts it on `session.archived`; turn records past the newest `retention.turns` (default 12) per session, and the
+  `textHead` of each kept record past the newest `LIMITS.turnHeads` (2) (`planSlim`, `applySlim`, which
+  cuts only what is still as planned). Records are leaner from now on (`leanTurn`: no default `textPath`,
+  no null field; every reader falls back to the default turn file), and `applySlim` makes the old ones so,
+  losslessly. Pins never leave; open items are never touched; handles are never reused.
+- The archive files (`spool.js`): `archive/<session>/items-<ms>-<rand6>.jsonl` (an item per line, as it
+  was) and `turns-<ms>-<rand6>.jsonl` (a cut record or a moved head), each at most 512 KiB, created once
+  and never written again (`writeNew`: `writeTextFile`'s expected null, then read back whole). The folder
+  is the session id through `config.js` `safeName`, the one mapping `bin/lib` `safe_name` and the MCP
+  server use too (per code point). The legacy month files are read, never written. Reading rule: an id
+  the store holds wins; among lines for one id, the newest file's last line.
+- Housekeeping (`writer.js` `houseDue`, `houseKick`, `housekeep`, `archiveLines`): the holder runs it at
+  the first start after the upgrade, once a day, and within the hour once the saved store passes
+  `HOUSE_SIZE` (768 KiB) and has grown `HOUSE_GROWTH` (64 KiB) since the last run ended (on the live data
+  the store stays over 768 KiB after its trim; a change of retention lets it run again); as its own task, kicked from the start and the tick and never awaited, so the
+  writer keeps answering pings. The first run keeps the store as it was in
+  `store.pre-retention-<ms>.json` (through `writeLarge`) and archives nothing without it; then files per
+  session, each a named step the watchdog sees (kind `house`), and only after a file is confirmed are its
+  items removed and its records cut (one `applySlim` per run), then one save. Drains run meanwhile:
+  `removeItems` and `applySlim` check again. A run whose generation was given up writes and removes nothing
+  more; a run that found nothing writes and saves nothing; a run whose config is not `config.json` as read
+  archives no item. `d.retention` `{v: 1, at}` is set once the first run has finished; `writer.log` says
+  what each run did.
+- Restore (the dialog's Reopen on an archived item): one spool event `{type: "restore", session_id, item,
+  file, reopen: true}`. The writer reads the line before the batch applies (`fs.readFile`, bounded: a
+  legacy month file may pass the cap) and attaches `record` or `record_error`; `store.js` puts the item
+  back under its own id and handle (`restoreItem`; a handle another item holds now, or one the session's
+  counter could hand out again, gives way to the next one, the old kept as `handleWas`), always reopens it
+  through the reopen act, lowers `session.archived` for an items file's line (a legacy line was never
+  counted), and returns `restore: {item, ok, error?}`. The event is always consumed (a waiting event is
+  what the watchdog calls a stall); a failure is the writer's note, and so is an act for an item a run has
+  just taken.
+- The reading copies: `Reader.loadArchive` (the session's items files and the legacy month files, through
+  `listing.js` `archiveRecords`; each items file read and parsed once, by name; the panel's and the
+  dialog's read bounded, said and read again after a failure); the CLOSED fold ends with
+  `archived (N) · show` and, shown, the archived rows (state word "archived", dim, no quick action; the
+  cursor and Enter work on them); the dialog opens one read-only (props `archived`: its file), marked
+  ARCHIVED with when and how it closed, its one action Reopen ("reopening…", then back in the list, or
+  "could not be read" once the writer took the event without bringing it back; after 15 s with neither, it
+  says the writer has not taken it yet and keeps waiting). A dialog open on an item a run archives shows
+  it archived. Settings: "Closed items stay in the
+  list", 1 to 30 days (`retention_days`). Commands `ledgr.archived` and the dialog's `detail:reopen`; the
+  demo counts three archived items (`fixtures.js` `demoArchive`).
+- The old default left behind: the hooks (`ledgr_config.load`, on a first run) and the installer
+  (`apply_config`) wrote every default into a new `config.json`, so an older install holds
+  `"retention_days": 14`, which wins over 3; on the live store nothing would have been archived and the
+  store stays past 1 MiB. The installer moves 14 to 3 once (`migrate_retention`; no dialog ever offered
+  the value before), says so in the Plan and the summary, and records it in install-state
+  (`migrations.retention_days`), so a 14 chosen in Settings later stays. Both config merges fill
+  `retention.turns` into a file that lacks it.
+- The doctor (`setup/ledgr_setup.py` `retention_report`): `retention_days` and `retention.turns` as
+  configured, `store.json` against the 1 MiB cap and `HOUSE_SIZE` (read from `writer.js`), when
+  housekeeping last ran and whether the first run has finished, the archive (files, bytes, the archived
+  count) and the one-time copy; the old 14 that no install has moved is a problem, with what to do.
+- A dry run on a copy of the live store (offline, `store.js` functions only): 1.80 MB to 0.87 MB, 387
+  closed items archived, 442 turn records cut and 210 heads moved, in 48 files for 29 sessions (918 KB,
+  the largest 116 KB); every `textPath` was the default turn file; nothing threw; the reading rule gave
+  every archived item back. At 14 days nothing would have been archived.
+- An outside review of the integrated code (no blocker, two major, eleven minor), fixed with a test each:
+  the dialog's wait for a slow writer (it said "could not be read" and kept saying it after the item came
+  back); the size trigger writing small files every hour (`HOUSE_GROWTH`; each items file read once by the
+  readers); one clamp of `retention_days` and no item archived on a config read that failed; a handle
+  issued twice after a session record was made again; a change without `updatedAt` lost at removal; a
+  legacy restore lowering the count; a closed restore archived again (a restore always reopens); a dialog
+  showing "gone" for an item archived while open; an archived line that says open getting an answer box;
+  reads with no time limit; a turn key "07". `spool.js` `within` no longer leaves its limit unhandled.
+  Documented as known limits: an act for an item a run has just taken (now said in the writer's note),
+  Forget leaving `archive/<session>/` (an open question), a new reading copy beside an old host engine
+  before a relaunch.
+- Tests: `test_store.mjs` 1,120 checks (+226: the floor and the clamp, the re-check by JSON, plan and slim
+  with keys, leaner records, restore with handles and the legacy count, a re-raise after archiving, a
+  store of realistic size slimmed by exactly what goes; one safe name, the timestamps `applySlim` keeps,
+  no `updatedAt` set, `retention.turns` merged in); `test_writer.mjs` 714 (+462: the first run on a 1.7 MB
+  store, create-only names, a given-up run, a late write, an item reopened meanwhile, the triggers with
+  `HOUSE_GROWTH`, restore, no run in a non-holder or a check copy; section 28 across the seam: the run's
+  files read back by `Reader.loadArchive`, the dialog's Reopen event restored by the writer, the item
+  archived again in a newer file whose line wins; section 29, the review's: a failed config read, an act
+  for an archived item, an archive write timed out on a timer that fires); `test_list.mjs` 392 (+90),
+  `test_detail.mjs` 1,003 (+277), `test_settings.mjs` 800 (+63); `test_no_keystrokes.py` 792 (+208, rule
+  14: only the writer writes under `archive/`, through `writeNew` in `archiveLines`; the readers only
+  read; Reopen posts one event); `test-store.sh` (the hooks' retention defaults and merge, `safe_name`
+  agreeing with `safeName`); `setup/tests` 164 (+45: the migration through a whole install, the doctor's
+  lines, `retention_days` as the mod reads it).
+
+### c1c7775: a writer that holds its claim but does not move
 
 - ledgr stopped applying the spool at 09:46:20 and stayed so for hours, the second silent freeze in a
   week. One drain applied its events and saved `store.json` (1.63 MB, through `writeLarge`) but never

@@ -597,9 +597,151 @@ def test_writer_report():
         shutil.rmtree(root)
 
 
+def test_retention_migration():
+    """retention_days (2026-11-19): an older install's config.json holds 14, the old default the hooks and the
+    installer wrote into every new file; the first install that knows the archive moves it to 3, once, says
+    so in the Plan and the summary, and records it in install-state, so a 14 chosen in Settings later stays.
+    The whole cmd_install runs in a scratch home, as in test_keep_config_edits."""
+    root, ctx, st = scratch()
+    saved = (L.preflight, L.herdr_checks)
+    try:
+        lib = os.path.join(L.REPO, "mods", L.MOD, "bin", "lib")
+        sys.path.insert(0, lib)
+        import ledgr_config as K  # noqa: E402  (the hooks' defaults, from the repo)
+        ok(K.DEFAULT_CONFIG["retention_days"] == L.RETENTION_DEFAULTS["retention_days"] == 3
+           and K.DEFAULT_CONFIG["retention"] == {"turns": L.RETENTION_DEFAULTS["turns"]} == {"turns": 12},
+           "retention: the installer's defaults are ledgr_config.py's (3 days, 12 turn records)")
+        old = dict(K.defaults(), retention_days=14)
+        old.pop("retention")
+        ok(K.deep_merge(K.defaults(), old)["retention"] == {"turns": 12}, "retention: the hooks' merge fills retention.turns into an older file")
+        ok(K.deep_merge(K.defaults(), {"retention": {"coldDays": 7}})["retention"] == {"turns": 12, "coldDays": 7}, "retention: a partial retention keeps turns")
+        write(os.path.join(ctx.home, "AGENTS.md"), "x\n")
+        write(os.path.join(ctx.home, "keys.json"), '{"global": {}}\n')
+        f = {"hard": [], "warn": [], "claude": None, "security": None, "layouts": [], "active": None, "claude_configs": [],
+             "repo_version": "0.1.0"}
+        L.preflight = lambda ctx, quiet=False: json.loads(json.dumps(f))
+        L.herdr_checks = lambda ctx, mods: True
+        af = os.path.join(root, "answers.json")
+        cfgp = os.path.join(ctx.data, "config.json")
+        ans = {"provider": "anthropic", "api_key": "skip", "threshold": "needed", "asks_handoff": "ledgr", "animations": True,
+               "fold_asks_while_working": False, "mcp": False, "layout": {"name": None, "panel": "skip", "host": "none", "chip": "none"}}
+
+        def install():
+            write(af, json.dumps(ans))
+            out = []
+            say = L.say
+            L.say = lambda m="": out.append(m)
+            try:
+                L.cmd_install(ctx, argparse.Namespace(answers=af, save_answers=None, no_tests=True), {})
+            finally:
+                L.say = say
+            return json.loads(read(cfgp)), "\n".join(out)
+
+        # An older install: config.json as the hooks created it, every default written, 14 among them.
+        write(cfgp, json.dumps(old, indent=2) + "\n")
+        cfg, out = install()
+        ok(cfg["retention_days"] == 3, f"migration: the old default 14 becomes 3 ({cfg.get('retention_days')})")
+        ok("retention_days 14, the old default, becomes 3 (once)" in out, "migration: the Plan says so before anything is written")
+        ok("retention_days 14 (the old default) -> 3" in out and "Closed items stay in the list" in out, "migration: the summary says what it did")
+        ok("retention" not in cfg, "migration: nothing else is written (retention.turns comes from the merges)")
+        state = json.loads(read(ctx.state_file))
+        ok(isinstance((state.get("migrations") or {}).get("retention_days"), str), f"migration: recorded in install-state ({state.get('migrations')})")
+        # The person chooses 14 in Settings afterwards: the next install leaves it.
+        cfg["retention_days"] = 14
+        write(cfgp, json.dumps(cfg, indent=2) + "\n")
+        cfg, out = install()
+        ok(cfg["retention_days"] == 14 and "the old default" not in out, "migration: a 14 chosen after it stays (once only)")
+        # A fresh home: config.json made from the defaults (3), recorded, nothing said.
+        root2, ctx2, st2 = scratch()
+        try:
+            ctx_saved = ctx
+            ctx = ctx2
+            cfgp = os.path.join(ctx.data, "config.json")
+            write(os.path.join(ctx.home, "AGENTS.md"), "x\n")
+            write(os.path.join(ctx.home, "keys.json"), '{"global": {}}\n')
+            cfg, out = install()
+            ok(cfg["retention_days"] == 3 and "the old default" not in out, "migration: a new config.json has 3 and nothing to say")
+            ok((json.loads(read(ctx.state_file)).get("migrations") or {}).get("retention_days"), "migration: recorded there too, so a later 14 stays")
+            cfg["retention_days"] = 14
+            write(cfgp, json.dumps(cfg, indent=2) + "\n")
+            cfg, out = install()
+            ok(cfg["retention_days"] == 14, "migration: ...and it does")
+            ctx = ctx_saved
+        finally:
+            shutil.rmtree(root2)
+        # The pieces: another value is left alone and recorded; no state, no change; a bool is not 14.
+        s3 = L.State(ctx)
+        s3.d.pop("migrations", None)
+        c7 = {"retention_days": 7}
+        ok(L.migrate_retention(s3, c7) is None and c7["retention_days"] == 7 and s3.d["migrations"]["retention_days"], "migration: 7 stays, and the look is recorded")
+        c14 = {"retention_days": 14}
+        ok(L.migrate_retention(None, c14) is None and c14["retention_days"] == 14, "migration: without install-state nothing changes")
+        ok(not L.retention_pending(L.State(ctx), {"retention_days": True}) and not L.retention_pending(None, {"retention_days": 14}), "migration: pending only for the number 14 with a state")
+    finally:
+        L.preflight, L.herdr_checks = saved
+        shutil.rmtree(root)
+
+
+def test_retention_report():
+    """--check's retention lines (2026-11-19): the configured values, store.json against the cap and
+    housekeeping's threshold, the last run and the first one, the archive and the one-time copy; the old
+    default 14 that no install has moved is a problem with what to do. Read-only."""
+    root, ctx, st = scratch()
+    try:
+        ok(L.writer_number("HOUSE_SIZE", 0) == 768 * 1024 and L.writer_number("ARCHIVE_FILE_MAX", 0) == 512 * 1024, "writer.js HOUSE_SIZE and ARCHIVE_FILE_MAX read")
+        ok(L.writer_number("NO_SUCH_THING", 5) == 5, "an unknown name: the default")
+        ok(L.writer_number("HOUSE_GROWTH", 0) == 64 * 1024, "writer.js HOUSE_GROWTH read")
+        # retention_days as the mod reads it (config.js retentionDays): whole days, 1 to 30, half up.
+        for v, want in ((0, 1), (0.4, 1), (0.5, 1), (2.5, 3), ("7", 7), (45, 30), (-3, 1), (True, 3), ("x", 3), (None, 3), ("", 3), ([], 3)):
+            ok(L.retention_days_of(v) == want, f"retention_days_of({v!r}) == {want} ({L.retention_days_of(v)})")
+        lines, _ = L.retention_report(ctx, st, {"retention_days": 0})
+        ok(any("closed items stay 0 (read as 1) days" in x for x in lines), f"a hand-written 0 is shown as the mod reads it: {lines}")
+        lines, probs = L.retention_report(ctx, st, {})
+        txt = "\n".join(lines)
+        ok(probs == [] and "closed items stay 3 (the default) days" in txt and "12 (the default)" in txt, f"defaults when config.json says nothing: {lines}")
+        ok("store.json      missing" in txt and "housekeeping    not yet" in txt and "archive         empty" in txt, f"no store yet: {lines}")
+        lines, probs = L.retention_report(ctx, st, {"retention_days": 14, "retention": {"turns": 20}})
+        ok(len(probs) == 1 and "retention_days is 14, the old default" in probs[0] and "./install.sh" in probs[0] and "Settings" in probs[0], f"14, not moved: a problem with what to do: {probs}")
+        ok(any("turn records kept per session 20" in x for x in lines), "the configured retention.turns")
+        st.d.setdefault("migrations", {})["retention_days"] = "2026-11-19"
+        lines, probs = L.retention_report(ctx, st, {"retention_days": 14})
+        ok(probs == [] and any("14 chosen since the install moved the old default" in x for x in lines), f"14 after the move: the person's choice: {lines} {probs}")
+        # A store past the cap, the first run not done yet.
+        now = time.time()
+        sp = os.path.join(ctx.data, "store.json")
+        write(sp, json.dumps({"v": 1, "items": {}, "sessions": {}, "pad": "x" * (1100 * 1024)}))
+        lines, probs = L.retention_report(ctx, st, {"retention_days": 3})
+        txt = "\n".join(lines)
+        ok(probs == [] and "PAST Herdr's 1 MiB text-file cap" in txt and "over housekeeping's 786,432" in txt, f"past the cap, said: {lines}")
+        ok("last ran never; the first run after the upgrade has not finished yet" in txt, "the first run not done")
+        ok("still past 1 MiB after housekeeping" not in txt, "...no after-housekeeping warning before it ran")
+        # After the first run: the archive, the copy, the counts, a store under the cap.
+        sid = "5e550000-0000-4000-8000-000000000001"
+        write(sp, json.dumps({"v": 1, "items": {}, "sessions": {sid: {"sessionId": sid, "archived": 5}, "s2": {"archived": 2}},
+                              "houseAt": (now - 7200) * 1000, "retention": {"v": 1, "at": (now - 3 * 3600) * 1000}}))
+        ad = os.path.join(ctx.data, "archive", sid)
+        write(os.path.join(ad, "items-1794700000000-q7w2e9.jsonl"), "a" * 1000 + "\n")
+        write(os.path.join(ad, "turns-1794700000000-m3k8z1.jsonl"), "b" * 2000 + "\n")
+        write(os.path.join(ad, "notes.txt"), "not an archive file")
+        write(os.path.join(ctx.data, "archive", "2026-10.jsonl"), "c" * 999 + "\n")
+        write(os.path.join(ctx.data, "store.pre-retention-1794700000000.json"), "{" + " " * 1800 + "}")
+        lines, probs = L.retention_report(ctx, st, {"retention_days": 3, "retention": {"turns": 12}})
+        txt = "\n".join(lines)
+        ok(probs == [], f"healthy: {probs}")
+        ok("under Herdr's 1 MiB text-file cap; under housekeeping's 786,432" in txt, f"the store's size: {lines}")
+        ok("last ran 2 h ago; the first run after the upgrade finished 3 h ago" in txt, f"the last run and the first: {lines}")
+        ok("1 session, 1 items file and 1 turns file, 1 legacy month file(s), 4 KB; 7 items archived (session.archived)" in txt, f"the archive: {lines}")
+        ok("store.pre-retention-1794700000000.json (2 KB): the store before the first run, kept, never read by ledgr" in txt, f"the one-time copy: {lines}")
+        write(sp, json.dumps({"v": 1, "retention": {"v": 1, "at": now * 1000}, "pad": "x" * (1100 * 1024)}))
+        lines, _ = L.retention_report(ctx, st, {})
+        ok(any("still past 1 MiB after housekeeping" in x for x in lines), f"past the cap after the first run: said: {lines}")
+    finally:
+        shutil.rmtree(root)
+
+
 if __name__ == "__main__":
     for t in (test_dump, test_settings_write, test_mend_newline, test_restore_original, test_retire, test_settings_list, test_handoff,
-              test_keep_config_edits, test_mcp, test_recipe, test_writer_report):
+              test_keep_config_edits, test_mcp, test_recipe, test_writer_report, test_retention_migration, test_retention_report):
         t()
     print(f"setup: {PASS} passed, {FAIL} failed" + ("" if FAIL else "  OK"))
     sys.exit(1 if FAIL else 0)

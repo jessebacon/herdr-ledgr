@@ -9,6 +9,8 @@ libraries, against a scratch data folder), never edited. Authoritative event con
 is retired and `my-tabs` is the maintainer's overlay; later sections say so where it matters.)
 (Since 2026-11-10 the panel is a one-line list, rows open in a detail dialog, and the panel's reading
 half is `reader.js`, so the `panel.js` line numbers here predate it: `BUILD-NOTES-detail.md`.)
+(Since 2026-11-19 the 14-day month-file archive of section 1 is replaced: closed items after 3 days and
+old turn records go to files under `archive/<session>/`, written once and read back: section 19.)
 
 ## 1. Architecture (coordinator decision: option c)
 
@@ -784,13 +786,16 @@ limit of their own. The rule since then: liveness is progress, not a timer.
 | `fault` | `store.json` cannot be written (as before), or, while the watchdog's finding has not come back, `stallText(stall)` |
 | `pass` | `{at, step, since}`: the pass running at that beat (its start, the step it waits in, since when), else a start's (`start: <step>`); absent when idle. A claim that carried one is renewed when that pass or start ends (`claimedPass`), so it never goes stale by a minute |
 | `done` | when the last pass ended (`SpoolReader.done`) |
-| `stall` | the last finding: `{at, step, ms, n, kind: pass, start or spool, ok, back?, name?, retryAt?, tries?}` (`retryAt`, `tries`: backing off) |
+| `stall` | the last finding: `{at, step, ms, n, kind: pass, start, house or spool, ok, back?, name?, retryAt?, tries?}` (`retryAt`, `tries`: backing off; `house`: a housekeeping run, section 19) |
 
 Steps (`SpoolReader.step`, `Writer.saving`, `Writer.mark`): a pass is `list`, `read`, `apply`, `apply:
 config.json`, `apply: re-anchor`, `apply: decisions.md`, `save`, then the save's own (`save: store.json
 writeTextFile`, `… read again`, `… listing`, `… temporary copy`, `… read back`, `… mv`, `save:
 snapshot.json`), `unlink`; a start is `start: claim`, `temporary files`, `config.json`, `store.json`,
-`identity map`, `save[: …]`, `drain`, `spool/failed`, `housekeeping`. A save step a pass waits on moves
+`identity map`, `save[: …]`, `drain`, `spool/failed`. Housekeeping is no longer a step of a start
+(2026-11-19, section 19): the start kicks it as its own task and returns; a run shows as `housekeeping:
+<step>` (`plan`, `making archive/<dir>`, `writing archive/<dir>/<file>`, `reading back …`, `keeping
+store.pre-retention-<ms>.json: …`, `save: …`) while no pass or start runs. A save step a pass waits on moves
 the pass's `since`, so only one await that lasts too long is stuck, never a slow series.
 
 ### 18.2 Constants (`writer.js`)
@@ -879,12 +884,13 @@ failed, a save fault set or cleared. Nothing per event.
 - The corrupt-store copy at start (`store.corrupt-<ms>.json`) goes through `writeLarge`, so a store over
   1 MiB is kept too (`writeTextFile` refused it).
 - `housekeep`, `scheduleSnapshot`, `watchConfig`'s reads (`loadConfig`, `refreshSpaces`) and the tick's
-  reads are limited too; a housekeeping failure no longer ends a start. The config and identity-map watch
+  reads are limited too; a housekeeping failure no longer ends a start (since 2026-11-19 housekeeping is
+  not part of a start at all: section 19). The config and identity-map watch
   is one loop per generation, and the tick reads every map record's space again once a minute
   (`refreshSpaces(null)`), so a watch that stopped loses nothing for long. The tick checks its generation
   after every await before it writes.
-- Appends (`decisions.md`, `archive/<month>.jsonl`) go through `spool.js` `writeAtomicWith(path,
-  next)`, which makes the text again from each read: `writeAtomic`'s retry wrote the text made from the
+- Appends (`decisions.md`; `archive/<month>.jsonl` until section 19 replaced the month files with files
+  written once) go through `spool.js` `writeAtomicWith(path, next)`, which makes the text again from each read: `writeAtomic`'s retry wrote the text made from the
   first read, over a line that landed meanwhile. An archived item whose line is already in the month's
   file is not added again (a write that got no answer and landed late), and `decisions.md` skips a branch
   whose key is there, at each try. `writeAtomic` stays for whole files (`snapshot.json`), where its
@@ -924,5 +930,116 @@ the save's generation check, the unlink guard, `ok()` before the `mv` (section 1
 before the sweep, `watchingConfig` in `abandon`, the tick's map rescan, `writeAtomicWith`'s re-made text,
 the back-off; in the panel, ticking only a writing fallback, keeping a dead one, no check from render, no
 `NO_WRITER`.
+
+## 19. Retention: closed items and old turn records leave store.json (2026-11-19, uncommitted)
+
+The spec is `docs/design/Retention.md`; this section is the store's and the writer's half as built (the
+reading copies' half is `BUILD-NOTES-detail.md` 17). `store.json` was 1.76 MB (closed items 46 %, turn
+records 30 %, open asks below the threshold 18 %), growing about 100 KB a day, so every save took
+`writeLarge`. Three builders worked in parallel against one contract (A the store, B the writer and the
+spool, C the reading copies), each in its own worktree with stand-ins for the others' files; the
+integration put their files together, added a test across the seam and the installer's and the doctor's
+parts, and took an outside review's fixes. Function names, not line numbers.
+
+### 19.1 The store (`store.js`, `config.js`)
+
+| What | Where |
+|---|---|
+| Closed items past `retention_days`, a dismissed one never before 7 days (the extractor's dismissed list and `snapshot()` look back 7), as copies | `archivable(days, now)`; `DISMISSED_DAYS` |
+| `retention_days` read one way everywhere: whole days 1 to 30, rounded and clamped, else the default 3 | `config.js` `retentionDays`, `retentionDaysOf`, `RETENTION_DAYS` (the store, the writer, `settings.js`; the doctor's `retention_days_of` mirrors it) |
+| Removal after the file is confirmed: only an item still closed and still the planned JSON (a confluence landing again or Forget's branch mark sets no `updatedAt`), counted on `session.archived` | `removeItems(list)` |
+| Turn records past the newest `retention.turns`, and the heads of kept records past the newest `LIMITS.turnHeads`, planned with each record's own key, then cut only if still as planned; every record left made lean, an empty map dropped | `planSlim(keep, heads)`, `applySlim(plan)`, `leanTurn` |
+| Leaner records from now on (no default `textPath`, no null field) | `on_stop`, `on_asks` through `leanTurn`; the settle entry's `textPath` is null for the default |
+| An archived item back: its own id; its own handle unless another item holds it or it is at or above `nextHandle` (a session record made again), then the next handle and `handleWas`; `session.archived` lowered only for an items file's line | `restoreItem(record, {counted})` |
+| The `restore` event: one of the panel's own events (never makes a session); always reopens (its `reopen` field is not read); `restore: {item, ok, error?}` in `apply()`'s result | `on_restore`, `OWN_EVENTS` |
+| An act for an item no longer in the store: dropped, and said (`out.note`, the writer's note) | `on_act` |
+| One safe name for a folder named after a session; the archive's name shapes | `config.js` `safeName` (re-exported by `store.js`), `ARCHIVE_ITEMS`, `ARCHIVE_LEGACY` (re-exported by `spool.js`) |
+
+### 19.2 The writer (`writer.js`, `spool.js`)
+
+| Constant | Value | Why |
+|---|---|---|
+| `HOUSE_SIZE` | 768 KiB | past it, a run within the hour (with `HOUSE_GROWTH`): room under the 1 MiB cap |
+| `HOUSE_GROWTH` | 64 KiB | the growth since the last run's end a size run also needs: on the live data the store stays over `HOUSE_SIZE` after its trim, and an hourly run would write small files for ever; 64 KiB is about fifteen hours of growth, a quarter of the room to the cap |
+| `ARCHIVE_FILE_MAX` | 512 KiB | the most text in one archive file, half the cap, so `writeTextFile` and `readTextFile` take it |
+
+- `houseDue(now)`: the holder only, one run per generation (`this.house`), none within an hour of the
+  last one begun (`houseTry`); then "first run" (`d.retention?.v !== 1`), "daily" (`d.houseAt` a day
+  old), "size" (an hour old, the saved store over `HOUSE_SIZE` and `HOUSE_GROWTH` bytes past `houseEnd`,
+  the store's bytes when the last run ended; none recorded after a relaunch: one run allowed).
+  `applyConfig` forgets `houseEnd` when `retention_days` or `retention.turns` changes, so the installer's
+  move of 14 to 3 or the settings row takes effect within the hour.
+- `houseKick(cx)`, from the end of `start()` and of every tick: a due run as its own task, never awaited
+  (a start answers no ping while it runs, and the first run writes dozens of files); `houseRun` is its
+  promise, for tests. Housekeeping is therefore no longer one of a start's steps (18.1).
+- `housekeep(cx, gen, why)`: the one-time copy on the first run (`store.pre-retention-<ms>.json` through
+  `writeLarge`; without it nothing is archived), the plan, per session an items file and a turns file
+  through `archiveLines` (split by `archiveChunks`; each file through `spool.js` `writeNew`: created with
+  `writeTextFile`'s expected null, read back whole), removals after each confirmed file, one `applySlim`
+  after the last session, `d.houseAt`, `d.retention = {v: 1, at}` on the first run, one save when
+  something changed, one writer.log line when files were written or failed. A config that is not
+  `config.json` as read (`_error`, or the built-in defaults after a read that got no answer) archives no
+  item that run. Every await is bounded, named (`houseStep`: `progress()` shows `housekeeping: <step>`,
+  stall kind `house`) and followed by `current(gen)`; `abandon()` clears `this.house`.
+- Alongside drains, not under their guard: a spool event never waits behind a run, and the removals check
+  again (`removeItems`, `applySlim`), so a change applied meanwhile costs at most a stale line in a file.
+  Chosen over holding the drains back because a run's waits are file writes, and a drain held back that
+  long is what the watchdog calls a stall.
+- A `restore` gets its record before the batch applies (`applyBatch`): `ev.record` and `ev.record_error`
+  dropped first (never the event's own), `spool.js` `archiveFileOf` (a plain items or legacy name only),
+  `fs.readFile` bounded, once per file per batch, `archivedRecord` (the last line for the item, the
+  session's). The event is always consumed; a failure is the writer's note.
+- `LARGE_TMP` also matches the one-time copy's temporary file, so a start's sweep removes it.
+- `spool.js` `within`'s limit promise is marked handled: a timer whose task came back empty (a test cx)
+  still fires later, and nothing then listens to the limit.
+
+### 19.3 Config, the installer, the doctor
+
+- `retention` is a nested object in `config.js` `DEFAULTS` and `ledgr_config.py` `DEFAULT_CONFIG`
+  (`turns: 12`), so Phase 2's keys sit beside it; both merges fill it into an older file.
+- The hooks and the installer wrote every default into a new `config.json`, so older installs hold
+  `retention_days: 14`. `setup/ledgr_setup.py` `migrate_retention` (from `apply_config`) moves 14 to 3
+  once, records `migrations.retention_days` in install-state either way (a later 14 stays), and the Plan
+  (`retention_pending`) and the summary say so.
+- `--check`'s `retention_report`: the values as configured (and as the mod reads them), the store against
+  the cap and `HOUSE_SIZE` (`writer_number` reads `writer.js`), the last run and the first, the archive
+  (files, bytes, `session.archived`), the one-time copy; the unmoved 14 is its one problem.
+
+### 19.4 The dry run
+
+On a copy of the live `store.json` and `config.json` (offline, read-only on the live side), the real
+`store.js` functions as housekeeping calls them: 1.80 MB to 0.87 MB; 387 closed items archived (384
+resolved, 3 dismissed), 442 turn records cut, 210 heads moved; 48 files for 29 sessions, 918 KB, the
+largest 116 KB; all 715 `textPath` values were the default turn file (builder A could not check that)
+and none was left; nothing threw; the reading rule gave back all 387. At 14 days nothing would have been
+archived, hence the migration. After the trim the store is still over `HOUSE_SIZE` (0.87 MB), hence
+`HOUSE_GROWTH`.
+
+### 19.5 Tests
+
+`test_store.mjs` 1,120 checks (225 retention: the floor and the clamp, the re-check by JSON, plan and
+slim with keys, leaner records, restore with handles and the legacy count, a re-raise after archiving, a
+store of realistic size slimmed by exactly what goes, Phase 2's seams); `test-store.sh`'s Python block
+(the hooks' defaults and merge, `DISMISSED_DAYS`, `safe_name` equal to `safeName`); `test_writer.mjs` 714
+(sections 18 to 29: the first run on a 1.7 MB store, create-only names, a given-up run, a late write, an
+item reopened meanwhile, the triggers with `HOUSE_GROWTH` and a retention change, a copy that cannot be
+written, restore, no run outside the holder; 28, across the seam, with `reader.js` loaded beside the
+writer; 29, a failed config read, an act for an archived item, an archive write timed out on a timer that
+fires); `test_no_keystrokes.py` rule 14; `setup/tests` (the migration through a whole install, the
+doctor). Mutations checked by hand against section 28, each failing it: the first file's line winning,
+the count not lowered on a restore. The outside review ran its own mutations; two of its survivors were
+real gaps and are tests now (the reader naming the folder by the raw id, the panel's own store-wins
+filter on archived rows).
+
+### 19.6 Known limits, not tried live
+
+- On the live data the store stays over `HOUSE_SIZE` after the first run; with `HOUSE_GROWTH` a size run
+  comes about once per 64 KiB of growth, so a session's folder gains a file or two a day.
+- An act still in the spool for an item a run has just removed is dropped (the note says so).
+- Forget leaves `archive/<session>/` on disk, as it leaves `sessions/`, `turns/` and `mcp/`: an open
+  question for the maintainer; nothing is deleted.
+- Not tried live: `writeTextFile(path, text, null)` refusing an existing file (`writeNew` relies on the
+  typings); the first run on the real store; a new reading copy beside an old host engine before a
+  relaunch (the old writer ignores a `restore`); the live check list is `Retention.md` 8.3.
 
 Pins (2026-11-07: the PINS lane, search, Ask here, the hold control, the box's ⌘S): `BUILD-NOTES-pins.md`.

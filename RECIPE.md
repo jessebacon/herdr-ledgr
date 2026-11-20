@@ -77,7 +77,9 @@ beside it).
     elsewhere on a row opens its dialog, and that row is drawn raised. Once a click has given the
     list the keyboard, the cursor row is selected with a 2 px accent left edge.
   - Footer, 30 px: the folds "older than a day (n) ›", "deferred (n) ›", "closed (n) ›", and a
-    status line with the last action's result.
+    status line with the last action's result. The closed fold ends with "archived (N) · show": the
+    session's archived items, dim rows with the state word "archived" and no button; each opens in the
+    dialog read-only (an ARCHIVED section first, no answer box), its one action Reopen.
   - Off in this space: instead of the lanes, "ledgr is off in this space", a dim line (nothing is
     captured or extracted here; items are kept), a primary button "ledgr on in this space", and a
     line pointing at the session menu. A held session whose own space is off reads "ledgr is off in
@@ -190,6 +192,10 @@ beside it).
   turn N"). Typing [A5] in a prompt marks Ask 5 answered; [Q3] marks Question 3 sent. With the MCP
   server the agent closes the asks your message settled ("closed by the agent at turn N"). Done is
   your override; Reopen undoes any of these.
+- **Retention.** A closed item stays in the list 3 days (Settings: Closed items stay in the list; one
+  closed as not needed at least 7), then the writer moves it out of the store into an archive file;
+  turn records past the newest 12 per session go the same way. Reopen on an archived row brings the
+  item back open, under its own handle.
 - **The paste.** Paste answer, Paste answers, Paste into trunk, Paste confluence again and Ask here
   put the message on the clipboard, focus the target pane, and paste with Herdr's own paste action
   once Herdr reports that terminal focused on two looks 50 ms apart, within 600 ms, with the
@@ -327,19 +333,27 @@ beside it).
 - **Spool and writer.** Every change is one JSON event, written atomically to `ledgr-data/spool/`:
   from the hooks, the box (`capture` with `request.pins`, at most 12; `pin`), the panel and dialogs
   (`act`, `clear_questions`, `retry`, `branch`, `conclude`, `close_branch`, `resume`, `forget`,
-  `pin_note`, `pin_archive`, `pin_restore`, `pin_delete`) and the MCP server. Only the holder of
+  `restore`, `pin_note`, `pin_archive`, `pin_restore`, `pin_delete`) and the MCP server. Only the holder of
   `shared("ledgr.writer")` `{id, by, at}` applies them to `store.json` and `snapshot.json`, then
   unlinks each file. The host block runs a writer (role `host`), a mod with an engine copy one under
   its name, the panel one only when no host answers its `ledgr.ping` within 4 s; a host takes the
   role back from a panel or a silent holder (checked at most every 2 minutes); a closing copy
   releases it. The writer also launches, closes and resumes branches, runs Retry, writes
-  `sessions/<sid>/decisions.md`, archives closed items daily, and publishes the chips.
+  `sessions/<sid>/decisions.md`, publishes the chips, and runs housekeeping as its own task, never
+  awaited (at the first start after an upgrade, daily, and once the saved store is over 768 KiB and has
+  grown 64 KiB since the last run): closed items and old turn records go into new files, each written
+  once with `writeTextFile`'s expected null (create-only) and read back, and only then leave the store
+  (if still exactly as planned). A `restore` event gets its line read from the named file before its
+  batch applies, and is always consumed.
 - **Data**, `~/.config/herdr-app/ledgr-data/`: `store.json` (the source of truth: `items`,
   `sessions`, `branches`, `terminals`, and its own `pins` map, `pn_<uuid>` ids with per-session
   handles P1, P2, which nothing reading items ever sees); `snapshot.json` (`{v, updatedAt, items}`:
   open, answered and deferred items plus those dismissed in the last 7 days, read by the extractor
   and the MCP server); `spool/`; `terminals/`; `sessions/`; `turns/<sid>/` (the newest 50 per
-  session); `mcp/<sid>/`; `archive/<yyyy-mm>.jsonl`; `log/`; `tmp/`; `config.json`. Limits are code,
+  session); `mcp/<sid>/`; `archive/<sid>/items-<ms>-<rand6>.jsonl` and `turns-<ms>-<rand6>.jsonl`
+  (at most 512 KiB each; `<sid>` with every character outside `A-Za-z0-9._-` made `_`; an id the store
+  holds wins over any line, else the newest file's last line); `store.pre-retention-<ms>.json` (the
+  store before the first run, kept); `log/`; `tmp/`; `config.json`. Limits are code,
   `config.js` `LIMITS`: pin 4,000 characters, note 200, 12 pins per question, 24,000 pinned
   characters per branch, 200 search results; an answer 4,000, a sheet 24,000.
 - **`config.json`**, read again on every change, no restart (settings dialog row in brackets):
@@ -366,7 +380,8 @@ surface.openPanelOnAsks false           [Open the panel on new asks]
 branch.maxDepth       2                 0 turns Branch off  [Branch depth]
 links.editor          open              zed | code | "cmd {path}:{line}"  [Open files with]
 spaces.disabled       []                Herdr space ids  [Off spaces]
-retention_days        14                closed items move to archive/
+retention_days        3                 whole days 1 to 30  [Closed items stay in the list]
+retention.turns       12                turn records kept per session
 ```
 
 - **`keys.json`** (the installer writes `mod:ledgr` from its `MOD_KEYS`; `ledgr.btw` is the box's
@@ -557,7 +572,11 @@ What tripped the build up:
   is one line at 280 and 360 px. `ledgr.demo-detail` opens Ask 15's dialog with the passage marked,
   and `demo-detail:Q3`, `:P2`, `:br-q3-7c1e` draw their sections, in two columns and, narrow, in
   one; Esc leaves the cursor on that row. `ledgr.demo-settings` shows two sample spaces and a stale
-  id, and saves nothing.
+  id, and saves nothing. After `ledgr.archived`, CLOSED ends with "archived (3) · hide" and three dim
+  rows; Enter on Ask 17 opens it read-only with the newer file's line, and Reopen restores it in the demo.
+- With a store over 1 MiB, the first start after the install writes `store.pre-retention-<ms>.json`,
+  files under `ledgr-data/archive/<sid>/` (none over 512 KiB) and a store under the cap; `writer.log`
+  says what the run took, and the next save is one `writeTextFile`.
 - A threshold chosen on the lane head, or edited in `config.json`, changes the counts within a
   couple of seconds; + on Text scale grows every view within a second, and `config.json` holds
   `ui.textScale` 1.05 with every other key as it was.

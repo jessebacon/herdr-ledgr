@@ -7,7 +7,8 @@
               key in the Keychain, merge key bindings, patch one personal layout, register the
               Claude Code hooks, run `herdr-app check` and the offline tests, print a summary.
   check       the doctor: everything the preflight checks, plus whether the hooks fire, whether a
-              writer holds the role, whether the Keychain item resolves.
+              writer holds the role and applies events, store.json's size and retention (the archive,
+              housekeeping's last run, the one-time copy), whether the Keychain item resolves.
   uninstall   writes the current choices to <state>/last-install.json, then reverses hooks, key
               bindings, layout blocks and mods: it restores the files saved before ledgr first
               touched them when only ledgr's entries differ, and otherwise removes ledgr's entries
@@ -24,6 +25,7 @@ import datetime
 import getpass
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -74,6 +76,18 @@ HOST_ID, HOST_ROW, PANEL_COL = "ledgr-host", "ledgr-host-row", "ledgr-panel"
 RECIPE = os.path.join(REPO, "RECIPE.md")
 RECIPE_LIMIT, RECIPE_WARN = 64 * 1024, 56 * 1024
 RECIPE_PARTS = ["What you see", "How it behaves", "Built from", "Watch out", "Done when"]
+# Retention (2026-11-19): closed items past retention_days move out of store.json into
+# ledgr-data/archive/<session>/ (the writer's housekeeping, mods/ledgr/writer.js). The default was 14 until
+# then, and a new config.json got every default written into it (the hooks' ledgr_config.load on their
+# first run, apply_config here), so an older install holds 14, which wins over the new default of 3:
+# nothing would be archived for two weeks and store.json would stay past 1 MiB. No dialog offered the value
+# before the settings dialog's row, so a 14 the installer finds is the old default, not a choice: it becomes
+# 3, once (migrate_retention). install-state records that an install looked (migrations.retention_days), so
+# a 14 the person sets later in Settings stays. RETENTION_DEFAULTS mirror mods/ledgr/config.js DEFAULTS and
+# bin/lib/ledgr_config.py (setup/tests checks them); --check reports them (retention_report).
+RETENTION_OLD = 14
+RETENTION_DEFAULTS = {"retention_days": 3, "turns": 12}
+STORE_CAP = 1024 * 1024                    # Herdr's writeTextFile refuses a larger file (writer.js writeLarge past it)
 
 
 # ── small helpers ─────────────────────────────────────────────────────────────────────────────
@@ -1252,7 +1266,33 @@ def write_engine(ctx, name, changes):
         changes.append(f"mods/{name}/ledgr/: {n} engine file(s) copied")
 
 
-def apply_config(ctx, ans, changes):
+def retention_pending(st, cfg):
+    """True when migrate_retention would change this config.json: retention_days is the old default and no
+    install has looked yet (the Plan says so before anything is written)."""
+    done = (st.d.get("migrations") or {}).get("retention_days") if st is not None else True
+    v = cfg.get("retention_days") if isinstance(cfg, dict) else None
+    return not done and not isinstance(v, bool) and v == RETENTION_OLD
+
+
+def migrate_retention(st, cfg):
+    """The one-time move of retention_days from the old default (14) to 3 in cfg (changed in place),
+    recorded in install-state either way (migrations.retention_days: the date), so only the first install
+    that knows the archive decides and a 14 chosen in Settings later stays. Returns the change's words,
+    or None."""
+    if st is None:
+        return None
+    pending = retention_pending(st, cfg)
+    if not (st.d.get("migrations") or {}).get("retention_days"):
+        st.d.setdefault("migrations", {})["retention_days"] = datetime.date.today().isoformat()
+    if not pending:
+        return None
+    cfg["retention_days"] = RETENTION_DEFAULTS["retention_days"]
+    return (f"ledgr-data/config.json: retention_days {RETENTION_OLD} (the old default) -> {RETENTION_DEFAULTS['retention_days']}: "
+            "closed items move to ledgr-data/archive/ after 3 days, where the panel's Closed fold still reads and reopens them "
+            "(once; ledgr's Settings, Closed items stay in the list, changes it)")
+
+
+def apply_config(ctx, ans, changes, st=None):
     p = os.path.join(ctx.data, "config.json")
     try:
         cfg, style, raw = load_json(p)
@@ -1288,6 +1328,9 @@ def apply_config(ctx, ans, changes):
         ui["panel"] = place
     elif "panel" in ui and place == DEFAULT_PLACE:
         del ui["panel"]
+    moved = migrate_retention(st, new)
+    if moved:
+        changes.append(moved)
     if new != cfg or raw is None:
         if raw is not None:
             ctx.backup(p)
@@ -1887,6 +1930,8 @@ def cmd_install(ctx, args, flags):
     kept = [CFG_SHARED[k] for k, _ in ans.get("_kept") or []]
     if kept:
         say(f"              (kept from config.json, changed in ledgr since the last install: {', '.join(kept)})")
+    if retention_pending(st, read_cfg(ctx)):
+        say(f"              retention_days {RETENTION_OLD}, the old default, becomes {RETENTION_DEFAULTS['retention_days']} (once): closed items move to the archive after 3 days")
     say(f"  keys        {ans['keys']['capture']} park a question; {ans['keys']['toggle']} -> {ans['keys']['toggle_command']}" +
         (f"; replaces {', '.join(f'{s}:{c}' for s, c in ans['keys']['replaced'])}" if ans['keys']['replaced'] else ""))
     say(f"  layout      {('layouts/' + lay['name'] + '.json') if lay.get('name') else 'none'}" +
@@ -1930,7 +1975,7 @@ def cmd_install(ctx, args, flags):
             changes.append(f"Keychain: ledgr / {ans['provider']} stored")
             ans["api_key"] = "keep"
     apply_layout(ctx, st, f, ans, changes)
-    st.d["config_written"] = {"wrote": apply_config(ctx, ans, changes),
+    st.d["config_written"] = {"wrote": apply_config(ctx, ans, changes, st),
                               "said": {**{k: ans[k] for k in CFG_SHARED if k in ans}, **(ans.get("_said") or {})}}
     for k, v in ans.get("_kept") or []:
         changes.append(kept_words(k, v))
@@ -2075,6 +2120,132 @@ def writer_report(ctx, f, now=None):
     return lines, problems
 
 
+def writer_number(name, default):
+    """A number mods/ledgr/writer.js exports as `export const NAME = 768 * 1024;` (digits multiplied), read
+    from the repo's copy, else default."""
+    try:
+        m = re.search(rf"^export const {name} = (\d+(?: \* \d+)*);", open(os.path.join(REPO, "mods", MOD, "writer.js"), encoding="utf-8").read(), re.M)
+    except OSError:
+        return default
+    if not m:
+        return default
+    n = 1
+    for x in m.group(1).split("*"):
+        n *= int(x)
+    return n
+
+
+def kb(n):
+    return f"{n / 1e6:.2f} MB" if n >= 1e6 else f"{n / 1e3:.0f} KB" if n >= 1e3 else f"{n} bytes"
+
+
+def retention_days_of(v):
+    """retention_days as the mod reads it (mods/ledgr/config.js retentionDays): whole days from 1 to 30, a
+    number or a numeric string rounded half up and clamped; anything else the default."""
+    if isinstance(v, bool) or not isinstance(v, (int, float, str)):
+        return RETENTION_DEFAULTS["retention_days"]
+    try:
+        n = float(v) if not isinstance(v, str) or v.strip() else float("nan")
+    except ValueError:
+        return RETENTION_DEFAULTS["retention_days"]
+    if n != n or n in (float("inf"), float("-inf")):
+        return RETENTION_DEFAULTS["retention_days"]
+    return min(30, max(1, int(math.floor(n + 0.5))))
+
+
+def retention_report(ctx, st, cfg, now=None):
+    """--check's retention lines and its problems (2026-11-19). Read-only: config.json's retention_days and
+    retention.turns, store.json's size against Herdr's 1 MiB cap and housekeeping's threshold (writer.js
+    HOUSE_SIZE: past it a run starts within the hour), when housekeeping last ran (d.houseAt) and whether the
+    first run after the upgrade has finished (d.retention), the archive under ledgr-data/archive/ (files and
+    bytes: a session's items-*.jsonl and turns-*.jsonl, the legacy <yyyy-mm>.jsonl), and the one-time copy
+    store.pre-retention-<ms>.json. A problem: retention_days still at the old default 14 that no install
+    has looked at (what to do: ./install.sh, or Settings). A store past the cap is said, not counted."""
+    now = now or time.time()
+    lines, problems = [], []
+    cfg = cfg if isinstance(cfg, dict) else {}
+    days = cfg.get("retention_days", None)
+    turns = cfg["retention"].get("turns") if isinstance(cfg.get("retention"), dict) else None
+    read = retention_days_of(days)
+    shown_days = (f"{days}" if read == days and not isinstance(days, bool) else f"{json.dumps(days)} (read as {read})") if days is not None \
+        else f"{RETENTION_DEFAULTS['retention_days']} (the default)"
+    shown_turns = f"{turns}" if turns is not None else f"{RETENTION_DEFAULTS['turns']} (the default)"
+    lines.append(f"  retention       closed items stay {shown_days} days (retention_days; one closed as not needed at least 7), "
+                 f"turn records kept per session {shown_turns} (retention.turns)")
+    if retention_pending(st, cfg):
+        problems.append(f"retention_days is {RETENTION_OLD}, the old default: closed items stay two weeks before they move to the archive, "
+                        "and store.json stays past 1 MiB meanwhile. Run ./install.sh (it moves the old default to 3, once), or choose "
+                        "the days in ledgr's Settings (Closed items stay in the list)")
+    elif days == RETENTION_OLD:
+        lines.append(f"                  ({RETENTION_OLD} chosen since the install moved the old default; Settings changes it)")
+    sp = os.path.join(ctx.data, "store.json")
+    try:
+        size = os.path.getsize(sp)
+    except OSError:
+        size = None
+    house = writer_number("HOUSE_SIZE", 768 * 1024)
+    d = {}
+    if size is not None:
+        try:
+            with open(sp, encoding="utf-8") as fh:
+                d = json.load(fh)
+        except (OSError, ValueError):
+            d = {}
+        d = d if isinstance(d, dict) else {}
+        where = ("PAST Herdr's 1 MiB text-file cap (every save takes the slow path)" if size > STORE_CAP else "under Herdr's 1 MiB text-file cap")
+        where += (f"; over housekeeping's {house:,} (a run within the hour)" if size > house else f"; under housekeeping's {house:,}")
+        lines.append(f"  store.json      {size:,} bytes: {where}")
+    else:
+        lines.append("  store.json      missing (the writer makes it at its first event)")
+    ret = d.get("retention") if isinstance(d.get("retention"), dict) else None
+    house_at = d.get("houseAt") if isinstance(d.get("houseAt"), (int, float)) and not isinstance(d.get("houseAt"), bool) else None
+    first = (f"the first run after the upgrade finished {ago(ret['at'] / 1000)}" if ret and ret.get("v") == 1 and isinstance(ret.get("at"), (int, float))
+             else "the first run after the upgrade has not finished yet (the writer runs it at its next start, after keeping the store as it was)")
+    lines.append(f"  housekeeping    last ran {ago(house_at / 1000) if house_at else 'never'}; {first}" if size is not None
+                 else "  housekeeping    not yet (no store.json)")
+    arch = os.path.join(ctx.data, "archive")
+    nitems = nturns = nbytes = nses = 0
+    legacy = []
+    if os.path.isdir(arch):
+        for n in sorted(os.listdir(arch)):
+            p = os.path.join(arch, n)
+            if os.path.isdir(p):
+                fs_ = [f for f in os.listdir(p) if re.match(r"^(items|turns)-\d+-[a-z0-9]+\.jsonl$", f)]
+                nses += 1 if fs_ else 0
+                for f in fs_:
+                    nitems += f.startswith("items-")
+                    nturns += f.startswith("turns-")
+                    try:
+                        nbytes += os.path.getsize(os.path.join(p, f))
+                    except OSError:
+                        pass
+            elif re.match(r"^\d{4}-\d{2}\.jsonl$", n):
+                legacy.append(n)
+                try:
+                    nbytes += os.path.getsize(p)
+                except OSError:
+                    pass
+    counted = sum(int(s.get("archived") or 0) for s in (d.get("sessions") or {}).values() if isinstance(s, dict) and isinstance(s.get("archived"), int))
+    lines.append(f"  archive         " + (f"{nses} session{'' if nses == 1 else 's'}, {nitems} items file{'' if nitems == 1 else 's'} and {nturns} turns file{'' if nturns == 1 else 's'}"
+                                          f"{f', {len(legacy)} legacy month file(s)' if legacy else ''}, {kb(nbytes)}; {counted} item{'' if counted == 1 else 's'} archived (session.archived)"
+                                          if nitems or nturns or legacy else "empty (nothing has left store.json yet)"))
+    copies = sorted(n for n in (os.listdir(ctx.data) if os.path.isdir(ctx.data) else []) if re.match(r"^store\.pre-retention-\d+\.json$", n))
+    if copies:
+        sizes = []
+        for n in copies:
+            try:
+                sizes.append(os.path.getsize(os.path.join(ctx.data, n)))
+            except OSError:
+                sizes.append(0)
+        lines.append(f"  one-time copy   {', '.join(f'{n} ({kb(s)})' for n, s in zip(copies, sizes))}: the store before the first run, kept, never read by ledgr")
+    elif ret:
+        lines.append("  one-time copy   none in ledgr-data (moved or deleted by hand; ledgr never reads it)")
+    if size is not None and size > STORE_CAP and ret and ret.get("v") == 1:
+        lines.append("  ! store.json is still past 1 MiB after housekeeping: what is left is open items (never archived), recent closed ones "
+                     "and recent turn records; every save takes the slow path (writeLarge) meanwhile")
+    return lines, problems
+
+
 def cmd_check(ctx, args):
     st = State(ctx)
     f = preflight(ctx)
@@ -2157,6 +2328,10 @@ def cmd_check(ctx, args):
     for ln in wlines:
         say(ln)
     bad += wproblems
+    rlines, rproblems = retention_report(ctx, st, cfg)
+    for ln in rlines:
+        say(ln)
+    bad += rproblems
     if prov in ("anthropic", "openai-compatible"):
         okk = f["security"] and kc_exists(ctx, prov)
         say(f"  Keychain        service ledgr, account {prov}: {'resolves' if okk else 'MISSING'}")

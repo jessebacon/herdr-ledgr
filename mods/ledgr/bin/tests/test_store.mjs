@@ -6,6 +6,10 @@
 // confluence's answeredIn, the search, the words, and the writer's re-anchor of a screen pin; writes
 // msg-pins.txt and msg-pins-lead.txt (confluence.js pinsMessage) for test-store.sh, and msg-pins-long.txt (a
 // pins message over 45,000 characters, for the parser's scan length).
+// Retention (2026-11-19, Phase 1): archivable's 7-day floor for dismissed items, removeItems' re-check and
+// the per-session `archived` count, planSlim / applySlim, leaner turn records (and the readers' fallback),
+// restore, a re-raise after its original was archived, handles never reused, the hooks' defaults equal to
+// config.js's (ledgr_config.py through python3), and a store of realistic size slimmed by exactly what goes.
 //   node tests/test_store.mjs <folder holding store.js, branch.js, config.js, confluence.js>   (tests/test-store.sh)
 import assert from "node:assert/strict";
 import * as fsm from "node:fs";
@@ -857,7 +861,8 @@ const nSess = Object.keys(st.d.sessions).length;
 st.apply({ ...cev("clear_questions", {}), session_id: "99999999-0000-0000-0000-0000000000ff" });
 A.equal(Object.keys(st.d.sessions).length, nSess, "an unknown session: nothing created");
 // Closed, the archive and the snapshot treat them as dismissed items
-A.ok(st.archivable(0, at + 1).some((i) => i.id === "rq_k2"), "a cleared question archives like other dismissed items");
+A.ok(st.archivable(0, at + 8 * 86400e3).some((i) => i.id === "rq_k2"), "a cleared question archives like other dismissed items");
+A.equal(st.archivable(0, at + 1).some((i) => i.id === "rq_k2"), false, "...never before 7 days, as they are (retention, 2026-11-19)");
 A.ok(st.snapshot(at).items.some((i) => i.id === "rq_k2" && i.dismissedBy === "clear"), "recent: in the snapshot, as dismissed items are");
 A.equal(Store.fromText(st.toText()).item("rq_k6").dismissedBy, "clear", "survives a save");
 const spaceChecks = checks - phase1 - phase2 - phase3 - sev - prof - toolChecks - settleChecks;
@@ -1216,4 +1221,463 @@ A.ok(CF.pinsOverCap(CF.pinsChars(longPins)), "(Ask here refuses it now; a hand-m
 fsm.writeFileSync(`${dir}/msg-pins-long.txt`, longMsg);
 const pinChecks = checks - phase1 - phase2 - phase3 - sev - prof - toolChecks - settleChecks - spaceChecks;
 
-console.log(`OK: store, ${checks} checks (${phase1} phase 1, ${phase2} phase 2, ${phase3} phase 3, ${sev} severity and resume, ${prof} profiles, handoff and paste words, ${toolChecks} tool asks, ${settleChecks} blocking while working, closed by the agent, answered then settled, ${spaceChecks} spaces off and Clear all, ${pinChecks} pins), 0 failure(s)`);
+// ── Retention (2026-11-19, Phase 1) ─────────────────────────────────────
+let retSizes = "";
+{
+  const DAY = 86400e3, NOW = 1800000000000;
+  const idsOf = (l) => l.map((x) => x.id).sort();
+  // The lossless part of slimming, written here on its own (the oracle): the default turn file and null
+  // fields (top, asks, retry) leave a record.
+  const oracleLean = (turns) => {
+    for (const [sid, all] of Object.entries(turns)) {
+      for (const [t, r] of Object.entries(all)) {
+        if (!r.textPath || r.textPath === CFG.turnPath(sid, t) || r.textPath === `turns/${sid}/${t}.md`) delete r.textPath;
+        for (const o of [r, r.asks ?? {}, r.retry ?? {}]) for (const key of Object.keys(o)) if (o[key] === null) delete o[key];
+      }
+      if (!Object.keys(all).length) delete turns[sid];
+    }
+    return turns;
+  };
+
+  // 1. the settled values; the hooks' defaults (ledgr_config.py) agree with config.js on every key they hold
+  A.equal(CFG.DEFAULTS.retention_days, 3, "retention_days: 3 (was 14)");
+  A.deepEqual(CFG.DEFAULTS.retention, { turns: 12 }, "retention.turns: 12 records per session");
+  A.equal(CFG.LIMITS.turnHeads, 2, "LIMITS.turnHeads: 2");
+  {
+    const { spawnSync } = await import("node:child_process");
+    const lib = new URL("../lib/", import.meta.url).pathname;
+    const r = spawnSync(process.env.LEDGR_PYTHON || "python3", ["-I", "-B", "-c",
+      "import sys, json; sys.path[:0] = [sys.argv[1]]; import ledgr_config as K; print(json.dumps(K.DEFAULT_CONFIG))", lib], { encoding: "utf8" });
+    A.equal(r.status, 0, `ledgr_config.py loads: ${r.error ?? r.stderr}`);
+    const py = JSON.parse(r.stdout);
+    const leaves = (o, p = []) => (o && typeof o === "object" && !Array.isArray(o) ? Object.entries(o).flatMap(([k, v]) => leaves(v, [...p, k])) : [[p, o]]);
+    const atPath = (o, p) => p.reduce((x, k) => (x && typeof x === "object" ? x[k] : undefined), o);
+    A.deepEqual(leaves(py).filter(([p, v]) => JSON.stringify(atPath(CFG.DEFAULTS, p)) !== JSON.stringify(v)).map(([p]) => p.join(".")), [],
+      "every default ledgr_config.py holds is config.js's");
+    A.equal(py.retention_days, 3); A.deepEqual(py.retention, { turns: 12 });
+  }
+
+  // 2. archivable: closed past `days`; a dismissed item never before 7 days; copies
+  const RT = "rtrtrtrt-7777-0000-0000-000000000001";
+  const rt = new Store({ v: 1, items: {}, sessions: { [RT]: { sessionId: RT, agent: "claude-code", turn: 9, state: "idle", turnSource: "hooks", cwd: "/rt", nextHandle: { A: 1, Q: 1, P: 1 } } },
+    branches: {}, terminals: {}, turns: {}, ingested: [], forgotten: {}, pins: {} });
+  const put = (id, status, ageDays, sid = RT) => {
+    const closed = status === "resolved" || status === "dismissed";
+    rt.d.items[id] = { id, key: id, handle: `A${rt.d.sessions[RT].nextHandle.A++}`, direction: "agent_to_human", text: `item ${id}`, kind: "do", level: "needed",
+      anchor: { sessionId: sid, turn: 1, hash: id }, status, createdAt: NOW - 60 * DAY, updatedAt: NOW - ageDays * DAY, ...(closed ? { resolvedAt: NOW - ageDays * DAY } : {}) };
+  };
+  put("rq_r4", "resolved", 4); put("rq_r2", "resolved", 2); put("rq_d4", "dismissed", 4); put("rq_d8", "dismissed", 8);
+  put("rq_o30", "open", 30); put("rq_a30", "answered", 30); put("rq_f30", "deferred", 30); put("rq_j30", "rejoin_pending", 30);
+  A.deepEqual(idsOf(rt.archivable(3, NOW)), ["rq_d8", "rq_r4"], "3 days: resolved past 3 days, dismissed past 7; open, answered, deferred, rejoin_pending never");
+  A.deepEqual(idsOf(rt.archivable(0, NOW)), ["rq_d8", "rq_r2", "rq_r4"], "0 days reads as 1 (config.js retentionDays): a dismissed item still waits 7 days");
+  put("rq_r05", "resolved", 0.2);
+  A.ok(!idsOf(rt.archivable(0, NOW)).includes("rq_r05") && !idsOf(rt.archivable(0.4, NOW)).includes("rq_r05"), "a hand-written 0 or 0.4 is one day, never \"archive at once\"");
+  A.deepEqual(idsOf(rt.archivable(45, NOW + 31 * DAY)), idsOf(rt.archivable(30, NOW + 31 * DAY)), "45 reads as 30");
+  delete rt.d.items.rq_r05; rt.d.sessions[RT].nextHandle.A--;
+  A.deepEqual(idsOf(rt.archivable(10, NOW)), [], "10 days: neither is past it");
+  A.deepEqual(idsOf(rt.archivable(3, NOW + 4 * DAY)), ["rq_d4", "rq_d8", "rq_r2", "rq_r4"], "four days on, the 4-day dismissal is past 7 days");
+  for (const bad of [null, undefined, "x", NaN, true, {}]) A.deepEqual(idsOf(rt.archivable(bad, NOW)), ["rq_d8", "rq_r4"], `days ${String(bad)}: the default, 3`);
+  A.deepEqual(idsOf(rt.archivable(-1, NOW)), ["rq_d8", "rq_r2", "rq_r4"], "-1 clamps to 1 day");
+  A.equal(CFG.retentionDays(2.5), 3); A.equal(CFG.retentionDays("7"), 7); A.equal(CFG.retentionDays(31), 30); A.equal(CFG.retentionDaysOf({}), 3);
+  A.deepEqual(idsOf(rt.archivable("3", NOW)), ["rq_d8", "rq_r4"], "a numeric string reads as its number");
+  const copies = rt.archivable(3, NOW);
+  copies[0].text = "changed in the copy"; copies[0].anchor.turn = 99;
+  A.equal(rt.item(copies[0].id).text, `item ${copies[0].id}`, "archivable gives copies (the archive line as it is now)"); A.equal(rt.item(copies[0].id).anchor.turn, 1);
+
+  // 3. removeItems: only what is still closed and unchanged since the plan; counted per session; returned
+  const plan = rt.archivable(3, NOW);
+  rt.act("rq_r4", "reopen", null, NOW + 1);   // reopened while the writer wrote the archive file
+  const gone = rt.removeItems([...plan, { id: "rq_nope", updatedAt: 1 }, { id: "__proto__" }, { id: "constructor" }, null, 7]);
+  A.deepEqual(gone.map((x) => x.id), ["rq_d8"], "only the one still closed and unchanged leaves");
+  A.equal(rt.item("rq_d8"), null); A.equal(rt.item("rq_r4").status, "open", "the reopened one stays");
+  A.equal(rt.d.sessions[RT].archived, 1, "counted on its session's archived");
+  A.equal(typeof Object.prototype.archived, "undefined", "nothing reaches Object.prototype");
+  A.deepEqual(rt.removeItems(plan), [], "the same list again removes nothing"); A.equal(rt.d.sessions[RT].archived, 1);
+  rt.act("rq_r4", "resolve", null, NOW - 5 * DAY);
+  const plan2 = rt.archivable(3, NOW);
+  A.deepEqual(idsOf(plan2), ["rq_r4"]);
+  rt.act("rq_r4", "draft", "typed while the file was written", NOW - 4 * DAY);   // still closed, but changed
+  A.deepEqual(rt.removeItems(plan2), [], "changed since the plan (updatedAt): it stays"); A.equal(rt.item("rq_r4").draft, "typed while the file was written");
+  A.deepEqual(rt.removeItems(rt.archivable(3, NOW)).map((x) => x.id), ["rq_r4"], "...and leaves at the next run"); A.equal(rt.d.sessions[RT].archived, 2);
+  put("rq_orphan", "resolved", 30, "gone-session");
+  A.deepEqual(rt.removeItems(rt.archivable(3, NOW)).map((x) => x.id), ["rq_orphan"], "an item of no recorded session leaves too");
+  A.equal(rt.d.sessions["gone-session"], undefined, "...and no session is made for its count");
+  A.deepEqual(rt.removeItems(undefined), []); A.deepEqual(rt.removeItems("x"), []);
+  // A change that sets no updatedAt (a confluence landing again rewrites `resolution`; Forget drops a branch
+  // mark): the item no longer equals its planned line, so it stays (review, 2026-11-19).
+  put("rq_rb", "resolved", 10);
+  const planB = rt.archivable(3, NOW).filter((x) => x.id === "rq_rb");
+  rt.item("rq_rb").resolution = { branchId: "br_00000000-0000-4000-8000-0000000000bb", turn: 9 };   // updatedAt untouched
+  A.deepEqual(rt.removeItems(planB), [], "a change that set no updatedAt: it stays (the file's line is stale, the store wins)");
+  A.equal(rt.item("rq_rb").resolution.turn, 9);
+  A.deepEqual(rt.removeItems(rt.archivable(3, NOW).filter((x) => x.id === "rq_rb")).map((x) => x.id), ["rq_rb"], "...and leaves with its new line at the next run");
+
+  // 4. leaner turn records from now on: no default textPath, no null field; the readers fall back
+  const LS = "llllllll-7777-0000-0000-000000000001", LT = "t72";
+  const ln = Store.fromText(null);
+  const lev = (type, p) => ({ v: 1, id: `ln${++n}`, type, at: (at += 1000), terminal: LT, session_id: LS, ...p });
+  ln.apply(lev("session_start", { agent: "claude-code", source: "startup", cwd: "/ln", session_name: "lean", turn: 0 }));
+  ln.apply(lev("prompt", { turn: 1, prompt_id: "lp1", local: false, prompt_head: "go", refs: [] }));
+  let lr = ln.apply(lev("stop", { turn: 1, prompt_id: "lp1", text_path: CFG.turnPath(LS, 1), text_head: "The head.", passage_hash: "l1", message_uuid: "lu1" }));
+  A.equal("textPath" in ln.turnInfo(LS, 1), false, "the default turn file is not stored"); A.equal(lr.settle[0].textPath, null, "...the settle entry falls back to it");
+  A.equal(ln.turnInfo(LS, 1).textHead, "The head."); A.equal(ln.turnInfo(LS, 1).promptId, "lp1"); A.equal(ln.turnInfo(LS, 1).uuid, "lu1");
+  ln.apply(lev("stop", { turn: 2, prompt_id: null, text_path: `turns/${LS}/2.md`, text_head: "" }));
+  A.deepEqual(Object.keys(ln.turnInfo(LS, 2)).sort(), ["stopAt", "textHead"], "a relative default goes too, and every null");
+  A.equal(ln.turnInfo(LS, 2).textHead, "", "an empty head is kept as given");
+  lr = ln.apply(lev("stop", { turn: 3, prompt_id: "lp3", text_path: "/elsewhere/3.md", text_head: "h" }));
+  A.equal(ln.turnInfo(LS, 3).textPath, "/elsewhere/3.md", "a path elsewhere is kept"); A.equal(lr.settle[0].textPath, "/elsewhere/3.md");
+  const askAt = at + 1000;
+  ln.apply(lev("asks", { turn: 1, source: "model", asks: [], model: null, provider: null, error: null, block_error: null, message_uuid: null }));
+  A.deepEqual(ln.turnInfo(LS, 1).asks, { source: "model", count: 0, at: askAt }, "the asks sub-record without its null fields");
+  ln.apply(lev("retry", { turn: 3 }));
+  ln.apply(lev("asks", { turn: 3, source: "error", asks: [], error: "no credential", error_detail: "Keychain: no item" }));
+  A.deepEqual(Object.keys(ln.turnInfo(LS, 3).asks).sort(), ["at", "count", "error", "errorDetail", "source"], "an error keeps what the panel's error line reads");
+  A.equal(ln.turnInfo(LS, 3).retry.state, "failed"); A.equal(ln.turnInfo(LS, 3).retry.note, "no credential");
+  A.equal(/:null[,}]/.test(JSON.stringify(ln.d.turns)), false, "no null anywhere in the records");
+  // writer.js reanchor (through on_stop's settle entry) reads the default file the record no longer names
+  ln.apply(lev("prompt", { turn: 4, prompt_id: "lp4", local: false, prompt_head: "go", refs: [] }));
+  ln.apply({ ...pinEv("Back-off doubles each time.", { turn: 4, verified: "screen", settled: false }, LS, LT), id: `ln${++n}` });
+  lr = ln.apply(lev("stop", { turn: 4, prompt_id: "lp4", text_path: CFG.turnPath(LS, 4), text_head: "" }));
+  A.equal("textPath" in ln.turnInfo(LS, 4), false);
+  globalThis.__herdr = { files: { [CFG.turnPath(LS, 4)]: "As said: Back-off doubles each time." } };
+  wr.live = ln;
+  await wr.reanchor(lr.settle[0]);
+  const lpin = ln.pinByHandle(LS, "P1");
+  A.equal(lpin.anchor.reanchored, true); A.equal(lpin.anchor.approx, false, "found in the default turn file"); A.equal(lpin.anchor.turn, 4);
+  globalThis.__herdr = {};
+
+  // 5. planSlim / applySlim: the newest records kept (by turn number), heads beyond the newest 2, copies;
+  // nothing changed by the plan; a record changed since is left; slimmed twice; pins untouched
+  const S1 = "s1s1s1s1-7777-0000-0000-000000000001", S2 = "s2s2s2s2-7777-0000-0000-000000000002";
+  const legacyRec = (sid, t) => ({ stopAt: NOW - t * 1000, textPath: CFG.turnPath(sid, t), textHead: `Turn ${t} said this.`, promptId: null, uuid: `u-${t}`,
+    asks: { source: "model", error: null, errorDetail: null, blockError: null, count: 1, at: NOW - t * 1000, model: null, provider: null } });
+  const legacyStore = (bySid) => ({ v: 1, items: {}, branches: {}, terminals: {}, ingested: [], forgotten: {},
+    sessions: Object.fromEntries(Object.keys(bySid).map((sid) => [sid, { sessionId: sid, agent: "claude-code", turn: 200, state: "idle", turnSource: "hooks", cwd: "/x", nextHandle: { A: 1, Q: 1, P: 1 } }])),
+    turns: Object.fromEntries(Object.entries(bySid).map(([sid, list]) => [sid, Object.fromEntries(list.map((t) => [t, legacyRec(sid, t)]))])),
+    pins: { "pn_00000000-7777-4000-8000-000000000001": { id: "pn_00000000-7777-4000-8000-000000000001", handle: "P1", sessionId: S1, text: "A pinned passage.", note: null,
+      anchor: { sessionId: S1, turn: 1, hash: "p", settled: true }, status: "open", createdAt: NOW, updatedAt: NOW, usedIn: [], answeredIn: [] } } });
+  const sl = new Store(legacyStore({ [S1]: Array.from({ length: 20 }, (_, i) => i + 1), [S2]: [1, 2, 9, 10, 100] }));
+  sl.d.turns[S1][20].textPath = "/elsewhere/20.md";
+  const pinsText = JSON.stringify(sl.d.pins), t0 = sl.toText();
+  const p3 = sl.planSlim(3);
+  A.deepEqual(p3.cut.filter((c) => c.sessionId === S2).map((c) => c.turn), [2, 1], "by turn number: 100, 10 and 9 are the newest three");
+  A.deepEqual(p3.heads.filter((c) => c.sessionId === S2).map((c) => c.turn), [9], "...and 9 is past the newest two");
+  const sp_ = sl.planSlim(12);
+  A.equal(sl.toText(), t0, "planSlim mutates nothing");
+  A.deepEqual(sp_.cut.filter((c) => c.sessionId === S1).map((c) => c.turn), [8, 7, 6, 5, 4, 3, 2, 1], "past the newest 12 of 20");
+  A.equal(sp_.cut.filter((c) => c.sessionId === S2).length, 0, "5 records: none cut");
+  A.deepEqual(sp_.heads.filter((c) => c.sessionId === S1).map((c) => c.turn), [18, 17, 16, 15, 14, 13, 12, 11, 10, 9], "heads of the kept ones past the newest 2");
+  A.deepEqual(sp_.heads.filter((c) => c.sessionId === S2).map((c) => c.turn), [9, 2, 1]);
+  A.deepEqual(sp_.cut[0].rec, sl.d.turns[S1][8], "a cut entry carries the record as it is"); A.equal(sp_.heads[0].textHead, "Turn 18 said this.");
+  sp_.cut[0].rec.uuid = "edited in the plan";
+  A.equal(sl.d.turns[S1][8].uuid, "u-8", "...a copy");
+  sp_.cut[0].rec.uuid = "u-8";
+  A.equal(sl.planSlim(12, 0).heads.length, 17, "heads 0: every kept record's head (12 + 5)"); A.equal(sl.planSlim("bad", "bad").cut.length, 8, "bad numbers: the defaults");
+  sl.d.turns[S1][3].retry = { at: NOW, state: "requested" };   // changed after the plan: stays
+  sl.d.turns[S1][9].textHead = "Rewritten.";                   // a head that changed: stays
+  A.deepEqual(sl.applySlim(sp_), { cut: 7, heads: 12 }, "what was taken, as counts");
+  A.deepEqual(Object.keys(sl.d.turns[S1]).map(Number).sort((a, b) => a - b), [3, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
+  A.equal(sl.d.turns[S1][9].textHead, "Rewritten."); A.equal(sl.d.turns[S1][10].textHead, undefined); A.equal(sl.d.turns[S1][19].textHead, "Turn 19 said this.");
+  A.equal(sl.d.turns[S1][20].textPath, "/elsewhere/20.md", "a textPath elsewhere is kept");
+  A.equal(Object.values(sl.d.turns).flatMap((all) => Object.values(all)).filter((r) => "textPath" in r).length, 1, "every default textPath is gone");
+  A.equal(/:null[,}]/.test(JSON.stringify(sl.d.turns)), false, "and every null field (lossless)");
+  A.deepEqual(sl.d.turns[S2][100], { stopAt: NOW - 100000, textHead: "Turn 100 said this.", uuid: "u-100", asks: { source: "model", count: 1, at: NOW - 100000 } });
+  A.deepEqual(sl.applySlim(sp_), { cut: 0, heads: 0 }, "the same plan again takes nothing");
+  const sp2 = sl.planSlim(12);   // slimmed twice: the record and the head left last time go now
+  A.deepEqual(sp2.cut.map((c) => [c.sessionId, c.turn]), [[S1, 3]]); A.deepEqual(sp2.heads.map((c) => [c.sessionId, c.turn, c.textHead]), [[S1, 9, "Rewritten."]]);
+  A.deepEqual(sl.applySlim(sp2), { cut: 1, heads: 1 });
+  const t2 = sl.toText(), sp3 = sl.planSlim(12);
+  A.deepEqual(sp3, { cut: [], heads: [] }, "a third time: nothing planned"); A.deepEqual(sl.applySlim(sp3), { cut: 0, heads: 0 }); A.equal(sl.toText(), t2, "...and nothing changed");
+  A.equal(JSON.stringify(sl.d.pins), pinsText, "pins untouched");
+  for (const bad of [null, undefined, {}, { cut: "x", heads: 3 }, { cut: [null, { sessionId: "__proto__", turn: "constructor" }], heads: [{ sessionId: S1, turn: 99 }] }]) A.deepEqual(sl.applySlim(bad), { cut: 0, heads: 0 });
+  const z = Store.fromText(sl.toText());
+  z.applySlim(z.planSlim(0));
+  A.deepEqual(z.d.turns, {}, "keep 0: every record goes, and the empty maps with them");
+  // A key that is not its number's own spelling (a hand-edited "07"): planned with that key and cut by it,
+  // not looked for as "7" (and archived again at every run).
+  const hk = Store.fromText(null);
+  hk.d.turns.KS = { "07": { stopAt: 1, textHead: "seven" }, 8: { stopAt: 2, textHead: "eight" }, 9: { stopAt: 3 } };
+  const hp7 = hk.planSlim(2, 1);
+  A.deepEqual(hp7.cut.map((c) => [c.turn, c.key]), [[7, "07"]], "the plan carries the record's own key");
+  A.deepEqual(hp7.heads.map((h) => [h.turn, h.key]), [[8, "8"]]);
+  A.deepEqual(hk.applySlim(hp7), { cut: 1, heads: 1 }); A.deepEqual(Object.keys(hk.d.turns.KS).sort(), ["8", "9"], "the \"07\" record cut by its own key");
+  A.deepEqual(hk.planSlim(2, 1), { cut: [], heads: [] }, "...and nothing is planned again");
+
+  // 6. restore: back under its id and handle, reopened through setStatus; record_error and neither change
+  // nothing; an id already there; an unknown session; a replay; the count never below 0
+  const RS_ = "rsrsrsrs-7777-0000-0000-000000000001";
+  const ro_ = Store.fromText(null);
+  const rv = (type, p, sid = RS_) => ({ v: 1, id: `ro${++n}`, type, at: (at += 1000), terminal: "t73", session_id: sid, ...p });
+  ro_.apply(rv("session_start", { agent: "claude-code", source: "startup", cwd: "/ro", session_name: "restore", turn: 0 }));
+  ro_.apply(rv("prompt", { turn: 1, prompt_id: "rp1", local: false, prompt_head: "go", refs: [] }));
+  ro_.apply(rv("asks", { turn: 1, source: "block", asks: [ask("Pick the retention rule", "decide"), ask("Run the migration", "do")] }));
+  const ra1 = ro_.byHandle(RS_, "A1"), ra2 = ro_.byHandle(RS_, "A2");
+  ro_.apply(rv("act", { item: ra1.id, handle: "A1", action: "resolve", arg: null, actor: "agent", turn: 1, note: "settled in the chat" }));
+  A.equal(ra1.resolvedBy, "agent"); A.equal(ra1.resolvedNote, "settled in the chat");
+  ro_.apply(rv("act", { item: ra2.id, action: "dismiss", arg: null }));
+  const arch = ro_.archivable(3, at + 30 * DAY);
+  A.deepEqual(idsOf(arch), [ra1.id, ra2.id].sort());
+  const line = Object.fromEntries(arch.map((x) => [x.id, JSON.parse(JSON.stringify(x))]));   // what the writer reads back
+  A.equal(ro_.removeItems(arch).length, 2); A.equal(ro_.d.sessions[RS_].archived, 2);
+  ro_.d.retention = { v: 1, at };   // the writer's mark once the first run after the upgrade has finished
+  const reread = Store.fromText(ro_.toText());
+  A.equal(reread.d.sessions[RS_].archived, 2, "session.archived survives a save and a load"); A.deepEqual(reread.d.retention, { v: 1, at }, "...and so does d.retention");
+  const textNoIngested = () => { const d = JSON.parse(ro_.toText()); delete d.ingested; return JSON.stringify(d); };
+  const e1 = rv("restore", { item: ra1.id, file: "items-1800000000000-a1b2c3.jsonl", reopen: true, record: line[ra1.id] });
+  let rr = ro_.apply(e1);
+  A.deepEqual(rr.restore, { item: ra1.id, ok: true }, "the result says it was restored"); A.ok(ro_.d.ingested.includes(e1.id));
+  const back = ro_.item(ra1.id);
+  A.equal(back.handle, "A1", "under its own handle"); A.equal(back.id, ra1.id, "...and id"); A.notEqual(back, line[ra1.id], "a copy of the record");
+  A.equal(back.status, "open", "reopened"); A.equal(back.resolvedBy, undefined, "resolvedBy cleared (setStatus)"); A.equal(back.resolvedNote, undefined); A.equal(back.resolvedAt, undefined);
+  A.equal(back.updatedAt, e1.at); A.equal(ro_.d.sessions[RS_].archived, 1, "archived lowered by one");
+  A.equal(ro_.archivable(3, at + 30 * DAY).some((x) => x.id === ra1.id), false, "open again: not archivable");
+  let txt = textNoIngested();
+  const e2 = rv("restore", { item: ra2.id, file: "items-1800000000000-a1b2c3.jsonl", reopen: true, record_error: "no line for this item in items-1800000000000-a1b2c3.jsonl" });
+  rr = ro_.apply(e2);
+  A.deepEqual(rr.restore, { item: ra2.id, ok: false, error: "no line for this item in items-1800000000000-a1b2c3.jsonl" }); A.equal(rr.applied, true);
+  A.equal(textNoIngested(), txt, "record_error: no change"); A.ok(ro_.d.ingested.includes(e2.id), "...still ingested");
+  const e3 = rv("restore", { item: ra2.id, file: "x.jsonl", reopen: true });
+  rr = ro_.apply(e3);
+  A.equal(rr.restore.ok, false); A.match(rr.restore.error, /no record/); A.equal(textNoIngested(), txt, "neither: no change"); A.ok(ro_.d.ingested.includes(e3.id));
+  rr = ro_.apply(rv("restore", { item: ra2.id, file: "x.jsonl", reopen: true, record: line[ra1.id] }));
+  A.equal(rr.restore.ok, false, "a line of another item"); A.equal(textNoIngested(), txt);
+  rr = ro_.apply(rv("restore", { item: ra2.id, file: "x.jsonl", reopen: true, record: { ...line[ra2.id], anchor: { ...line[ra2.id].anchor, sessionId: "another" } } }));
+  A.equal(rr.restore.ok, false, "a line of another session"); A.equal(textNoIngested(), txt);
+  rr = ro_.apply(rv("restore", { item: ra1.id, file: "x.jsonl", reopen: true, record: line[ra1.id] }));
+  A.deepEqual(rr.restore, { item: ra1.id, ok: true }, "an id already in the store: the one there");
+  A.equal(ro_.itemsOf(RS_).filter((x) => x.handle === "A1").length, 1, "...no second item"); A.equal(ro_.d.sessions[RS_].archived, 1, "...the count unchanged");
+  A.equal(ro_.item(ra1.id).status, "open");
+  const e4 = rv("restore", { item: ra2.id, file: "items-1800000000000-a1b2c3.jsonl", reopen: false, record: line[ra2.id] });
+  rr = ro_.apply(e4);
+  A.deepEqual(rr.restore, { item: ra2.id, ok: true }); A.equal(ro_.item(ra2.id).status, "open", "a restore always reopens (reopen false is not read: a closed item put back would leave again at the next run)");
+  A.equal("archived" in ro_.d.sessions[RS_], false, "the count at 0 leaves the field out");
+  A.equal(ro_.apply(e4).applied, false, "a replay changes nothing"); A.equal(ro_.apply(e4).restore, undefined, "...and reports no restore");
+  ro_.d.items = Object.fromEntries(Object.entries(ro_.d.items).filter(([id]) => id !== ra2.id));
+  A.equal(ro_.restoreItem(line[ra2.id]).id, ra2.id, "restoreItem directly"); A.equal("archived" in ro_.d.sessions[RS_], false, "never below 0");
+  const nS = Object.keys(ro_.d.sessions).length;
+  const e5 = rv("restore", { item: ra1.id, file: "x.jsonl", reopen: true, record: line[ra1.id] }, "99999999-7777-0000-0000-0000000000ff");
+  rr = ro_.apply(e5);
+  A.deepEqual(rr.restore, { item: ra1.id, ok: false, error: "its session is not in the store" }); A.equal(Object.keys(ro_.d.sessions).length, nS, "an unknown session: none made");
+  A.ok(ro_.d.ingested.includes(e5.id));
+  for (const bad of [null, [], "rq_x", { id: "__proto__", anchor: { sessionId: RS_ } }, { id: "rq_noanchor" }, { id: "pn_00000000-0000-4000-8000-000000000001", anchor: { sessionId: RS_ } }]) {
+    A.equal(ro_.restoreItem(bad), null, `not an item: ${JSON.stringify(bad)}`);
+  }
+  A.equal(Object.prototype.anchor, undefined, "nothing reaches Object.prototype");
+  ro_.d.forgotten["ffffffff-7777-0000-0000-000000000001"] = at;
+  A.equal(ro_.restoreItem({ ...line[ra2.id], id: "rq_forgotten-1", anchor: { ...line[ra2.id].anchor, sessionId: "ffffffff-7777-0000-0000-000000000001" } }), null, "a forgotten session's item stays out");
+
+  // 6b. a legacy month file's line was never counted on session.archived: its restore leaves the count; an
+  // items file's lowers it; a restore with no `reopen` at all reopens
+  const RL = "rlrlrlrl-7777-0000-0000-000000000001";
+  const rl = Store.fromText(null);
+  const lv = (type, p) => ({ v: 1, id: `rl${++n}`, type, at: (at += 1000), terminal: "t75", session_id: RL, ...p });
+  rl.apply(lv("session_start", { agent: "claude-code", source: "startup", cwd: "/rl", session_name: "legacy", turn: 0 }));
+  rl.d.sessions[RL].archived = 2; rl.d.sessions[RL].nextHandle = { A: 10, Q: 1, P: 1 };
+  const old9 = { id: "rq_legacy-9", key: "k9", handle: "A9", direction: "agent_to_human", text: "from a month file", kind: "do", level: "needed",
+    anchor: { sessionId: RL, turn: 1, hash: "x9" }, status: "resolved", createdAt: at - 40 * DAY, updatedAt: at - 40 * DAY, resolvedAt: at - 40 * DAY };
+  rr = rl.apply(lv("restore", { item: old9.id, file: "2026-10.jsonl", reopen: true, record: old9 }));
+  A.equal(rr.restore.ok, true); A.equal(rl.d.sessions[RL].archived, 2, "a legacy month file's line: the count as it was (it never held it)");
+  A.equal(rl.item(old9.id).handle, "A9", "below nextHandle and no other item's: its own handle"); A.equal(rl.item(old9.id).handleWas, undefined);
+  rr = rl.apply(lv("restore", { item: "rq_items-8", file: "items-1800000000000-a1b2c3.jsonl", record: { ...old9, id: "rq_items-8", handle: "A8", key: "k8" } }));
+  A.equal(rl.d.sessions[RL].archived, 1, "an items file's line: one fewer");
+  A.equal(rl.item("rq_items-8").status, "open", "reopened, with no reopen field at all");
+  // R5: the session record made again (Forget's memory let it go, or a corrupt store was set aside): its
+  // counter starts at 1 and the new A1 is another item, so the archived A1 comes back as the next handle, its
+  // old one kept as handleWas; one at or above the counter too (it would be handed out again); the counter
+  // moves past both, so nothing is ever issued twice.
+  const RH = "rhrhrhrh-7777-0000-0000-000000000001";
+  const rh = Store.fromText(null);
+  const hv = (type, p) => ({ v: 1, id: `rh${++n}`, type, at: (at += 1000), terminal: "t76", session_id: RH, ...p });
+  rh.apply(hv("session_start", { agent: "claude-code", source: "startup", cwd: "/rh", session_name: "again", turn: 0 }));
+  rh.apply(hv("prompt", { turn: 1, prompt_id: "hp1", local: false, prompt_head: "go", refs: [] }));
+  rh.apply(hv("asks", { turn: 1, source: "block", asks: [ask("A new first ask", "do")] }));
+  const newA1 = rh.byHandle(RH, "A1");
+  A.equal(rh.d.sessions[RH].nextHandle.A, 2);
+  const oldA1 = { ...old9, id: "rq_old-a1", key: "ka1", handle: "A1", anchor: { ...old9.anchor, sessionId: RH } };
+  rr = rh.apply(hv("restore", { item: oldA1.id, file: "items-1800000000000-a1b2c3.jsonl", reopen: true, record: oldA1 }));
+  A.equal(rr.restore.ok, true);
+  A.equal(rh.item(oldA1.id).handle, "A2", "its A1 is the new session's: the next handle"); A.equal(rh.item(oldA1.id).handleWas, "A1", "...the old one kept");
+  A.equal(rh.byHandle(RH, "A1").id, newA1.id, "A1 stays the new ask's, once");
+  const oldA7 = { ...old9, id: "rq_old-a7", key: "ka7", handle: "A7", anchor: { ...old9.anchor, sessionId: RH } };
+  rh.apply(hv("restore", { item: oldA7.id, file: "items-1800000000000-a1b2c3.jsonl", reopen: true, record: oldA7 }));
+  A.equal(rh.item(oldA7.id).handle, "A3", "A7 at or above the counter (it would be handed out again): the next handle"); A.equal(rh.item(oldA7.id).handleWas, "A7");
+  rh.apply(hv("asks", { turn: 2, source: "block", asks: [ask("Another new ask", "do")] }));
+  const hs = rh.itemsOf(RH).map((x) => x.handle).sort();
+  A.deepEqual(hs, ["A1", "A2", "A3", "A4"], "no handle twice"); A.equal(rh.d.sessions[RH].nextHandle.A, 5);
+  const oldQ = { ...old9, id: "rq_old-q1", key: "kq1", handle: "Q1", direction: "human_to_agent", kind: "question", anchor: { ...old9.anchor, sessionId: RH } };
+  rh.apply(hv("restore", { item: oldQ.id, file: "items-1800000000000-a1b2c3.jsonl", record: oldQ }));
+  A.equal(rh.item(oldQ.id).handle, "Q1", "a question's counter is its own: Q1 at it is the next Q, itself");
+  A.equal(rh.item(oldQ.id).handleWas, undefined, "...so nothing to keep"); A.equal(rh.d.sessions[RH].nextHandle.Q, 2, "...and the counter moves past it");
+
+  // 7. after archiving: a same-text re-raise is a new item (no crash, no parent); handles are never reused
+  const RX = "rxrxrxrx-7777-0000-0000-000000000001";
+  const rx = Store.fromText(null);
+  const xv = (type, p) => ({ v: 1, id: `rx${++n}`, type, at: (at += 1000), terminal: "t74", session_id: RX, ...p });
+  rx.apply(xv("session_start", { agent: "claude-code", source: "startup", cwd: "/rx", session_name: "reraise", turn: 0 }));
+  rx.apply(xv("prompt", { turn: 1, prompt_id: "xp1", local: false, prompt_head: "go", refs: [] }));
+  rx.apply(xv("asks", { turn: 1, source: "model", asks: [ask("Run the load test", "do")] }));
+  rx.apply(xv("capture", { turn: 1, request: req("rq_rxq1", "Why is the pool shared?", null, {}, RX, 1) }));
+  rx.apply({ ...pinEv("The pool is shared.", { turn: 1 }, RX, "t74"), id: `rx${++n}` });
+  const xa1 = rx.byHandle(RX, "A1");
+  rx.act(xa1.id, "resolve", null, at); rx.act("rq_rxq1", "resolve", null, at);
+  const xPins = JSON.stringify(rx.d.pins);
+  A.deepEqual(rx.removeItems(rx.archivable(3, at + 30 * DAY)).map((x) => x.handle).sort(), ["A1", "Q1"]);
+  A.equal(rx.d.sessions[RX].archived, 2); A.equal(JSON.stringify(rx.d.pins), xPins, "the pin stays, untouched");
+  rx.apply(xv("prompt", { turn: 5, prompt_id: "xp5", local: false, prompt_head: "go", refs: [] }));
+  rx.apply(xv("asks", { turn: 5, source: "model", asks: [ask("Run the load test", "do")] }));
+  const xa2 = rx.itemsOf(RX).find((x) => x.text === "Run the load test");
+  A.equal(xa2.handle, "A2", "a new item, and A1 is never handed out again"); A.equal(xa2.status, "open");
+  A.equal(xa2.parentId, undefined, "no parent (the original is archived)"); A.equal(xa2.repeatOf, undefined);
+  rx.apply(xv("asks", { turn: 6, source: "model", asks: [ask("Please run the load test now", "do", { repeat_of: xa1.id }), ask("Run it after the reboot", "do", { repeat_of_handle: "A1" })] }));
+  const xa3 = rx.byHandle(RX, "A3"), xa4 = rx.byHandle(RX, "A4");
+  A.equal(xa3.repeatOf, xa1.id, "repeat_of an archived id: kept as given, nothing looked up"); A.equal(rx.item(xa3.repeatOf), null);
+  A.equal(xa4.repeatOf, undefined, "repeat_of_handle of an archived ask: a new item"); A.equal(xa4.status, "open");
+  rx.apply(xv("capture", { turn: 6, request: req("rq_rxq2", "Is the reboot needed?", null, {}, RX, 6) }));
+  A.equal(rx.item("rq_rxq2").handle, "Q2", "Q1 is never handed out again");
+  rx.apply(xv("prompt", { turn: 7, prompt_id: "xp7", local: false, prompt_head: "[A1] yes [Q1] and", refs: ["A1", "Q1"] }));
+  A.equal(xa2.status, "open", "a ref to an archived handle marks nothing");
+  rx.apply(xv("answers_landed", { turn: 7, for_session: RX, handles: ["A1"], answers: { A1: "yes" } }));
+  A.equal(rx.itemsOf(RX).filter((x) => x.status === "answered").length, 0, "...nor does an answer sheet naming it");
+  A.deepEqual(rx.removeItems([{ id: xa1.id, updatedAt: xa1.updatedAt }]), [], "already archived: nothing");
+
+  // 8. a store of realistic size, in the live store's proportions (8 sessions, 60 turn records each, 800
+  // items, 60 % of them closed long ago, a few pins): slimmed by exactly the archived items and turn lines
+  // and the lossless fields, nothing else; past Herdr's 1 MiB text-file cap before, well under it after
+  {
+    const NS = 8, TURNS = 60, PER = 100, WORDS_ = ["the", "pool", "gateway", "retries", "budget", "client", "worker", "migration", "staging", "cache", "is", "shared", "per"];
+    const say = (seed, len) => { let s = ""; for (let i = 0; s.length < len; i++) s += `${WORDS_[(seed * 7 + i * 3) % WORDS_.length]} `; return s.slice(0, len).trim(); };
+    const hex = (seed, len) => {   // deterministic, distinct per seed (an LCG)
+      let x = Math.imul(seed + 1, 2654435761) >>> 0, s = "";
+      while (s.length < len) { x = (Math.imul(x, 1103515245) + 12345) >>> 0; s += (x >>> 8).toString(16).padStart(6, "0"); }
+      return s.slice(0, len);
+    };
+    const uuidOf = (seed) => `${hex(seed, 8)}-${hex(seed + 1, 4)}-4${hex(seed + 2, 3)}-8${hex(seed + 3, 3)}-${hex(seed + 4, 12)}`;
+    const sids = Array.from({ length: NS }, (_, i) => uuidOf(1000 + i));
+    const data = { v: 1, items: {}, sessions: {}, branches: {}, terminals: {}, turns: {}, ingested: Array.from({ length: 1000 }, (_, i) => `ev-${uuidOf(i)}`), forgotten: {}, pins: {}, houseAt: NOW - 2 * DAY };
+    let seed = 0;
+    for (const [si, sid] of sids.entries()) {
+      data.sessions[sid] = { sessionId: sid, agent: "claude-code", terminal: `t${si + 1}`, sessionName: `session ${si}`, cwd: `/Users/x/src/repo-${si}`, repo: `repo-${si}`,
+        transcriptPath: `/Users/x/.claude/projects/-Users-x-src-repo-${si}/${sid}.jsonl`, model: "claude-opus-5-5", turn: TURNS, turnSource: "hooks", state: "idle",
+        nextHandle: { A: PER + 1, Q: 1, P: 2 }, startedAt: NOW - 40 * DAY, updatedAt: NOW, seenAt: NOW, promptAt: NOW, surfaced: false };
+      data.terminals[`t${si + 1}`] = { sessionId: sid, agent: "claude-code", updatedAt: NOW, space: null };
+      data.turns[sid] = {};
+      for (let t = 1; t <= TURNS; t++) {
+        data.turns[sid][t] = { stopAt: NOW - (TURNS - t) * 3600e3, textPath: CFG.turnPath(sid, t), textHead: say(++seed, 400), promptId: uuidOf(++seed), uuid: uuidOf(++seed),
+          asks: { source: t % 9 ? "tool" : "model", error: null, errorDetail: null, blockError: null, count: 3, at: NOW - (TURNS - t) * 3600e3 + 900, model: t % 9 ? null : "claude-haiku-5-5", provider: null },
+          passageHash: hex(++seed, 12) };
+      }
+      for (let i = 0; i < PER; i++) {
+        const id = `rq_${uuidOf(++seed)}`, turn = 1 + (i % TURNS), quote = say(++seed, 520), text = say(++seed, 230);
+        // 60 % closed long ago (resolved 5 to 40 days, or dismissed 8 to 40 days), 7 % dismissed 4 days ago
+        // (the floor keeps them), 7 % resolved a day ago, 26 % open (most of them below the threshold)
+        const kind = i % 100 < 50 ? "resolved-old" : i % 100 < 60 ? "dismissed-old" : i % 100 < 67 ? "dismissed-recent" : i % 100 < 74 ? "resolved-recent" : "open";
+        const age = kind === "resolved-old" ? 5 + (i % 35) : kind === "dismissed-old" ? 8 + (i % 32) : kind === "dismissed-recent" ? 4 : kind === "resolved-recent" ? 1 : 2;
+        const status = kind.startsWith("resolved") ? "resolved" : kind.startsWith("dismissed") ? "dismissed" : "open";
+        const options = i % 3 ? [] : [say(++seed, 40), say(++seed, 40)];
+        data.items[id] = { id, key: `${sid}|a|${text.toLowerCase()}`, handle: `A${i + 1}`, direction: "agent_to_human", text, kind: "decide", level: i % 4 ? "needed" : "optional",
+          options, recommended: options[0] ?? null, blocking: false,
+          anchor: { sessionId: sid, turn, promptId: uuidOf(++seed), uuid: uuidOf(++seed), apiMessageId: null, quote, quoteSource: "tool", hash: hex(++seed, 12), settled: true },
+          status, origin: "tool", terminal: `t${si + 1}`, createdTurn: turn, createdAt: NOW - (age + 1) * DAY, updatedAt: NOW - age * DAY, seq: i % 5,
+          ...(status === "open" ? {} : { resolvedAt: NOW - age * DAY, resolvedTurn: turn + 1 }), ...(i % 5 === 0 ? { answer: say(++seed, 120), answeredTurn: turn + 1 } : {}) };
+      }
+      const pid = `pn_${uuidOf(++seed)}`;
+      data.pins[pid] = { id: pid, handle: "P1", sessionId: sid, text: say(++seed, 900), note: null, anchor: { sessionId: sid, turn: 3, hash: hex(++seed, 12), settled: true },
+        source: { sessionName: `session ${si}`, cwd: `/Users/x/src/repo-${si}` }, status: "open", createdAt: NOW - 20 * DAY, updatedAt: NOW - 20 * DAY, usedIn: [], answeredIn: [] };
+    }
+    const orig = JSON.stringify(data);
+    const big = Store.fromText(orig);
+    const items_ = big.archivable(CFG.DEFAULTS.retention_days, NOW), turnsPlan = big.planSlim(CFG.DEFAULTS.retention.turns);
+    A.equal(items_.length, NS * PER * 0.6, "60 % of the items are past retention (the recent dismissals are kept by the 7-day floor)");
+    A.equal(turnsPlan.cut.length, NS * (TURNS - 12), "48 records cut per session"); A.equal(turnsPlan.heads.length, NS * 10, "10 heads per session");
+    // the archive lines the writer would write, read back
+    const itemLines = items_.map((x) => JSON.stringify(x));
+    const turnLines = [...turnsPlan.cut.map((c) => JSON.stringify({ sessionId: c.sessionId, turn: c.turn, rec: c.rec })),
+      ...turnsPlan.heads.map((h) => JSON.stringify({ sessionId: h.sessionId, turn: h.turn, textHead: h.textHead }))];
+    A.equal(big.toText(), orig, "planning changed nothing");
+    const removed = big.removeItems(itemLines.map((l) => JSON.parse(l)));
+    A.equal(removed.length, items_.length, "every planned item removed");
+    A.deepEqual(big.applySlim(turnsPlan), { cut: turnsPlan.cut.length, heads: turnsPlan.heads.length });
+    const slim = big.toText();
+    // the oracle: the original less exactly the archived lines and the lossless fields, plus the counts
+    const want = JSON.parse(orig);
+    for (const it of removed) { delete want.items[it.id]; const s = want.sessions[it.anchor.sessionId]; s.archived = (s.archived ?? 0) + 1; }
+    for (const c of turnsPlan.cut) delete want.turns[c.sessionId][c.turn];
+    for (const h of turnsPlan.heads) delete want.turns[h.sessionId][h.turn].textHead;
+    oracleLean(want.turns);
+    A.equal(slim, JSON.stringify(want), "the slimmed store is exactly the expected text");
+    A.deepEqual(Object.values(big.d.sessions).map((s) => s.archived), Array(NS).fill(PER * 0.6), "each session counts its archived items");
+    // nothing lost: the slimmed store plus the archive lines give back the original (less the lossless fields)
+    const rebuilt = JSON.parse(slim);
+    for (const l of itemLines) { const it = JSON.parse(l); rebuilt.items[it.id] = it; }
+    for (const l of turnLines) { const x = JSON.parse(l); if (x.rec) rebuilt.turns[x.sessionId][x.turn] = x.rec; else rebuilt.turns[x.sessionId][x.turn].textHead = x.textHead; }
+    for (const s of Object.values(rebuilt.sessions)) delete s.archived;
+    const origData = JSON.parse(orig);
+    A.deepEqual(rebuilt.items, origData.items, "every item is in the store or an archive line, as it was");
+    A.deepEqual(oracleLean(rebuilt.turns), oracleLean(origData.turns), "every turn record and head is in the store or an archive line");
+    A.deepEqual(rebuilt.pins, origData.pins, "pins untouched");
+    A.deepEqual({ ...rebuilt, items: null, turns: null }, { ...origData, items: null, turns: null }, "nothing else changed");
+    A.ok(orig.length > 1024 * 1024, `the fixture is past Herdr's 1 MiB text-file cap (${orig.length})`);
+    A.ok(slim.length < 1024 * 1024, `...and under it after: the fast write path again (${slim.length})`);
+    A.ok(slim.length < orig.length * 0.5, `more than half goes (${(slim.length / orig.length * 100).toFixed(0)} % left)`);
+    retSizes = `, ${(orig.length / 1e6).toFixed(2)} MB slimmed to ${(slim.length / 1e6).toFixed(2)} MB`;
+  }
+
+  // 9. what Phase 2 (cold files for idle sessions) builds on: one safe name for a session's folder; slimming
+  // keeps every timestamp an idle clock reads (stopAt, asks.at, retry.at); removeItems, applySlim and
+  // restoreItem set no updatedAt on what they do not otherwise change; retention.turns filled into a
+  // config.json that lacks it (an older install's)
+  {
+    const S = await import(`${dir}/store.js`), SPm = await import(`${dir}/spool.js`);
+    A.equal(S.safeName, CFG.safeName, "store.js re-exports config.js safeName (one function)");
+    const names = ["5e550000-0000-4000-8000-000000000000", "herdr:t3/x y", "..", ".", "a/../b", "ünï cødé", "tab\there", "x".repeat(130), "__proto__", "", "a😀b"];
+    A.deepEqual(names.map(CFG.safeName), ["5e550000-0000-4000-8000-000000000000", "herdr_t3_x_y", "..", ".", "a_.._b", "_n__c_d_", "tab_here", "x".repeat(130), "__proto__", "", "a_b"],
+      "every character outside A-Za-z0-9._- one _ (per code point)");
+    A.deepEqual(names.map(SPm.archiveDir), names.map((n) => (n && n !== "." && n !== ".." ? CFG.safeName(n) : null)), "spool.js archiveDir is safeName, '.' and '..' and empty refused");
+    // test-store.sh runs bin/lib's safe_name on the same names and compares.
+    fsm.writeFileSync(`${dir}/safe-names.json`, JSON.stringify(names.map((n) => [n, CFG.safeName(n)])));
+    // Timestamps through applySlim, kept and cut alike (the cut one is in its turns line as it was).
+    const P2 = "p2p2p2p2-7777-0000-0000-000000000001";
+    const ts = new Store({ v: 1, items: {}, branches: {}, terminals: {}, ingested: [], forgotten: {}, pins: {},
+      sessions: { [P2]: { sessionId: P2, agent: "claude-code", turn: 20, state: "idle", turnSource: "hooks", cwd: "/p2", nextHandle: { A: 3, Q: 1, P: 1 }, updatedAt: NOW - 5 * DAY, stopAt: NOW - 5 * DAY } },
+      turns: { [P2]: Object.fromEntries(Array.from({ length: 15 }, (_, i) => [i + 1, { stopAt: NOW - (20 - i) * 1000, textPath: CFG.turnPath(P2, i + 1), textHead: `h${i + 1}`,
+        promptId: null, uuid: null, asks: { source: "model", error: null, count: 0, at: NOW - (20 - i) * 1000 + 5, model: null, provider: null },
+        retry: { at: NOW - (20 - i) * 1000 + 9, state: "done", note: null } }])) } });
+    for (const [id, status, age] of [["rq_p2a", "resolved", 10], ["rq_p2b", "open", 10]]) {
+      ts.d.items[id] = { id, key: id, handle: id === "rq_p2a" ? "A1" : "A2", direction: "agent_to_human", text: id, kind: "do", level: "needed",
+        anchor: { sessionId: P2, turn: 1, hash: id }, status, createdAt: NOW - 30 * DAY, updatedAt: NOW - age * DAY, ...(status === "resolved" ? { resolvedAt: NOW - age * DAY } : {}) };
+    }
+    const sessBefore = JSON.stringify(ts.d.sessions[P2]), openBefore = JSON.stringify(ts.d.items.rq_p2b);
+    const plan9 = ts.planSlim(12);
+    A.ok(plan9.cut.every((c) => typeof c.rec.stopAt === "number" && c.rec.asks.at && c.rec.retry.at), "a cut record carries its timestamps to its turns line");
+    ts.applySlim(plan9);
+    const kept = Object.entries(ts.d.turns[P2]);
+    A.equal(kept.length, 12);
+    A.ok(kept.every(([n, r]) => r.stopAt === NOW - (20 - (n - 1)) * 1000), "applySlim keeps every record's stopAt");
+    A.ok(kept.every(([n, r]) => r.asks.at === NOW - (20 - (n - 1)) * 1000 + 5 && r.retry.at === NOW - (20 - (n - 1)) * 1000 + 9), "...and asks.at, retry.at");
+    A.ok(kept.every(([, r]) => !("updatedAt" in r)), "...and adds no updatedAt to a record");
+    const removed9 = ts.removeItems(ts.archivable(3, NOW));
+    A.deepEqual(removed9.map((x) => x.id), ["rq_p2a"]);
+    const sAfter = JSON.parse(JSON.stringify(ts.d.sessions[P2]));
+    A.equal(sAfter.archived, 1); delete sAfter.archived;
+    A.equal(JSON.stringify(sAfter), sessBefore, "removeItems and applySlim change the session only by its archived count (no updatedAt, no stopAt)");
+    A.equal(JSON.stringify(ts.d.items.rq_p2b), openBefore, "...and leave an item they do not take as it was");
+    const back9 = ts.restoreItem(removed9[0]);
+    A.equal(back9.updatedAt, NOW - 10 * DAY, "restoreItem keeps the record's updatedAt");
+    const sBack = JSON.parse(JSON.stringify(ts.d.sessions[P2]));
+    A.equal("archived" in sBack, false);
+    A.equal(JSON.stringify(sBack), sessBefore, "...and changes the session only by its count");
+    // A config.json written before retention.turns existed: the mod's merge fills it in.
+    globalThis.__herdr = { files: { [CFG.configPath()]: JSON.stringify({ v: 1, retention_days: 14, extract: { threshold: "blocking" } }) } };
+    const merged = await CFG.loadConfig();
+    A.equal(merged._source, "file"); A.equal(merged.retention_days, 14, "the file's retention_days wins over the default");
+    A.deepEqual(merged.retention, { turns: 12 }, "retention.turns filled in from the defaults");
+    globalThis.__herdr = { files: { [CFG.configPath()]: JSON.stringify({ retention: { coldDays: 7 } }) } };
+    A.deepEqual((await CFG.loadConfig()).retention, { turns: 12, coldDays: 7 }, "a partial retention keeps turns");
+    globalThis.__herdr = { files: { [CFG.configPath()]: JSON.stringify({ retention: null }) } };
+    A.deepEqual((await CFG.loadConfig()).retention, { turns: 12 }, "a null retention: the defaults");
+    globalThis.__herdr = {};
+  }
+}
+const retChecks = checks - phase1 - phase2 - phase3 - sev - prof - toolChecks - settleChecks - spaceChecks - pinChecks;
+
+console.log(`OK: store, ${checks} checks (${phase1} phase 1, ${phase2} phase 2, ${phase3} phase 3, ${sev} severity and resume, ${prof} profiles, handoff and paste words, ${toolChecks} tool asks, ${settleChecks} blocking while working, closed by the agent, answered then settled, ${spaceChecks} spaces off and Clear all, ${pinChecks} pins, ${retChecks} retention${retSizes}), 0 failure(s)`);

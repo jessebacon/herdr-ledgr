@@ -53,7 +53,12 @@ DEFAULT_CONFIG = {
                                       # with: open (the default app; a script opens as text, never run),
                                       # zed, code (at its line), or a command of your own with {path},
                                       # {line}, {col}, never a shell or a terminal (links.js openerArgv)
-    "retention_days": 14,
+    "retention_days": 3,              # the mod's (writer.js housekeeping): closed items stay in the list
+                                      # this many days, then move to ledgr-data/archive/<sid>/ (still read
+                                      # and reopened from the panel's Closed fold); a dismissed one never
+                                      # before 7 days. The settings dialog writes it (1 to 30). Was 14
+    "retention": {"turns": 12},       # the mod's: turn records store.json keeps per session, the newest;
+                                      # older ones go to an archive file (config.js, store.js planSlim)
 }
 
 

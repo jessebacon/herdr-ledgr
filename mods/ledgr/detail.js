@@ -34,11 +34,21 @@
 // path (links.js linkify) opens with links.editor, found from the record's folder, then its repository's
 // top (openLink); Reveal in Finder and Copy path follow on the status line. Only on a click: opener.js is
 // the one place a process starts, and this file reaches it through openPath, revealPath and gitToplevel.
+// Archived records (retention, 2026-11-19): props.archived names the archive file of a row the panel listed
+// under CLOSED; the record is not in store.json, so this copy reads it itself (Reader loadArchive: the
+// session's archive, by the same reading rule as the panel, which also gives the lane ⌘↓ / ⌘↑ step
+// through). Why props and not a shared request: a dialog is opened per record with its props (openOverlay),
+// read once at its start and owned by this copy alone, where a shared key would be every copy's and racy
+// between two opens. Shown whole, its text selectable and its links working, marked ARCHIVED with when and
+// how it was closed, and read-only: no answer box, no Done, no Defer, no note; one action, Reopen, which posts
+// a `restore` event ({session_id, item, file, reopen: true}) through Reader post and says "reopening…" until
+// the id is back in store.json (then the live item shows as usual), or that the archive file could not be read.
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, TextareaState, ScrollHandle } from "gpui-base";
 import { theme, props, shared, setShared, closeOverlay, openOverlay, run, panes, readTextFile, home } from "herdr";
 import { randomUUID } from "crypto";
-import { Reader } from "./reader.js";
+import { Reader, ARCHIVE_RETRY_MS } from "./reader.js";
+import { ARCHIVE_ITEMS, ARCHIVE_LEGACY, archiveDir } from "./spool.js";
 import { FORCE_DEMO, LIMITS, agentLabel, dataDir, turnPath, textScaleOf, withScale } from "./config.js";
 import { Store, isAgentAsk, isHuman, isClosed, isSuggestion, levelOf, thresholdOf } from "./store.js";
 import { goToAnchor, stageText, promptText, busy, btwText, isLive } from "./nav.js";
@@ -48,10 +58,11 @@ import { confluenceMessage, conclusionRequest, extractConclusion, leadIn, pinsMe
   pinsChars, pinsOverCap } from "./confluence.js";
 import { itemWords as H, paneWords as P, trunkWords, originWords, branchWords, sessionWords, resolvedByWords, dismissedByWords, stageLabels,
   handleWords, pinsWords, pinSourceWords, pinAnchorWords, pinNameWords, pinLabel, pinUseLines, DETAIL_GONE, messageGone, PIN_MESSAGE_GONE,
-  copiedWords, detailHints, pasteCutWords, BRANCH_NO_TURN, LINK_WORDS } from "./words.js";
-import { rowModel, stateOf, laneOf, neighbors } from "./listing.js";
+  copiedWords, detailHints, pasteCutWords, BRANCH_NO_TURN, LINK_WORDS, ARCHIVE_READING, archivedWords, archiveFileWords, reopeningWords, reopenedWords,
+  restoreFailedWords, archiveGoneWords, ARCHIVED_READONLY, reopenSlowWords, archiveFailedWords } from "./words.js";
+import { rowModel, stateOf, laneOf, neighbors, archivedCount } from "./listing.js";
 import { detailProps, kindOf, closesAfterStage, focusAfter, mergeClosed, keptConclude, keepConclude, KEEP_KEY, twoColumns, leftWidth,
-  ACTION_STATES, strayBreak } from "./detailing.js";
+  ACTION_STATES, strayBreak, RESTORE_WAIT_MS } from "./detailing.js";
 import { ICON, btn, pill, badge, glyph, tone, chip, menuButton, readable, section, messageBlocks, optionChips, answerBox, confirmBox,
   branchBody, branchActions, pinNoteBox, subRow, keyHints, rowCtx } from "./views.js";
 import { parseLink, resolvePath, isRelative, shownPath, editorOf, openerArgv } from "./links.js";
@@ -71,14 +82,19 @@ const STRAY_MS = 300;
 export class Detail extends Reader {
   constructor(view, cx) {
     const raw = props() ?? {};
-    const p = detailProps(raw, LIMITS.pinsPerQuestion);
+    // An archived row's file: one of the two names the writer reads a restore event's record from (spool.js).
+    const p = detailProps(raw, LIMITS.pinsPerQuestion, (f) => ARCHIVE_ITEMS.test(f) || ARCHIVE_LEGACY.test(f));
     super(cx, { demo: FORCE_DEMO || (p.ok && p.demo) });
     this.view = view;
     this.p = p;
     this.overlay = p.ok ? p.overlay : typeof raw.overlay === "string" ? raw.overlay : null;
     // What is shown: the props' target, then whatever a sub-row retargets to. `session`: the session the
-    // panel showed (pin words, where a pin's question parks, the panel's own lookups).
-    this.target = p.ok ? { kind: p.kind, id: p.id, session: p.session } : null;
+    // panel showed (pin words, where a pin's question parks, the panel's own lookups). `archived`: the archive
+    // file of an archived record (read from there, read-only), else null.
+    this.target = p.ok ? { kind: p.kind, id: p.id, session: p.session, archived: p.archived ?? null } : null;
+    this.arch = null;              // the target session's archive as read: {sid, list, count, loading, error?} (readArchive)
+    this.archLooked = null;        // the id of a live record looked for in the archive after it left the store (lookInArchive)
+    this.reopening = null;         // Reopen on an archived record, waiting for the writer: {id, file, at, evId}
     this.keys = cx.focus_handle();
     this.ddFocus = cx.focus_handle();
     this.dd = null;                // the open dropdown's key (views.js menuButton)
@@ -114,7 +130,11 @@ export class Detail extends Reader {
     this.preparedFor = null;       // the record prepare() last made fields for (null: not found yet)
     if (this.demo) this.buildDemo();
     if (!p.ok) return;
-    if (this.demo) this.prepare(cx);   // the demo store is here at once (herdr-app check renders it)
+    if (this.demo) {
+      // The demo store and its archive are here at once (herdr-app check renders them).
+      if (this.target.archived) this.arch = { sid: this.target.session, list: this.demoArchiveOf(this.target.session), count: 0, loading: false };
+      this.prepare(cx);
+    }
     cx.spawn(async (cx) => this.start(cx));
     cx.timer.every(60000, (cx) => this.tickRead(cx));
   }
@@ -123,6 +143,7 @@ export class Detail extends Reader {
   async start(cx) {
     await this.startReading(cx);
     this.loaded = this.loaded || Boolean(this.inApp);
+    if (this.inApp && !this.demo && this.target.archived) await this.readArchive(this.target.session, cx);
     if (this.inApp) this.writeOpen();
     if (!this.demo) this.prepare(cx);
     this.applyOpen(cx);
@@ -146,24 +167,80 @@ export class Detail extends Reader {
   }
 
   // The record shown: {kind, x} (x the item, pin or branch; the record decides the kind), or null
-  // when it is gone.
+  // when it is gone. An item the store does not hold is looked for in the archive as read (readArchive):
+  // then {kind, x, archived: true}, x the archived record (with its archiveFile). The store wins: an id
+  // that is back (Reopen) shows live.
   resolve(st) {
     const tg = this.target;
     if (!tg) return null;
     if (tg.id.startsWith("pn_")) { const p = st.pin(tg.id); return p ? { kind: "pin", x: p } : null; }
     if (tg.id.startsWith("br_")) { const b = st.d.branches[tg.id]; return b ? { kind: "branch", x: b } : null; }
     const it = st.item(tg.id), kind = it ? kindOf(tg.id, it) : null;
-    return kind ? { kind, x: it } : null;
+    if (kind) return { kind, x: it };
+    const rec = it ? null : this.archRecord(tg.id);
+    const ak = rec ? kindOf(tg.id, rec) : null;
+    return ak ? { kind: ak, x: rec, archived: true } : null;
   }
 
+  // An archived record of the archive as read, by id (null: none read, or not in it).
+  archRecord(id) { return (this.arch?.list ?? []).find((r) => r.id === id) ?? null; }
+
+  // A session's archive (Reader readArchiveWithin: loadArchive, the panel's reading rule, at most
+  // ARCHIVE_READ_MS), kept in this.arch: {sid, list, count (session.archived when read), loading, error?,
+  // retryAt?}. The rows read before stay meanwhile (the lane does not jump). A read that failed or got no
+  // answer keeps them, says why (error) and is read again after ARCHIVE_RETRY_MS (render).
+  async readArchive(sid, cx) {
+    if (!sid) { this.arch = { sid: null, list: [], count: 0, loading: false }; return; }
+    const count = archivedCount(this.viewStore().d.sessions[sid]?.archived);
+    const job = { sid, list: this.arch?.sid === sid ? this.arch.list : null, count, loading: true };
+    this.arch = job;
+    let list = null, error = null;
+    try { list = await this.readArchiveWithin(sid, cx); } catch (e) { error = String(e?.message ?? e); }
+    if (this.arch !== job) return;
+    if (error) {
+      job.error = error; job.retryAt = Date.now() + ARCHIVE_RETRY_MS; job.list = job.list ?? [];
+      try { cx?.timer?.after?.(ARCHIVE_RETRY_MS + 50, (cx) => { if (!this.released) cx.notify(); }); } catch { /* the next render retries */ }
+    } else job.list = list;
+    job.loading = false;
+  }
+
+  // A session's archive when it is not read yet (a retarget to an archived record; a live item whose earlier
+  // ask is archived; the record shown archived while the dialog was open): the demo's at once, a live one in
+  // a task; then, with `again` (the record shown is the archived one), the record prepared once it is read,
+  // else only redrawn (a live ask's answer box stays).
+  archiveFor(sid, cx, again = false) {
+    if (this.demo) { this.arch = { sid, list: this.demoArchiveOf(sid), count: 0, loading: false }; return; }
+    cx.spawn(async (cx) => { await this.readArchive(sid, cx); if (this.released) return; if (again) this.prepare(cx); cx.notify(); });
+  }
+
+  // The live item shown left the store while the dialog was open (housekeeping archived it): the session's
+  // archive is read once for it, so the record shows archived, read-only, with Reopen, instead of "gone".
+  // From render: through a timer. Only for a record this dialog prepared as a live item.
+  lookInArchive(st, cx) {
+    const tg = this.target;
+    if (!tg || this.demo || !this.loaded || this.released || tg.archived || this.archLooked === tg.id) return;
+    if (tg.id.startsWith("pn_") || tg.id.startsWith("br_") || st.item(tg.id) || this.preparedFor !== tg.id) return;
+    this.archLooked = tg.id;
+    const sid = tg.session;
+    cx.timer.after(0, (cx) => this.archiveFor(sid, cx, true));
+  }
+
+  // What prepare() last made the fields for: the record's id, an archived one's marked apart, so a record
+  // that comes back to the store (Reopen) is prepared again as the live item.
+  prepKey(r) { return r ? `${r.archived ? "archived:" : ""}${r.x.id}` : null; }
+
   // The target's retained state (made here: the start task, a handler or a timer) and its message. false:
-  // the record is not in the store yet (render prepares it once a reload brings it).
+  // the record is not in the store yet (render prepares it once a reload brings it). An archived record is
+  // read-only: no answer box.
   prepare(cx) {
     const r = this.resolve(this.viewStore());
     if (!r) return false;
-    this.preparedFor = r.x.id;
+    this.preparedFor = this.prepKey(r);
     this.target.kind = r.kind;
-    if (r.kind === "ask") this.makeAnswer(r.x);
+    if (r.kind === "ask" && !r.archived) this.makeAnswer(r.x);
+    // The ask it repeats or is about, archived since: its sub-row comes from the archive (read once).
+    const st = this.viewStore(), rel = [r.x.repeatOf, r.x.parentId].filter(Boolean);
+    if ((r.kind === "ask" || r.kind === "question") && !this.arch && rel.some((id) => !st.item(id))) this.archiveFor(r.x.anchor?.sessionId ?? this.target.session, cx);
     if (r.kind === "ask" || r.kind === "question") this.loadPassage(r.x.anchor?.sessionId, r.x.anchor?.turn, cx);
     if (r.kind === "pin") this.loadPassage(r.x.sessionId, r.x.anchor?.turn, cx);
     return true;
@@ -256,6 +333,7 @@ export class Detail extends Reader {
     if (!o || !r) return;
     this.p.open = null;
     const x = r.x;
+    if (r.archived) { if (o === "whole") this.whole = true; return; }   // read-only: only the whole message
     if (o === "whole") this.whole = true;
     else if (o === "defer" || o === "more") this.dd = this.menuKey(r, o);
     else if (o === "confirm" && r.kind === "question") { const s = st.d.sessions[x.anchor?.sessionId]; if (s) this.openConfirm(x, s, cx); }
@@ -267,7 +345,7 @@ export class Detail extends Reader {
   // The action states: Go to anchor, Ask here, Ask for a conclusion, the confluence again, Close branch armed.
   runOpenAction(o, cx) {
     const st = this.viewStore(), r = this.resolve(st);
-    if (!r || this.released) return;
+    if (!r || this.released || r.archived) return;
     const x = r.x, s = r.kind === "pin" ? st.d.sessions[x.sessionId] ?? null : r.kind === "branch" ? st.d.sessions[x.parentSessionId] : st.d.sessions[x.anchor?.sessionId];
     if (o === "go" && r.kind === "pin") { if (s) this.goToPin(x, s, cx); }
     else if (o === "go" && s && r.kind !== "branch") this.goTo(x, s, cx);
@@ -356,6 +434,14 @@ export class Detail extends Reader {
     if (c === "detail-next" || c === "detail-prev") { if (this.holdsKeys(st, r)) this.step(c === "detail-next" ? 1 : -1, cx); return; }
     if (c === "detail:next" || c === "detail:prev") { this.step(c === "detail:next" ? 1 : -1, cx); return; }
     if (!r) return;
+    // An archived record is read-only: the whole message, and Reopen (detail:reopen, for scripts); anything
+    // that would change it says so (no answer, no Done); the panel's per-item commands are not for it.
+    if (r.archived) {
+      if (c === "detail:whole") this.whole = !this.whole;
+      else if (c === "detail:reopen") this.reopenArchived(r.x, cx);
+      else if (c === "detail:done" || c.startsWith("detail:pick:") || c.startsWith("detail:answer:")) this.flash = ARCHIVED_READONLY;
+      return;
+    }
     // ⌘Enter: the capture box's /btw, here the turn's answers, only while the dialog holds the keyboard
     // (a capture box opened on top of it has it then, and its ⌘Enter is its own).
     if (c === "btw") {
@@ -465,14 +551,16 @@ export class Detail extends Reader {
   // place (2.8). A pin note typed and not saved is saved first (saveNote); the rest of the per-item state
   // goes; the open record follows (the panel's cursor with it). The keyboard goes to the dialog itself,
   // never to a field: the answer box's own bindings (⌘↓ / ⌘↑ move its caret) run before the dialog's, so a
-  // second ⌘↓ from inside it would not step. Tab enters it.
-  retarget(kind, id, session, cx) {
+  // second ⌘↓ from inside it would not step. Tab enters it. archived: an archived record's file (a step
+  // through CLOSED's archived rows); its session's archive is read first when it is not read yet.
+  retarget(kind, id, session, cx, archived = null) {
     if (!id) return;
     const was = this.resolve(this.viewStore());
     if (was?.kind === "pin") this.saveNote(was.x, cx);
-    this.target = { kind, id, session: session ?? this.target?.session ?? null };
+    this.target = { kind, id, session: session ?? this.target?.session ?? null, archived: archived ?? null };
     this.answer = null; this.answerFor = null; this.typed = null; this.note = null; this.confirm = null; this.conclude = null; this.closeAsk = null;
-    this.pinDel = null; this.whole = false; this.dd = null; this.scrolledTo = null; this.fieldOn = null; this.linkHit = null;
+    this.pinDel = null; this.whole = false; this.dd = null; this.scrolledTo = null; this.fieldOn = null; this.linkHit = null; this.reopening = null;
+    if (archived && this.arch?.sid !== this.target.session) this.archiveFor(this.target.session, cx, true);
     this.prepare(cx);
     if (this.inApp) this.writeOpen();
     cx.timer.after(0, () => { try { this.keys.focus(); } catch { /* clicks still work */ } });
@@ -480,9 +568,11 @@ export class Detail extends Reader {
   }
 
   // The lane this record is drawn in, in the panel's order (listing.js laneOf), and where it stands there.
+  // An archived record's: the archived rows as read (the store's ids left out, as the panel lists them).
   laneSpot(st, r) {
     if (!r) return neighbors([], null);
-    return neighbors(laneOf(st, r.kind, r.x, { threshold: thresholdOf(this.cfg) }).ids, r.x.id);
+    const archive = r.archived ? (this.arch?.list ?? []).filter((x) => !st.item(x.id)) : null;
+    return neighbors(laneOf(st, r.kind, r.x, { threshold: thresholdOf(this.cfg), archive }).ids, r.x.id);
   }
 
   // Next (d 1) or previous (d -1), from ⌘↓ / ⌘↑ or the header: the neighbouring record of its lane,
@@ -495,10 +585,12 @@ export class Detail extends Reader {
     if (!r || this.closing || this.pastePending()) return false;
     const nb = this.laneSpot(st, r), id = d > 0 ? nb.next : nb.prev;
     if (!id) return false;
-    if (r.kind === "ask") this.sendDraft(r.x.id, cx);
-    const kind = id.startsWith("pn_") ? "pin" : id.startsWith("br_") ? "branch" : kindOf(id, st.item(id)) ?? r.kind;
+    if (r.kind === "ask" && !r.archived) this.sendDraft(r.x.id, cx);
+    // In CLOSED's archived rows the next one is an archived record too (its own file).
+    const rec = r.archived && !st.item(id) ? this.archRecord(id) : null;
+    const kind = id.startsWith("pn_") ? "pin" : id.startsWith("br_") ? "branch" : kindOf(id, st.item(id) ?? rec) ?? r.kind;
     this.flash = "";
-    this.retarget(kind, id, this.target.session, cx);
+    this.retarget(kind, id, this.target.session, cx, rec?.archiveFile ?? null);
     return true;
   }
 
@@ -539,6 +631,53 @@ export class Detail extends Reader {
     this.typeDraft(it.id, text, cx);
     if (this.answerFor === it.id) this.answer?.set_value(text);
     cx.notify();
+  }
+
+  // Reopen, the one action on an archived record (retention, 2026-11-19): one `restore` spool event,
+  // {session_id, item, file, reopen: true}, through Reader post (kept in `unwritten` until written, so
+  // release() writes it again if the dialog closes first). The writer reads the record from that archive file,
+  // puts it back under its own id and handle, and reopens it. Until store.json holds the id again the dialog
+  // says "reopening…"; then the live item shows as usual (render). When the writer took the event and the id
+  // did not come back (it could not read the file), or nothing came back within RESTORE_WAIT_MS, it says the
+  // archive file could not be read. The dialog stays open either way. The demo restores it in its own store.
+  reopenArchived(it, cx) {
+    const file = it?.archiveFile ?? null, sid = it?.anchor?.sessionId ?? this.target?.session ?? null;
+    if (!file || !sid || (this.reopening?.id === it.id && !this.reopening.slow)) return;
+    if (this.demo) {
+      const rec = { ...it };
+      delete rec.archiveFile;
+      this.demoStore.restoreItem(rec);
+      this.demoStore.act(it.id, "reopen", null);
+      this.bump();
+      this.flash = `(demo) ${reopenedWords(H(it))} Nothing is saved.`;
+      cx.notify();
+      return;
+    }
+    const job = { id: it.id, file, at: Date.now(), evId: null };
+    this.reopening = job;
+    this.flash = reopeningWords(H(it), file);
+    job.evId = this.post("restore", { session_id: sid, item: it.id, file, reopen: true }, null, cx, (ok) => { if (!ok && this.reopening === job) this.reopening = null; });
+    // The usual wait passed and the writer has not taken the event (it is slow, or not running): the job is
+    // kept, marked slow, so a late apply still says "reopened"; only the writer's taking the event without
+    // bringing the id back says the file could not be read (settleReopen). Reopen can be pressed again.
+    cx.timer.after(RESTORE_WAIT_MS, (cx) => {
+      if (this.reopening !== job || this.released || this.viewStore().item(it.id)) return;
+      job.slow = true;
+      this.flash = reopenSlowWords(H(it));
+      cx.notify();
+    });
+    cx.notify();
+  }
+
+  // Where a Reopen stands, at each render: the id is back in store.json (the live item shows from here on),
+  // however late; or the writer took the event and it is not back (the record could not be read from its
+  // file, or the store refused it: the writer's note says why).
+  settleReopen(st) {
+    const rj = this.reopening;
+    if (!rj) return;
+    const back = st.item(rj.id);
+    if (back) { this.reopening = null; this.flash = reopenedWords(H(back), back.handleWas ? handleWords(back.handleWas) : null); }
+    else if (rj.evId && (st.d.ingested ?? []).includes(rj.evId)) { this.reopening = null; this.flash = restoreFailedWords(H(this.archRecord(rj.id)), rj.file); }
   }
 
   // ── staging (3.1) ────────────────────────────────────────────────────
@@ -1031,17 +1170,21 @@ export class Detail extends Reader {
     if (!this.p.ok) return root.child(this.nothing(t, `Nothing to show (${this.p.error}).`));
     const st = this.viewStore();
     st.threshold = thresholdOf(this.cfg);
+    this.settleReopen(st);
+    this.lookInArchive(st, cx);
     const r = this.resolve(st);
-    if (!r) return root.child(this.header(t, st, null)).child(this.nothing(t, this.loaded ? DETAIL_GONE : "Reading the ledger…"));
+    this.archiveAgain(st, r, cx);
+    if (!r) return root.child(this.header(t, st, null)).child(this.nothing(t, this.goneWords()));
     if (r.kind === "branch") this.pumpBranch(st, r.x, cx);
     // A record that reached the store after the start task (a reload): its fields, its message and the
-    // props' open state, made in a timer (never in render); the keyboard as on open, the first time.
-    if (this.preparedFor !== r.x.id && !this.preparing) {
+    // props' open state, made in a timer (never in render); the keyboard as on open, the first time. An
+    // archived record that came back (Reopen) is prepared again as the live item.
+    if (this.preparedFor !== this.prepKey(r) && !this.preparing) {
       this.preparing = true;
       cx.timer.after(0, (cx) => {
         this.preparing = false;
         const now = this.resolve(this.viewStore());
-        if (this.released || !now || this.preparedFor === now.x.id) return;
+        if (this.released || !now || this.preparedFor === this.prepKey(now)) return;
         const first = !this.preparedFor;
         this.prepare(cx);
         this.applyOpen(cx);
@@ -1068,6 +1211,34 @@ export class Detail extends Reader {
         .when(two, (el) => el.child(v_flex().id("dt-msg").flex_1().min_w(0).min_h(0).h_full().overflow_y_scrollbar().track_scroll(this.msgScroll)
           .border_l(1).border_color(t.border).px(16).py(12).gap(6).children(msg.parts))))
       .child(this.footer(t, st, r, busy_));
+  }
+
+  // The archive as read, read again for a record shown from it (or looked for in it, lookInArchive): when the
+  // session's count moved (an item archived or reopened elsewhere), or ARCHIVE_RETRY_MS after a read that
+  // failed or got no answer. From render: through a timer; the next render prepares what it finds.
+  archiveAgain(st, r, cx) {
+    const a = this.arch, tg = this.target;
+    if (!a || a.loading || this.demo || !a.sid || this.released) return;
+    if (!(r?.archived || (!r && (tg?.archived || this.archLooked === tg?.id)))) return;
+    const moved = a.count !== archivedCount(st.d.sessions[a.sid]?.archived);
+    if (!moved && !(a.error && Date.now() >= (a.retryAt ?? 0))) return;
+    a.loading = true;
+    const sid = a.sid;
+    cx.timer.after(0, (cx) => cx.spawn(async (cx) => { await this.readArchive(sid, cx); if (!this.released) cx.notify(); }));
+  }
+
+  // Why no record shows: the ledger not read yet; an archived record (or one looked for in the archive after
+  // it left the store) whose archive is being read, could not be read, or holds no line for it; else it is gone.
+  goneWords() {
+    if (!this.loaded) return "Reading the ledger…";
+    const tg = this.target;
+    if (tg?.archived || (tg && this.archLooked === tg.id)) {
+      const a = this.arch;
+      if (!a || a.loading || a.sid !== tg.session) return ARCHIVE_READING;
+      if (a.error) return archiveFailedWords(a.error);
+      return tg.archived ? archiveGoneWords(tg.archived) : DETAIL_GONE;
+    }
+    return DETAIL_GONE;
   }
 
   // A bad shape or a record that is gone: one line and Close.
@@ -1163,6 +1334,16 @@ export class Detail extends Reader {
     const quote = it.anchor?.quote ? String(it.anchor.quote).trim() : "";
     const mode = ask ? "markdown" : "verbatim";
     const onLink = ask ? this.linkFn : null;   // an ask's text and quote are markdown: their links open (openLink)
+    // An archived record (retention, 2026-11-19): marked first, with when and how it was closed (its state word
+    // as it was in the list) and where it is kept; read-only below (closed: no answer box, no options to click).
+    const archived = Boolean(it.archiveFile);
+    if (archived) {
+      const how = stateOf(kind, { ...it, archiveFile: null }, ctx).word;
+      out.push(section(t, `dt-sec-arch-${it.id}`, "ARCHIVED", [
+        div().id(`dt-arch-when-${it.id}`).text_size(t.ts(12)).text_color(t.foreground).child(archivedWords(it, how)),
+        div().id(`dt-arch-file-${it.id}`).text_size(t.ts(11)).text_color(t.dim).child(archiveFileWords(archiveDir(it.anchor?.sessionId), it.archiveFile)),
+      ], { extra: badge(t, "archived", t.dim) }));
+    }
     if (it.text) out.push(section(t, `dt-sec-text-${it.id}`, "TEXT",
       readable(t, `dt-text-${it.id}`, it.text, { mode, size: 13, onLink }), { extra: this.copyChip(t, `dt-cp-text-${it.id}`, it.text, "The text") }));
     if (quote) out.push(section(t, `dt-sec-quote-${it.id}`, it.kind === "bookmark" ? "BOOKMARKED PASSAGE" : "QUOTE",
@@ -1172,7 +1353,8 @@ export class Detail extends Reader {
       if (about.length) out.push(section(t, `dt-sec-about-${it.id}`, "ABOUT", about));
     }
     if (ask && it.kind === "decide" && (it.options ?? []).length) out.push(section(t, `dt-sec-opts-${it.id}`, "OPTIONS", optionChips(this, t, it)));
-    if (ask && !closed && s) out.push(section(t, `dt-sec-ans-${it.id}`, "ANSWER", answerBox(this, t, st, s, it)));
+    // Never on an archived record, whatever status its line holds (it is read-only until Reopen).
+    if (ask && !closed && !archived && s) out.push(section(t, `dt-sec-ans-${it.id}`, "ANSWER", answerBox(this, t, st, s, it)));
     if (!ask) {
       const pins = st.pinsOf(it);
       if (pins.length) out.push(section(t, `dt-sec-pins-${it.id}`, `PINS (${pins.length})`,
@@ -1189,7 +1371,7 @@ export class Detail extends Reader {
       if (kids.length) out.push(section(t, `dt-sec-kids-${it.id}`, "QUESTIONS ABOUT IT",
         kids.map((c) => subRow(t, rowModel("question", c, ctx), (cx) => this.retarget("question", c.id, here, cx)))));
     }
-    const gone = s && this.terminalGone(st, s), rs = s?.resume;
+    const gone = !archived && s && this.terminalGone(st, s), rs = s?.resume;
     if (gone && rs?.state === "failed") out.push(div().text_size(t.ts(10.5)).text_color(t.blocked).child(`Resume did not start: ${rs.error ?? "unknown error"}`));
     if (gone && rs?.state === "launched" && rs.note) out.push(div().text_size(t.ts(10.5)).text_color(t.dim).child(`Resumed in ${P(rs.terminal)}: ${rs.note}`));
     out.push(div().id(`foot-${it.id}`).text_size(t.ts(10)).text_color(t.dim)
@@ -1210,9 +1392,10 @@ export class Detail extends Reader {
       if (it.origin === "btw" || it.btwStagedAt) bits.push("staged as /btw");
       out.push(line(bits.join(" · ")));
     }
-    const parent = it.parentId ? st.item(it.parentId) : null;
+    // The ask it is about; archived with it, from the archive as read (its sub-row opens it read-only).
+    const parent = it.parentId ? st.item(it.parentId) ?? this.archRecord(it.parentId) : null;
     if (parent) out.push(subRow(t, rowModel(kindOf(parent.id, parent) ?? "ask", parent, rowCtx(this, st, this.target.session)),
-      (cx) => this.retarget(kindOf(parent.id, parent) ?? "ask", parent.id, this.target.session, cx)));
+      (cx) => this.retarget(kindOf(parent.id, parent) ?? "ask", parent.id, this.target.session, cx, parent.archiveFile ?? null)));
     return out;
   }
 
@@ -1233,9 +1416,9 @@ export class Detail extends Reader {
     else if (it.status === "resolved") out.push(dim(`Done${it.resolvedTurn ? ` at turn ${it.resolvedTurn}` : ""}.`));
     if (it.status === "dismissed") out.push(dim(`${dismissedByWords(it.dismissedBy) ?? "Not needed"}${it.resolvedTurn ? ` at turn ${it.resolvedTurn}` : ""}; Reopen brings it back.`));
     if (isAgentAsk(it) && it.repeatOf) {
-      const prev = st.item(it.repeatOf);
+      const prev = st.item(it.repeatOf) ?? this.archRecord(it.repeatOf);   // the earlier ask may be archived
       out.push(dim(`Raised again: the agent asked this before${prev?.status === "dismissed" ? " and it was closed as not needed" : ""}.`));
-      if (prev) out.push(subRow(t, rowModel("ask", prev, ctx), (cx) => this.retarget("ask", prev.id, this.target.session, cx)));
+      if (prev) out.push(subRow(t, rowModel("ask", prev, ctx), (cx) => this.retarget("ask", prev.id, this.target.session, cx, prev.archiveFile ?? null)));
     }
     if (it.note) out.push(readable(t, `dt-note-${it.id}`, it.note, { mode: "verbatim", muted: true, size: 11.5 }));
     if (it.status === "deferred") out.push(dim(it.deferUntil === "next_session" ? "Deferred to the next session." : typeof it.deferUntil === "number" ? `Deferred until ${new Date(it.deferUntil).toLocaleString()}.` : "Deferred."));
@@ -1323,7 +1506,8 @@ export class Detail extends Reader {
   footer(t, st, r, busy_) {
     const s = r.kind === "pin" ? null : r.kind === "branch" ? st.d.sessions[r.x.parentSessionId] ?? null : st.d.sessions[r.x.anchor?.sessionId] ?? null;
     let acts = [];
-    if (r.kind === "ask" || r.kind === "question") acts = s ? this.itemActions(t, st, s, r.x) : [];
+    if (r.archived) acts = this.archivedActions(t, r.x);
+    else if (r.kind === "ask" || r.kind === "question") acts = s ? this.itemActions(t, st, s, r.x) : [];
     else if (r.kind === "pin") acts = this.pinActions(t, st, r.x);
     else {
       const br = r.x, live = this.branchLive(br), it = st.item(br.requestId);
@@ -1343,6 +1527,14 @@ export class Detail extends Reader {
       .child(h_flex().gap(10).items_center()
         .child(h_flex().id("dt-acts").flex_1().min_w(0).flex_wrap().gap(6).items_center().when(busy_, (el) => el.opacity(0.55)).children(acts))
         .child(keyHints(t, detailHints({ ...field, paste: this.pasteOn() }))));
+  }
+
+  // An archived record's one action (retention, 2026-11-19): Reopen, "Reopening…" while the writer brings it
+  // back (reopenArchived). Nothing else: no Done, Defer, Not needed, staging or Go to anchor.
+  archivedActions(t, it) {
+    const busy = this.reopening?.id === it.id && !this.reopening.slow;   // slow: Reopen can be pressed again
+    return [btn(t, `dt-restore-${it.id}`, busy ? "Reopening…" : "Reopen", (_e, cx) => this.reopenArchived(it, cx),
+      { primary: true, disabled: busy, tip: `Back to the list, open: the ledgr writer reads ${H(it)} from ${it.archiveFile} and puts it back under its own handle` })];
   }
 
   // An ask's or a question's buttons (the expanded row's, before the dialog): the primary step, Done,

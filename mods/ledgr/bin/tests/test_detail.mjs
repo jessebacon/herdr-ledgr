@@ -19,7 +19,18 @@
 //   links (2026-11-10): the message's paths linked and every markdown TextView taking the click, a question's
 //     verbatim text taking none; a web link to cx.open_url; a path found in the session's folder, then the
 //     repository's top (git's answer), opened with links.editor (open, zed) through a recording exec; a
-//     path found nowhere says where it looked; Reveal in Finder and Copy path; the demo runs nothing.
+//     path found nowhere says where it looked; Reveal in Finder and Copy path; the demo runs nothing;
+//   the archive (retention, 2026-11-19): props.archived; the demo's archived (3); Reader.loadArchive over real
+//     files in the scratch ledgr-data/archive/ (a missing folder, the newest file and the store winning, a
+//     legacy month file, the cache by count and listing); the panel's CLOSED line ("archived (N) · show",
+//     hidden at 0, a legacy file's rows, reading, nothing read), its rows (no quick action, the cursor and
+//     Enter, open:<handle>) and the demo's; the dialog on an archived record (read-only, marked, its lane,
+//     its links) and Reopen: the demo's own store, a live one posting exactly the contract's restore event,
+//     "reopening…", back as the live item, or "could not be read" (the writer took it); the review's (2026-11-19):
+//     a slow writer ("not taken yet", then "reopened" when it comes late), an item archived while its dialog is
+//     open (read from the archive once, shown archived), an archived line that says open (no answer box), a
+//     read that never answers (bounded, said, read again), a herdr: session's folder (safeName), the panel's
+//     own store-wins filter before any re-read, each items file read once.
 // reader.js and listing.js are Builder A's: when one is not in the mod yet, a stub with the contract of
 // Detail.md 5.2 stands in, and the summary line says so.
 //   node tests/test_detail.mjs
@@ -332,6 +343,23 @@ try {
   A.deepEqual(spec.props, { view: "detail", session: "s1", kind: "pin", id: pn(1), open: "note", sel: [pn(1)], opener: "p", demo: true });
   A.equal(D.detailSpec({ kind: "ask", id: "rq_1" }).props.demo, false); A.deepEqual(D.detailSpec({ kind: "ask", id: "rq_1" }).props.sel, []);
   A.equal(D.detailProps({ ...D.detailSpec({ session: "s", kind: "ask", id: "rq_1" }).props, overlay: "ov" }).ok, true, "a spec's props pass detailProps");
+  // An archived row's dialog (retention, 2026-11-19): props.archived names its archive file, never a path.
+  { const AF = "items-1794700000000-q7w2e9.jsonl", SPd = await import(`${dir}/spool.js`);
+    const SHAPE = (f) => SPd.ARCHIVE_ITEMS.test(f) || SPd.ARCHIVE_LEGACY.test(f);   // what detail.js passes: the writer's shapes
+    A.equal(D.detailProps({ view: "detail", kind: "ask", id: "rq_1" }).archived, null, "no archived: null");
+    A.equal(D.detailProps({ view: "detail", kind: "ask", id: "rq_1", archived: AF }, 12, SHAPE).archived, AF, "an items file");
+    A.equal(D.detailProps({ view: "detail", kind: "question", id: "rq_1", archived: "2026-10.jsonl" }, 12, SHAPE).archived, "2026-10.jsonl", "a legacy month file");
+    for (const bad of ["../store.json", "a/items-1-aaaaaa.jsonl", "items-1-ABCDEF.jsonl", "turns-1794700000000-q7w2e9.jsonl", "2026-1.jsonl", "", 7, null])
+      A.equal(D.detailProps({ view: "detail", kind: "ask", id: "rq_1", archived: bad }, 12, SHAPE).archived, null, `not an archive file name: ${JSON.stringify(bad)}`);
+    A.equal(D.detailProps({ view: "detail", kind: "ask", id: "rq_1", archived: AF }).archived, AF, "no check given: a plain .jsonl name");
+    for (const bad of ["../store.json", "a/b.jsonl", ".hidden.jsonl", "store.json", "x".repeat(130) + ".jsonl"])
+      A.equal(D.detailProps({ view: "detail", kind: "ask", id: "rq_1", archived: bad }).archived, null, `no check given, still never a path or another file: ${bad.slice(0, 30)}`);
+    A.match(fs.readFileSync(path.join(MOD, "detail.js"), "utf8"), /detailProps\(raw, LIMITS\.pinsPerQuestion, \(f\) => ARCHIVE_ITEMS\.test\(f\) \|\| ARCHIVE_LEGACY\.test\(f\)\)/, "detail.js checks the file against the writer's shapes (spool.js)");
+    A.equal(D.detailProps({ view: "detail", kind: "pin", id: pn(1), archived: AF }).archived, null, "only asks and questions are archived");
+    const as = D.detailSpec({ session: "s1", kind: "ask", id: "rq_1", archived: AF });
+    A.equal(as.props.archived, AF, "detailSpec carries the file"); A.equal(D.detailProps({ ...as.props, overlay: "ov" }).archived, AF, "...and detailProps reads it back");
+    A.equal("archived" in D.detailSpec({ kind: "ask", id: "rq_1", archived: null }).props, false, "no file: no archived key (the props as before)");
+    A.equal(D.RESTORE_WAIT_MS, 15000, "the usual wait: as long as Clear N's"); }
   A.deepEqual(D.DETAIL, { width: 0.6, height: 0.75, twoColumnsAt: 760, leftShare: 0.46, minWidth: 420 });
   A.equal(D.kindOf(pn(1), null), "pin"); A.equal(D.kindOf("br_demo_q3_7c1e", null), "branch");
   A.equal(D.kindOf("rq_1", { direction: "agent_to_human" }), "ask"); A.equal(D.kindOf("rq_1", { direction: "human_to_agent" }), "question");
@@ -453,6 +481,20 @@ try {
   A.equal(lost.length, 1, "one pin of a forgotten session"); A.ok(lost[0].source?.sessionName, "it keeps its session's name");
   A.ok(demo.searchPins("retries capped", { here: SID }).groups.some((g) => g.sessionId === lost[0].sessionId), "search finds it");
   A.deepEqual(demo.pinsIn(SID, { archived: true }).map((p) => p.handle), ["P3"], "archived (1)");
+  // The archive (retention, 2026-11-19): the demo session counts three, and demoArchive holds them as files.
+  A.equal(demo.d.sessions[SID].archived, 3, "the demo session: archived (3)"); A.equal(demo.d.sessions[SID].nextHandle.A, 18, "A16 and A17 were given before");
+  const LSm = await import(`${dir}/listing.js`);
+  { const da = FX.demoArchive();
+    A.deepEqual(da.sessions[SID].map((f) => f.name), FX.DEMO_ARCHIVE_FILES, "two items files, fixed names"); A.deepEqual(da.legacy, []);
+    const SPm = await import(`${dir}/spool.js`);
+    const recs = LSm.archiveRecords([...da.sessions[SID], ...da.legacy], { sessionId: SID, has: (id) => Boolean(demo.item(id)), items: SPm.ARCHIVE_ITEMS, legacy: SPm.ARCHIVE_LEGACY });
+    A.ok(FX.DEMO_ARCHIVE_FILES.every((n) => SPm.ARCHIVE_ITEMS.test(n)), "the writer would take the demo's file names");
+    A.ok(recs.every((r) => /^rq_[A-Za-z0-9_-]{1,80}$/.test(r.id)), "rq_ ids (what restoreItem takes)");
+    A.deepEqual(recs.map((r) => r.handle), ["Q1", "A17", "A16"], "Question 1, Ask 17, Ask 16: newest closed first");
+    const r17 = recs.find((r) => r.handle === "A17");
+    A.equal(r17.status, "resolved", "Ask 17: the newer file's line wins"); A.equal(r17.resolvedBy, "agent"); A.equal(r17.archiveFile, FX.DEMO_ARCHIVE_FILES[1]);
+    A.ok(recs.every((r) => !demo.item(r.id)), "none of them is in the demo store");
+    A.ok(FX.FIXTURE_TURNS[`${SID}:6`].includes(recs.find((r) => r.handle === "A16").anchor.quote), "Ask 16: its passage in turn 6"); }
 
   // ── main.js, as text ───────────────────────────────────────────────────
   const main = fs.readFileSync(path.join(MOD, "main.js"), "utf8");
@@ -495,7 +537,8 @@ try {
     globalThis.localStorage = (() => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; })();
   };
   const open = async (id, o = {}) => {
-    H().props = { view: "detail", session: SID, kind: o.kind ?? kindFor(id), id, demo: o.demo ?? true, overlay: o.overlay ?? "ov-1", opener: "panel-1", open: o.open ?? null };
+    H().props = { view: "detail", session: SID, kind: o.kind ?? kindFor(id), id, demo: o.demo ?? true, overlay: o.overlay ?? "ov-1", opener: "panel-1", open: o.open ?? null,
+      ...(o.archived ? { archived: o.archived } : {}) };
     const cx = mkcx(), d = new Detail({}, cx);
     if (o.width) d.width = o.width;
     await drain(cx, o.upTo ?? 1000);
@@ -1032,13 +1075,357 @@ try {
     A.equal(d.flash, W.LINK_WORDS.noFolder("src/app.js")); await drain(cx); A.deepEqual(H().execs ?? [], []); }
   fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText);
 
+  // ── the archive (retention, 2026-11-19) ────────────────────────────────
+  // Reader.loadArchive over real files (the scratch ledgr-data/archive/), the panel's CLOSED line and its rows
+  // (the cursor, Enter), and the dialog on an archived record: read-only, Reopen posting the contract's event,
+  // "reopening…", back as the live item, or "could not be read".
+  const ARCH = path.join(APP, "ledgr-data/archive"), ASID = path.join(ARCH, SID), DA = FX.demoArchive();
+  const [F0, F1] = FX.DEMO_ARCHIVE_FILES, LEG = "2026-10.jsonl";
+  const A16 = "rq_demo_a16", A17 = "rq_demo_a17", Q1 = "rq_demo_q1";
+  const legacyRec = { ...JSON.parse(DA.sessions[SID][0].text.split("\n")[0]), id: "rq_demo_old", handle: "A0", text: "Archived by the old month file",
+    resolvedAt: Date.now() - 40 * DAY, updatedAt: Date.now() - 40 * DAY };
+  const writeArch = ({ legacy = false, items = true } = {}) => {
+    fs.rmSync(ARCH, { recursive: true, force: true });
+    fs.mkdirSync(ASID, { recursive: true });
+    if (items) for (const f of DA.sessions[SID]) fs.writeFileSync(path.join(ASID, f.name), f.text);
+    if (legacy) fs.writeFileSync(path.join(ARCH, LEG), [JSON.stringify(legacyRec), JSON.stringify({ ...legacyRec, id: "rq_other", anchor: { ...legacyRec.anchor, sessionId: "someone-else" } }),
+      "{ broken", JSON.stringify({ ...by("A15"), status: "resolved" })].join("\n") + "\n");
+  };
+  const RD = await import(`${dir}/reader.js`), { Reader } = RD;
+  const storeWith = (f) => { const d = JSON.parse(storeText); f(d); fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), JSON.stringify(d)); };
+  const handlesOf = (list) => list.map((r) => r.handle);
+  // Real file reads may outlast drain's short waits on a busy machine: drain until cond() holds (10 s at most).
+  const until = async (cx, cond, ms = 10000) => { const end = Date.now() + ms; await drain(cx); while (!cond() && Date.now() < end) { await new Promise((r) => setTimeout(r, 10)); await drain(cx); } A.ok(cond(), "settled in time"); };
+  // A live dialog on an archived record, its store and archive read.
+  const openA = async (id, o) => { const r = await open(id, o); await until(r.cx, () => r.d.loaded && Boolean(r.d.arch) && !r.d.arch.loading); return r; };
+
+  // Reader.loadArchive: a missing folder; the session's files and a legacy file; the cache; the store wins.
+  reset({ files: { [`${APP}/AGENTS.md`]: "x" } });
+  fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText);
+  { const cx = mkcx(), rd = new Reader(cx, {}); await rd.reload();
+    fs.rmSync(ARCH, { recursive: true, force: true });
+    A.deepEqual([...(await rd.loadArchive(SID))], [], "no archive folder: an empty archive, not an error");
+    A.deepEqual([...(await rd.loadArchive(null))], [], "no session: nothing");
+    writeArch({ legacy: true });
+    rd.live.d.sessions[SID].archived = 3;
+    let got = await rd.loadArchive(SID);
+    A.deepEqual(handlesOf(got), ["Q1", "A17", "A16", "A0"], "the session's items files and the legacy file's line for it, newest closed first");
+    A.equal(got.find((r) => r.id === A17).archiveFile, F1, "Ask 17: the newer file's line"); A.equal(got.find((r) => r.id === "rq_demo_old").archiveFile, LEG);
+    A.ok(!got.some((r) => r.id === by("A15").id), "a legacy line of an id the store holds: the store wins"); A.ok(!got.some((r) => r.id === "rq_other"), "another session's legacy line: left out");
+    A.equal(got.skipped, 1, "the broken line skipped");
+    // Cached: an items file is written once, so it is read and parsed once per copy, by name (review,
+    // 2026-11-19: the hourly and daily runs add files and never rewrite one); a new count or listing works the
+    // rows out again, reading only the names not seen before.
+    fs.writeFileSync(path.join(ASID, F1), DA.sessions[SID][1].text.replace("closed by the agent at turn 9", "CHANGED"));
+    A.equal((await rd.loadArchive(SID)).find((r) => r.id === A17).resolvedNote, "closed by the agent at turn 9", "same count, same listing: the cached read");
+    rd.live.d.sessions[SID].archived = 4;
+    A.equal((await rd.loadArchive(SID)).find((r) => r.id === A17).resolvedNote, "closed by the agent at turn 9", "the store's count moved: worked out again, the file already read not read again");
+    A.ok(rd.archiveFiles.has(`${SID}/${F1}`) && rd.archiveFiles.has(`${SID}/${F0}`), "each items file kept parsed, by name");
+    fs.writeFileSync(path.join(ASID, "items-1794990000000-zzzzzz.jsonl"), JSON.stringify({ ...JSON.parse(DA.sessions[SID][1].text), resolvedNote: "newest file" }) + "\n");
+    A.equal((await rd.loadArchive(SID)).find((r) => r.id === A17).resolvedNote, "newest file", "a new file in the listing: read again, the newest file wins");
+    fs.writeFileSync(path.join(ARCH, LEG), "");
+    rd.live.d.sessions[SID].archived = 5;
+    A.ok((await rd.loadArchive(SID)).some((r) => r.id === "rq_demo_old"), "a legacy file is read once per copy (never written again)");
+    rd.live.d.items[A16] = { ...got.find((r) => r.id === A16), status: "open" }; delete rd.live.d.items[A16].archiveFile;
+    A.ok(!(await rd.loadArchive(SID)).some((r) => r.id === A16), "back in the store (reopened): the store wins");
+    A.equal(H().writes.length, 0, "reading the archive writes nothing"); A.equal(H().shared["ledgr.writer"], undefined, "...and claims nothing"); }
+  // A session id that is no UUID (a herdr:<terminal> session): its folder is the id made safe (config.js
+  // safeName, the writer's archiveDir), never the raw id (review, 2026-11-19).
+  { const HS = "herdr:t3/x", cx = mkcx(), rd = new Reader(cx, {}); await rd.reload();
+    fs.rmSync(ARCH, { recursive: true, force: true });
+    const line = JSON.stringify({ ...JSON.parse(DA.sessions[SID][0].text.split("\n")[0]), id: "rq_hs1", anchor: { sessionId: HS, turn: 1 } });
+    fs.mkdirSync(path.join(ARCH, "herdr_t3_x"), { recursive: true });
+    fs.writeFileSync(path.join(ARCH, "herdr_t3_x", "items-1794700000000-hhhhhh.jsonl"), line + "\n");
+    fs.mkdirSync(path.join(ARCH, "herdr:t3"), { recursive: true });
+    fs.writeFileSync(path.join(ARCH, "herdr:t3", "items-1794700000001-rawraw.jsonl"), JSON.stringify({ ...JSON.parse(line), id: "rq_raw" }) + "\n");
+    rd.live.d.sessions[HS] = { sessionId: HS, archived: 1 };
+    const got = await rd.loadArchive(HS);
+    A.deepEqual(got.map((r) => [r.id, r.archiveFile]), [["rq_hs1", "items-1794700000000-hhhhhh.jsonl"]], "herdr:t3/x reads archive/herdr_t3_x/, not a folder of the raw id");
+    fs.rmSync(ARCH, { recursive: true, force: true }); }
+  // A read that never answers: readArchiveWithin rejects on the copy's own timer (within), never hangs.
+  { const cx = mkcx(); cx.timer.after = (ms, f) => { cx.timers.push([ms, f]); return { cancel() {} }; };
+    const rd = new Reader(cx, {}); rd.loadArchive = () => new Promise(() => {});
+    let err = null; const pr = rd.readArchiveWithin(SID, cx).catch((e) => { err = e; });
+    A.ok(cx.timers.some(([ms]) => ms === RD.ARCHIVE_READ_MS), `a limit of ARCHIVE_READ_MS (${RD.ARCHIVE_READ_MS} ms) set`);
+    for (const [, f] of cx.timers.splice(0)) f(cx); await pr;
+    A.match(String(err?.message), /^reading the archive: no answer in /, "the read gave up, with words"); }
+  { const cx = mkcx(), rd = new Reader(cx, { demo: true }); rd.demoStore = new Store(FX.demoData());
+    fs.rmSync(ARCH, { recursive: true, force: true });
+    A.deepEqual(handlesOf(await rd.loadArchive(SID)), ["Q1", "A17", "A16"], "the demo: fixtures.js demoArchive, no file read"); }
+
+  // The panel: CLOSED ends with "archived (3) · show"; shown, the rows (cursor, keys, Enter) open the dialog read-only.
+  const { Panel } = await import(`${dir}/panel.js`);
+  const mkPanel = async () => { H().props = { view: "panel" }; const cx = mkcx(), pn = new Panel({}, cx); await until(cx, () => pn.liveText !== null); pn.held = SID; pn.folds.closed = true; return { pn, cx }; };
+  const lineText = () => texts(UI().ids.get("arch-items")).join("");
+  writeArch();
+  fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText);
+  reset({ files: { [`${APP}/AGENTS.md`]: "x" } });
+  { const { pn, cx } = await mkPanel();
+    A.equal(pn.inApp, true);
+    draw(pn, cx);
+    A.equal(lineText(), "archived (3) · show", "CLOSED's last line: the store's count (session.archived), hidden rows");
+    A.ok(pn.entries.some((e) => e.key === "arch:items"), "the line is an entry of the cursor");
+    A.equal(pn.archRows.size, 0, "not shown, count above 0: nothing read yet");
+    click("arch-items", cx);
+    draw(pn, cx);
+    A.equal(lineText(), "archived (3) · hide");
+    A.equal(texts(UI().ids.get("arch-note")).join(""), W.ARCHIVE_READING, "while it is read: Reading the archive…");
+    await until(cx, () => pn.archRows.get(SID)?.loading === false);
+    const { all } = draw(pn, cx);
+    for (const id of [A16, A17, Q1]) A.ok(UI().ids.has(`row-${id}`), `the archived row ${id}`);
+    A.ok(!UI().ids.has("arch-note"), "read: no note");
+    A.ok(all.includes("Ask 16") && all.includes("Question 1") && all.includes("archived"), "both kinds, by handle, state archived");
+    A.equal(texts(UI().ids.get(`row-${A17}`)).filter((x) => x === "archived").length, 1, "a row's state word: archived");
+    pn.hoverKey = `item:${A16}`; draw(pn, cx);
+    for (const id of [A16, A17, Q1]) for (const q of ["qdone", "qpaste", "promote"]) A.ok(!UI().ids.has(`${q}-${id}`), `no ${q} on archived ${id}`);
+    const keys = pn.entries.map((e) => e.key), at = keys.indexOf("arch:items");
+    A.deepEqual(keys.slice(at, at + 4), ["arch:items", `item:${Q1}`, `item:${A17}`, `item:${A16}`], "the line, then the rows newest first, each an entry");
+    pn.cursor = "arch:items"; pn.listKey("down", cx); A.equal(pn.cursor, `item:${Q1}`, "↓ from the line: the first archived row");
+    pn.listKey("down", cx); A.equal(pn.cursor, `item:${A17}`); pn.listKey("end", cx); A.equal(pn.cursor, keys.at(-1));
+    pn.listKey("up", cx); A.equal(pn.cursor, keys.at(-2), "↑");
+    pn.cursor = `item:${A17}`; pn.listKey("enter", cx);
+    const sp = H().overlays.at(-1)[1].props;
+    A.deepEqual({ view: sp.view, kind: sp.kind, id: sp.id, session: sp.session, archived: sp.archived }, { view: "detail", kind: "ask", id: A17, session: SID, archived: F1 },
+      "Enter on an archived row: its dialog, with its file");
+    A.equal(pn.cursor, `item:${A17}`);
+    draw(pn, cx); click(`row-${Q1}`, cx); A.equal(H().overlays.at(-1)[1].props.archived, F0, "a click on one: the same"); A.equal(H().overlays.at(-1)[1].props.kind, "question");
+    pn.command(`open:A16`, cx); A.equal(H().overlays.at(-1)[1].props.id, A16, "open:<handle> finds an archived row"); A.equal(H().overlays.at(-1)[1].props.archived, F0);
+    pn.cursor = "arch:items"; pn.listKey("enter", cx); draw(pn, cx);
+    A.equal(lineText(), "archived (3) · show", "Enter on the line hides the rows"); A.ok(!UI().ids.has(`row-${A16}`));
+    A.equal(pn.archShown.has(SID), false); pn.listKey("enter", cx); A.equal(pn.archShown.has(SID), true, "...and shows them again (per session)");
+    pn.folds.closed = false; pn.command("archived", cx); A.equal(pn.folds.closed, true, "ledgr.archived: CLOSED open"); A.equal(pn.archShown.has(SID), false, "...its rows toggled");
+    // Hidden, the store's count moves (more archived): the line says the count, not the rows read before.
+    pn.live.d.sessions[SID].archived = 7; draw(pn, cx); A.equal(lineText(), "archived (7) · show", "hidden: the new count, not the old rows'");
+    pn.live.d.sessions[SID].archived = 3;
+    pn.command("archived", cx); A.equal(pn.archShown.has(SID), true);
+    // The id back in the store before the count moved (a Reopen applied, the archive not read again yet): the
+    // panel's own filter drops the stale row at once (review, 2026-11-19).
+    { const was = pn.live.d.items[A16]; const before = pn.archRows.get(SID);
+      pn.live.d.items[A16] = { ...JSON.parse(DA.sessions[SID][0].text.split("\n")[0]), status: "open" };
+      draw(pn, cx); const ks0 = pn.entries.map((e) => e.key);
+      A.equal(pn.archRows.get(SID), before, "no read again (the count did not move)");
+      A.ok(!ks0.slice(ks0.indexOf("arch:items") + 1).includes(`item:${A16}`), "the stale archived row is gone at once");
+      A.equal(lineText(), "archived (2) · hide", "...and the line counts the rows left");
+      if (was) pn.live.d.items[A16] = was; else delete pn.live.d.items[A16]; draw(pn, cx); }
+    // Reopened (the id back in the store): the row leaves the archived ones; the count follows the store.
+    storeWith((d) => { d.items[A16] = { ...JSON.parse(DA.sessions[SID][0].text.split("\n")[0]), status: "open" }; d.sessions[SID].archived = 2; });
+    await pn.reload(); draw(pn, cx); await until(cx, () => pn.archRows.get(SID)?.loading === false && pn.archRows.get(SID)?.count === 2); draw(pn, cx);
+    A.equal(lineText(), "archived (2) · hide", "one reopened: archived (2)");
+    const ks = pn.entries.map((e) => e.key);
+    A.deepEqual(ks.slice(ks.indexOf("arch:items") + 1), [`item:${Q1}`, `item:${A17}`], "Ask 16 left the archived rows (the store wins)"); }
+  // Hidden at 0; shown at 0 when a legacy file holds the session's rows; the empty and failed states.
+  storeWith((d) => { d.sessions[SID].archived = 0; });
+  fs.rmSync(ARCH, { recursive: true, force: true });
+  reset({ files: { [`${APP}/AGENTS.md`]: "x" } });
+  { const { pn, cx } = await mkPanel(); draw(pn, cx); await until(cx, () => pn.archRows.get(SID)?.loading === false); draw(pn, cx);
+    A.equal(UI().ids.has("arch-items"), false, "archived 0 and nothing in the archive: no line"); A.equal(pn.archRows.get(SID)?.list?.length, 0, "...looked once (cheap: no folder)"); }
+  writeArch({ items: false, legacy: true });
+  reset({ files: { [`${APP}/AGENTS.md`]: "x" } });
+  { const { pn, cx } = await mkPanel(); draw(pn, cx); await until(cx, () => pn.archRows.get(SID)?.loading === false); draw(pn, cx);
+    A.equal(lineText(), "archived (1) · show", "count 0 but a legacy file holds one of its items: shown, counted from the rows"); }
+  storeWith((d) => { d.sessions[SID].archived = 2; });
+  fs.rmSync(ARCH, { recursive: true, force: true });
+  reset({ files: { [`${APP}/AGENTS.md`]: "x" } });
+  { const { pn, cx } = await mkPanel(); draw(pn, cx);
+    A.equal(lineText(), "archived (2) · show"); click("arch-items", cx); draw(pn, cx); await until(cx, () => pn.archRows.get(SID)?.loading === false); draw(pn, cx);
+    A.equal(texts(UI().ids.get("arch-note")).join(""), W.archiveEmptyWords(2), "shown, nothing could be read: it says so");
+    A.equal(lineText(), "archived (2) · hide", "...the line keeps the store's count"); }
+  // A read that never answers (a bounded read on a timer that fires): the line says it, and the next render
+  // after ARCHIVE_RETRY_MS reads again (review, 2026-11-19).
+  writeArch();
+  reset({ files: { [`${APP}/AGENTS.md`]: "x" } });
+  { const { pn, cx } = await mkPanel(); cx.timer.after = (ms, f) => { cx.timers.push([ms, f]); return { cancel() {} }; };
+    const real = pn.loadArchive.bind(pn); pn.loadArchive = () => new Promise(() => {});
+    draw(pn, cx); click("arch-items", cx); draw(pn, cx);
+    await drain(cx);   // the read's task, to its await; then only the read's own limit fires (not the panel's other timers)
+    const lim = cx.timers.filter(([ms]) => ms === RD.ARCHIVE_READ_MS); cx.timers = cx.timers.filter(([ms]) => ms !== RD.ARCHIVE_READ_MS);
+    A.equal(lim.length, 1, "one limit on the read"); for (const [, f] of lim) f(cx);
+    await new Promise((r) => setTimeout(r, 30));   // the rejection reaches the read's catch
+    await drain(cx); draw(pn, cx);
+    const job = pn.archRows.get(SID);
+    A.ok(job && !job.loading && /no answer in/.test(job.error ?? ""), "the read gave up after ARCHIVE_READ_MS");
+    A.match(texts(UI().ids.get("arch-note")).join(""), /^The archive could not be read: reading the archive: no answer in .*It is read again in a moment\.$/, "the line says so");
+    A.ok(cx.timers.some(([ms]) => ms === RD.ARCHIVE_RETRY_MS + 50), "a redraw is asked for after ARCHIVE_RETRY_MS");
+    draw(pn, cx); A.equal(pn.archRows.get(SID), job, "not again before ARCHIVE_RETRY_MS");
+    pn.loadArchive = real; job.retryAt = Date.now() - 1; draw(pn, cx);
+    await until(cx, () => pn.archRows.get(SID)?.loading === false && !pn.archRows.get(SID)?.error); draw(pn, cx);
+    for (const id of [A16, A17, Q1]) A.ok(UI().ids.has(`row-${id}`), `read again: ${id}`); }
+  // The demo: archived (3), its rows from fixtures.js, no file read.
+  fs.rmSync(ARCH, { recursive: true, force: true });
+  reset();
+  { H().props = { view: "panel", demo: true }; const cx = mkcx(), pn = new Panel({}, cx); await drain(cx); pn.folds.closed = true; const DS = FX.DEMO_SESSION;
+    draw(pn, cx); A.equal(lineText(), "archived (3) · show", "the demo: archived (3)");
+    click("arch-items", cx); draw(pn, cx); await until(cx, () => pn.archRows.get(DS)?.loading === false); draw(pn, cx);
+    for (const id of [A16, A17, Q1]) A.ok(UI().ids.has(`row-${id}`), `the demo's archived ${id}`);
+    pn.cursor = `item:${A16}`; pn.listKey("enter", cx);
+    A.equal(H().overlays.at(-1)[1].props.demo, true); A.equal(H().overlays.at(-1)[1].props.archived, F0, "the demo dialog on it"); }
+
+  // The dialog, demo: every archived case renders; read-only; the lane; Reopen restores it in its own store.
+  reset({ files: { [`${APP}/AGENTS.md`]: "x" } });
+  for (const [id, f, kind] of [[A16, F0, "ask"], [A17, F1, "ask"], [Q1, F0, "question"]]) {
+    for (const width of [900, 500]) {
+      const { d, cx } = await open(id, { kind, archived: f, width });
+      let r; A.doesNotThrow(() => { r = draw(d, cx); }, `archived ${id} renders at ${width} px`);
+      A.ok(r.all.includes("ARCHIVED") && UI().ids.has(`dt-sec-arch-${id}`), `${id}: marked ARCHIVED`);
+    }
+  }
+  { const { d, cx } = await open(A16, { kind: "ask", archived: F0 });
+    A.ok(d.resolve(d.viewStore())?.archived, "the record from the archive (not the store)");
+    const { all } = draw(d, cx);
+    A.ok(texts(UI().ids.get("dt-head")).includes("archived"), "the header's state word: archived");
+    A.match(texts(UI().ids.get(`dt-arch-when-${A16}`)).join(""), /^Closed 5 days ago \(.+\) · answered by you\.$/, "when it was closed (its date), and how");
+    A.ok(texts(UI().ids.get(`dt-arch-file-${A16}`)).join("").includes(F0), "where it is kept");
+    A.ok(all.includes("Choose where the nightly report reads from") && all.includes("→"), "the item whole: its text and its answer");
+    const tv = UI().ids.get(`dt-text-${A16}-box`)?._kids?.[0]; A.equal(tv?._selectable, true, "its text selectable");
+    A.ok(String(UI().md.get(`dt-msg-a-${A16}`) ?? UI().md.get(`dt-msg-h-${A16}`) ?? "").includes("ledgr.invalid"), "its message's file path linked (links working)");
+    A.ok(tv?._h?.on_link_click, "an ask's text takes link clicks");
+    A.ok(!UI().ids.has(`dt-answer-${A16}`) && d.answer === null, "no answer box");
+    for (const b of ["done", "reopen", "promote", "branch", "askhere"]) A.ok(!UI().ids.has(`dt-${b}-${A16}`), `no ${b}`);
+    A.ok(![...UI().ids.keys()].some((k) => k.startsWith("ddt-defer-") || k.startsWith("ddt-more-")), "no Defer ▾, no ⋯");
+    A.equal(UI().ids.get("dt-acts")._kids.length, 1, "one action"); A.ok(UI().ids.has(`dt-restore-${A16}`), "Reopen");
+    A.equal(UI().ids.get(`dt-opt-${A16}-0`)?._h?.on_click, undefined, "its options take no click");
+    d.command("detail:done", cx); A.equal(d.flash, W.ARCHIVED_READONLY, "detail:done: read-only");
+    d.command("detail:answer:no", cx); d.command("pick:A16:1", cx); A.equal(d.viewStore().item(A16), null, "nothing written into the store");
+    d.keys.is_focused = () => true; cx.clip = null; d.command("btw", cx); A.equal(cx.clip, null, "⌘Enter stages nothing");
+    d.command("detail:whole", cx); A.equal(d.whole, true, "the whole message, still");
+    // The lane: CLOSED's archived rows (Question 1, Ask 17, Ask 16), stepped in place.
+    draw(d, cx); A.equal(pos(), "3 of 3", "the archive lane");
+    A.equal(d.step(-1, cx), true); A.equal(d.target.id, A17); A.equal(d.target.archived, F1, "a step carries the next record's file"); A.equal(d.target.kind, "ask");
+    d.step(-1, cx); A.equal(d.target.id, Q1); A.equal(d.target.kind, "question"); draw(d, cx); A.equal(pos(), "1 of 3"); A.equal(d.step(-1, cx), false, "no wrap");
+    A.equal(H().shared["ledgr.detail"].open.id, Q1, "the open record follows (the panel's cursor with it)");
+    d.step(1, cx); d.step(1, cx); A.equal(d.target.id, A16);
+    // Reopen in the demo: its own store, at once; the live item shows.
+    draw(d, cx); click(`dt-restore-${A16}`, cx);
+    const back = d.viewStore().item(A16);
+    A.equal(back?.status, "open", "the demo: restored and reopened in its own store"); A.equal(back.archiveFile, undefined, "the record as it was, without its file");
+    A.equal(d.viewStore().d.sessions[SID].archived, 2, "the count lowered (restoreItem)"); A.match(d.flash, /^\(demo\) Ask 16 reopened from the archive/);
+    await drain(cx); draw(d, cx);
+    A.ok(!UI().ids.has(`dt-sec-arch-${A16}`) && UI().ids.has(`dt-answer-${A16}`) && UI().ids.has(`dt-done-${A16}`), "the live item, as usual: its answer box and Done");
+    A.equal(H().writes.length, 0, "the demo writes nothing"); }
+  { const { d, cx } = await open(A16, { kind: "ask", archived: F0 });
+    d.arch.list = d.arch.list.map((r) => (r.id === A16 ? { ...r, status: "open" } : r));   // a line that says open
+    draw(d, cx);
+    A.ok(UI().ids.has(`dt-sec-arch-${A16}`) && !UI().ids.has(`dt-sec-ans-${A16}`) && !UI().ids.has(`dt-answer-${A16}`), "an archived line that says open: still no answer box");
+    A.equal(UI().ids.get(`dt-opt-${A16}-0`)?._h?.on_click, undefined, "...nor an option to pick"); A.ok(UI().ids.has(`dt-restore-${A16}`), "Reopen only"); }
+
+  // A branch whose question was archived since (br.requestId names no item in the store): its dialog and its
+  // list row still draw, and nothing that needs the question runs (Conclude, Paste into trunk say why).
+  reset({ files: { [`${APP}/AGENTS.md`]: "x" } });
+  for (const [b, q] of [[ids.B3, ids.Q3], [ids.B2, ids.Q2]]) {
+    for (const width of [900, 500]) {
+      const { d, cx } = await open(b, { width });
+      delete d.demoStore.d.items[q];
+      let r; A.doesNotThrow(() => { r = draw(d, cx); }, `${b}, its question archived: renders at ${width} px`);
+      A.ok(r.all.includes("branch of a question"), `${b}: named without its question`); A.ok(!UI().ids.has(`dt-sec-q-${b}`), `${b}: no QUESTION sub-row`);
+      if (b === ids.B3 && width === 900) {
+        d.openConclude(d.viewStore(), d.viewStore().d.branches[b], cx); A.match(d.flash, /cannot conclude/, "Conclude… refuses, and says why"); A.equal(d.conclude, null);
+        d.sendToTrunk(d.viewStore(), d.viewStore().d.branches[b], cx); A.ok(d.flash.length > 0 && cx.clip === null, "Paste into trunk stages nothing");
+        d.askForConclusion(d.viewStore(), d.viewStore().d.branches[b], cx); A.match(String(cx.clip), /the question/, "Ask for a conclusion: no handle to name");
+        click(`ddt-brmore-${b}`, cx); draw(d, cx); }
+    }
+  }
+  { H().props = { view: "panel", demo: true }; const cx = mkcx(), pn = new Panel({}, cx); await drain(cx);
+    delete pn.demoStore.d.items[ids.Q3]; delete pn.demoStore.d.items[ids.Q2];
+    A.doesNotThrow(() => draw(pn, cx), "the panel lists a branch whose question is archived");
+    A.ok(UI().ids.has(`br-${ids.B3}`), "its row"); A.ok(texts(UI().ids.get(`br-${ids.B3}`)).includes("branch of a question")); }
+
+  // The dialog, live: the record read from the archive files; Reopen posts exactly the contract's restore event.
+  writeArch();
+  fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText);
+  const restoreWrites = () => H().writes.filter(([p]) => p.includes("/spool/") && p.includes("-restore-")).map(([, t]) => JSON.parse(t));
+  reset({ files: { [`${APP}/AGENTS.md`]: "x" }, agents: agentsLive, terminals: [{ address: "t21", state: "live" }], panes: [{ terminal: "t21" }] });
+  { const { d, cx } = await openA(A16, { kind: "ask", archived: F0, demo: false });
+    A.equal(d.demo, false); A.deepEqual(handlesOf(d.arch.list), ["Q1", "A17", "A16"], "the dialog read the session's archive itself");
+    draw(d, cx); A.ok(UI().ids.has(`dt-sec-arch-${A16}`)); A.equal(pos(), "3 of 3");
+    click(`dt-restore-${A16}`, cx); await until(cx, () => restoreWrites().length > 0);
+    const evs = restoreWrites();
+    A.equal(evs.length, 1, "one restore event");
+    const ev = evs[0];
+    A.deepEqual(Object.keys(ev).sort(), ["at", "file", "id", "item", "reopen", "session_id", "terminal", "type", "v"], "the contract's event, in the spool envelope");
+    A.deepEqual({ type: ev.type, session_id: ev.session_id, item: ev.item, file: ev.file, reopen: ev.reopen }, { type: "restore", session_id: SID, item: A16, file: F0, reopen: true });
+    A.equal(d.flash, W.reopeningWords("Ask 16", F0), "reopening…"); draw(d, cx);
+    A.equal(texts(UI().ids.get(`dt-restore-${A16}`)).join(""), "Reopening…", "the button waits"); A.equal(UI().ids.get(`dt-restore-${A16}`)._h.on_click, undefined);
+    d.reopenArchived(d.resolve(d.viewStore()).x, cx); await drain(cx); A.equal(restoreWrites().length, 1, "a second Reopen while waiting posts nothing");
+    A.deepEqual(H().closed, [], "the dialog stays open");
+    // The writer brings it back: store.json holds the id again; the dialog shows the live item.
+    storeWith((dd) => { dd.items[A16] = { ...JSON.parse(DA.sessions[SID][0].text.split("\n")[0]), status: "open", updatedAt: Date.now() }; delete dd.items[A16].resolvedBy; dd.sessions[SID].archived = 2; dd.ingested.push(ev.id); });
+    await d.reload(); draw(d, cx);
+    A.equal(d.flash, W.reopenedWords("Ask 16"), "back: reopened from the archive"); A.equal(d.reopening, null);
+    await drain(cx); draw(d, cx);
+    A.ok(!UI().ids.has(`dt-sec-arch-${A16}`) && UI().ids.has(`dt-answer-${A16}`), "the live item as usual (its answer box)"); }
+  // The writer took the event and the id did not come back: the archive file could not be read.
+  fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText);
+  reset({ files: { [`${APP}/AGENTS.md`]: "x" }, agents: agentsLive, terminals: [{ address: "t21", state: "live" }], panes: [{ terminal: "t21" }] });
+  { const { d, cx } = await openA(Q1, { kind: "question", archived: F0, demo: false });
+    draw(d, cx); click(`dt-restore-${Q1}`, cx); await until(cx, () => restoreWrites().length > 0);
+    const ev = restoreWrites()[0]; A.equal(ev.item, Q1); A.equal(ev.reopen, true);
+    storeWith((dd) => { dd.ingested.push(ev.id); });
+    await d.reload(); draw(d, cx);
+    A.equal(d.flash, W.restoreFailedWords("Question 1", F0), "ingested, not back: the archive file could not be read"); A.match(d.flash, /could not be read/);
+    A.equal(texts(UI().ids.get(`dt-restore-${Q1}`)).join(""), "Reopen", "Reopen offered again"); }
+  // Nothing came back within the usual wait (RESTORE_WAIT_MS): the writer has not taken it yet (not "could not
+  // be read": nothing is known to be wrong); the job is kept, so a late apply still says reopened (review,
+  // 2026-11-19), and Reopen can be pressed again.
+  fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText);
+  reset({ files: { [`${APP}/AGENTS.md`]: "x" }, agents: agentsLive, terminals: [{ address: "t21", state: "live" }], panes: [{ terminal: "t21" }] });
+  { const { d, cx } = await openA(A17, { kind: "ask", archived: F1, demo: false });
+    draw(d, cx); click(`dt-restore-${A17}`, cx); await until(cx, () => restoreWrites().length > 0);
+    A.equal(d.flash, W.reopeningWords("Ask 17", F1));
+    await drain(cx, D.RESTORE_WAIT_MS);
+    A.equal(d.flash, W.reopenSlowWords("Ask 17"), "after the usual wait: the writer has not taken it yet"); A.doesNotMatch(d.flash, /could not be read/);
+    A.equal(d.reopening?.slow, true, "the job kept, marked slow");
+    draw(d, cx); A.equal(texts(UI().ids.get(`dt-restore-${A17}`)).join(""), "Reopen", "Reopen offered again"); A.ok(UI().ids.get(`dt-restore-${A17}`)._h.on_click);
+    const ev = restoreWrites()[0];
+    storeWith((dd) => { dd.items[A17] = { ...JSON.parse(DA.sessions[SID][1].text.split("\n")[0]), status: "open", updatedAt: Date.now() }; dd.sessions[SID].archived = 2; dd.ingested.push(ev.id); });
+    await d.reload(); draw(d, cx);
+    A.equal(d.flash, W.reopenedWords("Ask 17"), "the writer applied it late: reopened, not a stale failure"); A.equal(d.reopening, null); }
+  // The item shown, live, archived while the dialog is open: the dialog reads the archive once and shows the
+  // record archived, read-only, with Reopen, instead of "gone" (review, 2026-11-19).
+  { const a1 = by("A1"), FA = "items-1794600000000-bbbbbb.jsonl";
+    fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText);
+    reset({ files: { [`${APP}/AGENTS.md`]: "x" }, agents: agentsLive, terminals: [{ address: "t21", state: "live" }], panes: [{ terminal: "t21" }] });
+    const { d, cx } = await open(a1.id, { demo: false });
+    await until(cx, () => d.loaded && d.preparedFor === a1.id); draw(d, cx);
+    A.ok(!UI().ids.has(`dt-sec-arch-${a1.id}`), "live first");
+    writeArch(); fs.writeFileSync(path.join(ASID, FA), JSON.stringify(a1) + "\n");
+    storeWith((dd) => { delete dd.items[a1.id]; dd.sessions[SID].archived = 4; });
+    await d.reload(); draw(d, cx);
+    A.equal(d.archLooked, a1.id, "it left the store: looked for in the archive, once");
+    await until(cx, () => Boolean(d.arch) && !d.arch.loading && Boolean(d.resolve(d.viewStore())?.archived)); draw(d, cx);
+    A.ok(UI().ids.has(`dt-sec-arch-${a1.id}`) && UI().ids.has(`dt-restore-${a1.id}`), "shown archived, with Reopen");
+    A.equal(d.resolve(d.viewStore()).x.archiveFile, FA, "...from its file");
+    A.ok(!UI().ids.has(`dt-answer-${a1.id}`), "...read-only"); }
+  fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText);
+  // A live ask raised again of an ask archived since: its "raised again" sub-row comes from the archive and
+  // opens it read-only (its file carried).
+  { const a1 = by("A1"), FA = "items-1794600000000-aaaaaa.jsonl";
+    writeArch(); fs.writeFileSync(path.join(ASID, FA), JSON.stringify(a1) + "\n");
+    storeWith((dd) => { delete dd.items[a1.id]; });
+    reset({ files: { [`${APP}/AGENTS.md`]: "x" }, agents: agentsLive, terminals: [{ address: "t21", state: "live" }], panes: [{ terminal: "t21" }] });
+    const { d, cx } = await open(ids.A9, { demo: false });
+    await until(cx, () => Boolean(d.arch) && !d.arch.loading);
+    draw(d, cx); const sub = `dt-sub-item:${a1.id}`;
+    A.ok(UI().ids.has(sub), "the earlier ask, archived: its sub-row, read from the archive");
+    A.ok(d.answer && d.answerFor === ids.A9, "A9's own answer box kept");
+    click(sub, cx); A.equal(d.target.id, a1.id); A.equal(d.target.archived, FA, "its sub-row opens it with its file");
+    draw(d, cx); A.ok(UI().ids.has(`dt-sec-arch-${a1.id}`) && UI().ids.has(`dt-restore-${a1.id}`), "read-only, with Reopen"); }
+  fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText);
+
+  // Opened on an archived record that no archive file holds (the files gone): said, with Close only.
+  fs.rmSync(ARCH, { recursive: true, force: true });
+  reset({ files: { [`${APP}/AGENTS.md`]: "x" }, agents: agentsLive, terminals: [{ address: "t21", state: "live" }], panes: [{ terminal: "t21" }] });
+  { const { d, cx } = await openA(A16, { kind: "ask", archived: F0, demo: false });
+    const { all } = draw(d, cx); A.ok(all.includes(W.archiveGoneWords(F0)), "no archive file holds it: said so"); A.ok(UI().ids.has("dt-x"), "Close"); }
+  fs.rmSync(ARCH, { recursive: true, force: true });
+  fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText);
+
   // The source: no stage method of its own, copies only copy.
   const src = fs.readFileSync(path.join(MOD, "detail.js"), "utf8");
   A.ok(!/^ {2}(async )?stage\(/m.test(src), "detail.js defines no stage method (Reader's is the one door)");
   A.ok(!src.includes("stageIntoPrompt(") && !src.includes("stageMessage("), "detail.js never calls nav.js's paste itself");
   A.ok(!fs.readFileSync(path.join(MOD, "views.js"), "utf8").includes("terminal.paste"), "views.js runs nothing");
 
-  console.log(`OK: detail, ${checks} checks (props, spec, passage, verbatim, close rules, kept Conclude, words, fixtures, main.js, views, the dialog in every demo case and its flows, the multi-line answer box and ⌘Enter, next and previous, its links${DTS ? "; element methods checked against gpui-kit.d.ts" : "; gpui-kit.d.ts not found: element methods unchecked"}${stubs.length ? `; stub ${stubs.join(" and ")} (Builder A's, not in the mod yet)` : ""}), 0 failure(s)`);
+  console.log(`OK: detail, ${checks} checks (props, spec, passage, verbatim, close rules, kept Conclude, words, fixtures, main.js, views, the dialog in every demo case and its flows, the multi-line answer box and ⌘Enter, next and previous, its links, the archive (loadArchive over real files, the CLOSED line and rows, the read-only dialog and Reopen; the review's: a slow writer, archived while open, a bounded read and its retry, a herdr: session's folder)${DTS ? "; element methods checked against gpui-kit.d.ts" : "; gpui-kit.d.ts not found: element methods unchecked"}${stubs.length ? `; stub ${stubs.join(" and ")} (Builder A's, not in the mod yet)` : ""}), 0 failure(s)`);
 } catch (e) {
   console.log(String(e?.stack ?? e).split("\n").slice(0, 8).join("\n"));
   console.log(`FAIL: detail, after ${checks} checks${stubs.length ? ` (stub ${stubs.join(" and ")})` : ""}`);

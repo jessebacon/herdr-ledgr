@@ -127,6 +127,19 @@ and the panel labels the items "declared by the agent". Use the task without its
 starting "Without using any tools:" instead of "Do not read or change any files:", and look for
 `source=block asks=3` in the log line (`source=model` means it fell back to the extractor).
 
+### An archived row (optional, the demo)
+
+A frame of the archive (2026-11-19, `docs/design/Retention.md` 6) needs no real session: items reach
+the archive only after `retention_days`, so stage it from the demo's fixtures instead (the frame then
+shows the demo's names, which are neutral).
+
+```sh
+d ledgr.demo                    # the demo store: its session counts archived (3)
+d ledgr.archived                # CLOSED open, archived (3) · hide, three dim "archived" rows
+d ledgr.open:A16                # once the rows show: the dialog read-only, ARCHIVED first, Reopen alone
+d ledgr.detail:close; d ledgr.demo   # back to the live store
+```
+
 ## Take the shot
 
 - Any tool: ⌘⇧4, then Space, then click the Herdr window, and crop to the pane plus the panel.
@@ -166,5 +179,6 @@ herdr-app status                # space, tab, focused pane as before; no overlay
 ```
 
 The panel follows the focused pane again once the session is gone. The forget does not remove the
-hooks' own files for that session (`ledgr-data/sessions/<sid>.json`, `turns/<sid>/`, `mcp/<sid>/`),
-and the retention sweep archives closed items only.
+hooks' own files for that session (`ledgr-data/sessions/<sid>.json`, `turns/<sid>/`, `mcp/<sid>/`), nor
+its `archive/<sid>/` folder should housekeeping have archived anything of it; housekeeping archives
+closed items and turn records only.

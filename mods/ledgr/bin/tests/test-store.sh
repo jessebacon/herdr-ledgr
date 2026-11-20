@@ -117,6 +117,22 @@ assert K.DEFAULT_CONFIG["ui"]["pasteIntoPrompt"] is True, K.DEFAULT_CONFIG["ui"]
 assert K.DEFAULT_CONFIG["spaces"] == {"disabled": []}, K.DEFAULT_CONFIG.get("spaces")
 merged = K.deep_merge(K.defaults(), {"spaces": {"disabled": ["spA"]}})
 assert merged["spaces"]["disabled"] == ["spA"], merged["spaces"]
+# Retention (2026-11-19): the hooks' defaults hold retention_days 3 and retention.turns 12, and their merge
+# fills retention.turns into a config.json written before it existed (an older install's, holding 14).
+assert K.DEFAULT_CONFIG["retention_days"] == 3 and K.DEFAULT_CONFIG["retention"] == {"turns": 12}, K.DEFAULT_CONFIG
+old = K.deep_merge(K.defaults(), {"v": 1, "retention_days": 14})
+assert old["retention_days"] == 14 and old["retention"] == {"turns": 12}, old
+assert K.deep_merge(K.defaults(), {"retention": {"coldDays": 7}})["retention"] == {"turns": 12, "coldDays": 7}
+# The extractor's dismissed list looks back as far as archivable's floor for a dismissed item (store.js, 7 days).
+import ledgr_extract as E
+assert E.DISMISSED_DAYS == 7, E.DISMISSED_DAYS
+# One safe name for a session's folder: config.js safeName (archive/<sid>/), bin/lib safe_name and the MCP
+# server's (mcp/<sid>/) on the names test_store.mjs wrote with what safeName made of them.
+import json, os as _os
+sys.path.insert(0, _os.path.join(_os.path.dirname(sys.argv[1]), "mcp"))
+import ledgr_mcp as MC
+for name, js in json.load(open(f"{d}/safe-names.json", encoding="utf-8")):
+    assert E.safe_name(name) == js and MC.safe(name) == js, (name, E.safe_name(name), MC.safe(name), js)
 PY
 fi
 # The writer (tests/test_writer.mjs): the 2026-11-12 stall (store.json past Herdr's 1 MiB text-file cap),
@@ -130,6 +146,6 @@ if [ "$rc" = 0 ]; then
   rm -rf "$WTMP"
 fi
 # The store's summary line last (run-all.sh shows the last line), with the parser check on it.
-if [ "$rc" = 0 ]; then echo "${OUT%, 0 failure(s)}; landing parser reads the confluence, the answer sheets (a multi-line answer too) and the pins message (and with their blank line; a sheet after a 45,000-character pins message, a 24,000-character one whole), the ref scan skipping a sheet's lines; ${WOUT#OK: }"; else echo "$OUT"; echo "FAIL: store, landing parser or writer"; fi
+if [ "$rc" = 0 ]; then echo "${OUT%, 0 failure(s)}; landing parser reads the confluence, the answer sheets (a multi-line answer too) and the pins message (and with their blank line; a sheet after a 45,000-character pins message, a 24,000-character one whole), the ref scan skipping a sheet's lines; the hooks' retention defaults and merge, one safe name for a session's folder (config.js, bin/lib, the MCP server); ${WOUT#OK: }"; else echo "$OUT"; echo "FAIL: store, landing parser or writer"; fi
 rm -rf "$TMP"
 exit $rc

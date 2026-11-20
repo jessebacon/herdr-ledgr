@@ -56,10 +56,23 @@
 // parked question may carry pins (`capture`'s `request.pins`, validated); asked in the trunk its
 // `pins_asked` (the hook saw the `ledgr pins <session> <item>` marker) marks it sent, and that turn's
 // Stop records `answeredIn` on each pin; a confluence that lands does the same with its branch.
+//
+// Retention (2026-11-19, Phase 1): what the writer's housekeeping takes out of store.json, all pure and
+// synchronous here; the writer writes the archive files (ledgr-data/archive/<sid>/items-*.jsonl and
+// turns-*.jsonl), confirms them, then calls the removals, which check again that nothing changed since the
+// plan. archivable(): closed items past `retention_days` (a dismissed one never before 7 days); removeItems()
+// counts each on its session's `archived`. planSlim() / applySlim(): turn records past the newest
+// `retention.turns` per session go to a turns file, and so does the `textHead` of every kept record past the
+// newest LIMITS.turnHeads; records also lose what every reader takes as given (leanTurn: the default
+// `textPath`, null fields), as new ones do from now on. `restore` (the dialog's Reopen on an archived row)
+// puts an archived item back under its own id and handle (restoreItem). Pins never leave the store; open
+// items are never touched; handles are never reused (nextHandle is not derived from items).
 import { createHash, randomUUID } from "crypto";
-import { LIMITS, agentLabel } from "./config.js";
+import { LIMITS, DEFAULTS, agentLabel, turnPath, retentionDays, ARCHIVE_LEGACY } from "./config.js";
 import { DEFAULT_MAX_DEPTH, manifest, preamble, branchName, branchLabel, depthOf } from "./branch.js";
 import { conclusionHead, decisionLine, decisionsHeader, pinText } from "./confluence.js";
+// A session id as a folder name (archive/<sid>/, mcp/<sid>/): config.js's one mapping, for the store's readers.
+export { safeName } from "./config.js";
 
 const EMPTY = () => ({ v: 1, items: {}, sessions: {}, branches: {}, terminals: {}, turns: {}, ingested: [], forgotten: {}, pins: {} });
 const OPEN_STATES = new Set(["open", "answered", "deferred", "rejoin_pending"]);
@@ -68,11 +81,49 @@ const ASK_KINDS = new Set(["decide", "confirm", "do", "provide", "review"]);
 const Q_KINDS = new Set(["question", "note", "bookmark"]);
 // The panel's own pin events: applied by pin id (a pin outlives its session), never creating one.
 const PIN_OPS = new Set(["pin_note", "pin_archive", "pin_restore", "pin_delete"]);
-const OWN_EVENTS = new Set(["act", "retry", "branch", "forget", "conclude", "close_branch", "resume", "clear_questions", ...PIN_OPS]);
+const OWN_EVENTS = new Set(["act", "retry", "branch", "forget", "conclude", "close_branch", "resume", "clear_questions", "restore", ...PIN_OPS]);
 export const PIN_ID = /^pn_[A-Za-z0-9-]{8,64}$/;
+// An item id as the store makes them (newId("rq"); the demo's rq_demo_N): what a restored record must carry.
+const ITEM_ID = /^rq_[A-Za-z0-9_-]{1,80}$/;
 // A key the map itself holds: `__proto__`, `constructor` or `toString` would otherwise reach
 // Object.prototype through a plain lookup (a pin id comes from a spool event or a Request).
 const own = (o, k) => Boolean(o) && Object.prototype.hasOwnProperty.call(o, k);
+const DAY_MS = 86400e3;
+// A dismissed item stays this long at least: the extractor's dismissed list and snapshot() look back 7
+// days, so a re-raise still finds (and names) the item it repeats.
+const DISMISSED_DAYS = 7;
+// A copy as store.json holds it (what an archive line is).
+const copy = (o) => JSON.parse(JSON.stringify(o));
+// A count or a number of days from config or a caller: a number (or a numeric string) not below 0, else `d`.
+const nonNeg = (v, d) => {
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() ? Number(v) : NaN;
+  return Number.isFinite(n) && n >= 0 ? n : d;
+};
+// A session's `archived` count as read: absent (or anything but a positive number) is 0.
+const tally = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0);
+
+// ── turn records, leaner (retention, 2026-11-19) ──────────────────────────
+// A turn's text file is ledgr-data/turns/<sid>/<turn>.md (config.js turnPath; the hooks send it as
+// `text_path`, absolute). Every reader of a record's `textPath` falls back to that path when it has none
+// (reader.js loadPassage, detail.js branchText and pumpBranch, writer.js reanchor through on_stop's settle
+// entry), so the record need not hold it. A relative path counts from ledgr-data/, as those readers read it.
+const slashes = (p) => String(p).replace(/\/{2,}/g, "/");
+function isDefaultTextPath(sid, turn, p) {
+  if (typeof p !== "string" || !p) return false;
+  if (slashes(p) === `turns/${sid}/${turn}.md`) return true;
+  try { return slashes(p) === slashes(turnPath(sid, turn)); } catch { return false; }
+}
+const dropNulls = (o) => { for (const k of Object.keys(o)) if (o[k] === null || o[k] === undefined) delete o[k]; };
+// What every reader already takes as given leaves the record (lossless): an empty or default `textPath`,
+// and null fields at its top and in its `asks` and `retry` sub-records (readers use ?. and ??, or test
+// them for truth: panel.js errorLine reads asks.error and asks.errorDetail so). Mutates and returns rec.
+function leanTurn(sid, turn, rec) {
+  if (!rec || typeof rec !== "object") return rec;
+  if (own(rec, "textPath") && (!rec.textPath || isDefaultTextPath(sid, turn, rec.textPath))) delete rec.textPath;
+  dropNulls(rec);
+  for (const k of ["asks", "retry"]) if (rec[k] && typeof rec[k] === "object" && !Array.isArray(rec[k])) dropNulls(rec[k]);
+  return rec;
+}
 
 export const isAgentAsk = (it) => it?.direction === AGENT;
 export const isHuman = (it) => it?.direction === HUMAN;
@@ -353,15 +404,18 @@ export class Store {
   // decisions: [{sid, key, line, header}], close: [branchId] }: settle lists turns whose parked
   // questions should be re-anchored by quote, retry the turns whose extraction the person asked to
   // re-run, launch the branches to start, decisions the lines to append to a trunk's decisions.md,
-  // close the branch terminals to end (all async, done by the writer).
+  // close the branch terminals to end (all async, done by the writer). A `restore` event also returns
+  // `restore: {item, ok, error?}`, whatever became of it, so the writer can say so (on_restore).
   apply(ev) {
     const out = { applied: false, settle: [], retry: [], launch: [], decisions: [], close: [], resume: [] };
     if (!ev || typeof ev !== "object" || !ev.type) return out;
     if (ev.id && this.d.ingested.includes(ev.id)) return out;
     const sid = str(ev.session_id) ?? str(ev.session) ?? str(ev.request?.anchor?.sessionId);
     const at = num(ev.at, Date.now());
-    // The panel's own events (act, retry, branch, forget, conclude, close_branch) never create a session.
+    // The panel's own events (act, retry, branch, forget, conclude, close_branch, restore) never create a session.
     const own = OWN_EVENTS.has(ev.type);
+    // A restore dropped below (a forgotten or unknown session) says why; on_restore replaces it.
+    if (ev.type === "restore") out.restore = { item: str(ev.item), ok: false, error: sid ? "its session is not in the store" : "the event names no session" };
     // The panel's pin events go by pin id, before the session checks: a pin outlives its session, so
     // a forgotten (or never recorded) session's pin can still be noted, archived or deleted. Each
     // handler finds its pin through pin(), so an id that is no pin (`__proto__`) changes nothing.
@@ -449,6 +503,7 @@ export class Store {
     ti.textPath = ev.text_path ?? ti.textPath ?? null;
     ti.textHead = ev.text_head ?? ti.textHead ?? null;
     ti.promptId = ev.prompt_id ?? ti.promptId ?? null;
+    leanTurn(s.sessionId, turn, ti);   // no default textPath, no nulls (every reader falls back)
     for (const it of this.itemsOf(s.sessionId)) {
       if (isHuman(it) && it.status === "open" && it.askedAtTurn === turn) this.setStatus(it, "answered", at);
       if (isHuman(it) && it.anchor && !it.anchor.settled && num(it.anchor.turn) <= turn) {
@@ -481,7 +536,7 @@ export class Store {
       this.markPinsAnswered(it, { question: it.id, session: s.sessionId, handle: it.handle, turn, via: "trunk", at },
         (a) => a.question === it.id && a.via === "trunk" && num(a.turn) === turn);
     }
-    out.settle.push({ sid: s.sessionId, turn, textPath: ti.textPath });
+    out.settle.push({ sid: s.sessionId, turn, textPath: ti.textPath ?? null });
     if (this.itemsOf(s.sessionId).some((it) => this.counts(it) && num(it.updatedAt) > num(s.seenAt))) s.surfaced = true;
   }
 
@@ -493,6 +548,7 @@ export class Store {
       count: Array.isArray(ev.asks) ? ev.asks.length : 0, at, model: ev.model ?? null, provider: ev.provider ?? null };
     if (ti.retry) ti.retry = { ...ti.retry, state: ev.source === "error" ? "failed" : "done", note: ti.retry.note ?? ev.error ?? null };
     if (uuid) ti.uuid = uuid;
+    leanTurn(s.sessionId, turn, ti);   // the asks sub-record without its null fields
     if (uuid) for (const it of this.itemsOf(s.sessionId)) if (it.anchor && num(it.anchor.turn) === turn && !it.anchor.uuid) it.anchor.uuid = uuid;
     // ...and on the session's settled pins of that turn (an unsettled screen pin waits for its Stop).
     if (uuid) for (const p of this.pinsOfSession(s.sessionId)) if (p.anchor && p.anchor.settled !== false && num(p.anchor.turn) === turn && !p.anchor.uuid) p.anchor.uuid = uuid;
@@ -630,9 +686,12 @@ export class Store {
   // `turn` when given and `resolvedNote` from `note` (one line). Anything else the agent sends is
   // dropped. Any other actor (none, "person", unknown) is the person. `handle` finds the item when
   // `item` is absent or unknown.
-  on_act(ev, s, at) {
+  on_act(ev, s, at, out) {
     if (ev.action === "seen") { this.markSeen(s.sessionId, at); return; }
     const it = this.item(ev.item) ?? (str(ev.handle) ? this.byHandle(s.sessionId, ev.handle) : null);
+    // An item no longer in the store (archived by housekeeping while the act waited in the spool, 2026-11-19):
+    // the act is dropped, and the writer's note says so; the archive's Reopen brings the item back.
+    if (!it && str(ev.item) && out) out.note = `${String(ev.item).slice(0, 60)} is not in the store (archived?): ${String(ev.action ?? "act").slice(0, 20)} not applied`;
     if (!it || it.anchor?.sessionId !== s.sessionId) return;
     if (ev.actor === "agent") {
       if (ev.action !== "resolve" || !isAgentAsk(it) || isClosed(it)) return;
@@ -1208,15 +1267,150 @@ export class Store {
     return pd && now - num(pd.at) < 30000 ? num(pd.turn) : null;
   }
 
-  // Closed items older than `days` (spec 3.2). The caller appends them to
-  // ledgr-data/archive/<yyyy-mm>.jsonl, then removes them with removeItems().
+  // ── retention (2026-11-19) ───────────────────────────────────────────
+  // Closed items past retention (config.json retention_days, default 3, as config.js retentionDays reads it:
+  // whole days from 1 to 30): a resolved one whose `resolvedAt` (else `updatedAt`) is older than `days`, a
+  // dismissed one only past max(days, 7) days (DISMISSED_DAYS). Pins are not items, so never. Each is a
+  // copy, as store.json holds it now: the line its archive file gets, and what removeItems compares the
+  // store with once that file is confirmed.
   archivable(days, now = Date.now()) {
-    const cut = now - days * 86400e3;
-    return this.items().filter((it) => isClosed(it) && num(it.resolvedAt ?? it.updatedAt) < cut);
+    const d = retentionDays(days);
+    const before = now - d * DAY_MS, beforeDismissed = now - Math.max(d, DISMISSED_DAYS) * DAY_MS;
+    return this.items()
+      .filter((it) => isClosed(it) && num(it.resolvedAt ?? it.updatedAt) < (it.status === "dismissed" ? beforeDismissed : before))
+      .map(copy);
   }
 
+  // The archived items leave the store (the writer, once their lines are confirmed in an archive file):
+  // each only if the store still holds it closed and exactly as the list gives it (the same JSON text as
+  // archivable's copy, the line in the file: a change that set no `updatedAt`, such as a confluence landing
+  // again or Forget's branch mark, counts too); one reopened or changed while the file was written stays for
+  // the next run. Each removal counts on its session's `archived` (absent means 0) when the session is
+  // recorded. Returns the items removed.
   removeItems(list) {
-    for (const it of list) delete this.d.items[it.id];
+    const out = [];
+    for (const x of Array.isArray(list) ? list : []) {
+      const id = x?.id;
+      if (typeof id !== "string" || !own(this.d.items, id)) continue;
+      const it = this.d.items[id];
+      if (!isClosed(it) || JSON.stringify(it) !== JSON.stringify(x)) continue;
+      delete this.d.items[id];
+      const sid = it.anchor?.sessionId;
+      if (typeof sid === "string" && own(this.d.sessions, sid)) this.d.sessions[sid].archived = tally(this.d.sessions[sid].archived) + 1;
+      out.push(it);
+    }
+    return out;
+  }
+
+  // What housekeeping takes from the turn records, planned and not applied: `cut`, per session, every
+  // record past the newest `keep` (by turn number), each with a copy of the record as it is; `heads`, the
+  // `textHead` of every kept record past the newest `heads` that still has one. Both go to a turns file
+  // before applySlim takes them out. Each entry carries the record's own `key` in the map (a hand-edited
+  // "07" stays "07"; `turn` is its number). Mutates nothing.
+  planSlim(keep, heads = LIMITS.turnHeads) {
+    const k = Math.floor(nonNeg(keep, DEFAULTS.retention.turns)), h = Math.floor(nonNeg(heads, LIMITS.turnHeads));
+    const cut = [], hd = [];
+    for (const [sessionId, all] of Object.entries(this.d.turns)) {
+      if (!all || typeof all !== "object") continue;
+      const turns = Object.keys(all).filter((n) => Number.isFinite(Number(n))).sort((a, b) => Number(b) - Number(a));
+      turns.forEach((n, i) => {
+        const rec = all[n];
+        if (i >= k) cut.push({ sessionId, turn: Number(n), key: n, rec: copy(rec ?? null) });
+        else if (i >= h && typeof rec?.textHead === "string" && rec.textHead) hd.push({ sessionId, turn: Number(n), key: n, textHead: rec.textHead });
+      });
+    }
+    return { cut, heads: hd };
+  }
+
+  // A plan from planSlim, applied once its turns file is confirmed: each cut record goes only if it is
+  // still as planned (the same JSON text; one that changed since stays for the next run), each listed
+  // `textHead` only if the record still holds that text. Then every record left is made lean (leanTurn:
+  // the default textPath and null fields, lossless, so no archive line), and a session left with no
+  // record loses its empty map. Returns what was taken: { cut, heads }.
+  applySlim(plan) {
+    let cut = 0, heads = 0;
+    // The record's key as planned (planSlim's `key`), else its turn number.
+    const keyOf = (x) => (typeof x?.key === "string" ? x.key : String(x?.turn));
+    for (const c of Array.isArray(plan?.cut) ? plan.cut : []) {
+      const all = this.d.turns[c?.sessionId];
+      const n = keyOf(c);
+      if (!all || !own(this.d.turns, c.sessionId) || !own(all, n) || JSON.stringify(all[n] ?? null) !== JSON.stringify(c.rec ?? null)) continue;
+      delete all[n];
+      cut++;
+    }
+    for (const x of Array.isArray(plan?.heads) ? plan.heads : []) {
+      const all = own(this.d.turns, x?.sessionId) ? this.d.turns[x.sessionId] : null;
+      const rec = all && own(all, keyOf(x)) ? all[keyOf(x)] : null;
+      if (!rec || typeof x.textHead !== "string" || rec.textHead !== x.textHead) continue;
+      delete rec.textHead;
+      heads++;
+    }
+    for (const [sid, all] of Object.entries(this.d.turns)) {
+      if (!all || typeof all !== "object") continue;
+      for (const [n, rec] of Object.entries(all)) leanTurn(sid, n, rec);
+      if (!Object.keys(all).length) delete this.d.turns[sid];
+    }
+    return { cut, heads };
+  }
+
+  // An archived item back in the store, under its own id and, as a rule, its own handle: only a record that
+  // is an item (an item id, a session in its anchor) of a session not forgotten, and only when its id is not
+  // in the store. Handles are never reused, so a handle below the session's nextHandle that no item holds is
+  // still its own. One the session's counter could hand out again (at or above nextHandle: the session
+  // record was made again, after Forget's memory let it go or a corrupt store was set aside) or another item
+  // holds gets a fresh one from nextHandle, the old one kept as `handleWas`. `counted` (the line came from
+  // an items file, not a legacy month file, which no count ever held) lowers the session's `archived` by one
+  // (never below 0; 0 leaves the field out). Returns the item put back, the one already there, or null.
+  restoreItem(record, { counted = true } = {}) {
+    if (!record || typeof record !== "object" || Array.isArray(record)) return null;
+    const id = record.id, sid = record.anchor?.sessionId;
+    if (typeof id !== "string" || !ITEM_ID.test(id) || typeof sid !== "string" || !sid) return null;
+    if (own(this.d.items, id)) return this.d.items[id];
+    if (this.isForgotten(sid)) return null;
+    const it = copy(record);
+    delete it.archiveFile;   // a reading copy's note of where it read the record, never the item's
+    const s = own(this.d.sessions, sid) ? this.d.sessions[sid] : null;
+    if (s) {
+      const m = /^([AQ])(\d+)$/.exec(String(it.handle ?? ""));
+      const k = m?.[1] ?? (it.direction === AGENT ? "A" : "Q");
+      const nh = (s.nextHandle ??= { A: 1, Q: 1, P: 1 });
+      if (!Number.isFinite(Number(nh[k])) || Number(nh[k]) < 1) nh[k] = 1;
+      if (!m || Number(m[2]) >= Number(nh[k]) || this.byHandle(sid, it.handle)) {
+        const fresh = `${k}${nh[k]++}`;
+        if (it.handle && it.handle !== fresh) it.handleWas = String(it.handle).slice(0, 16);
+        it.handle = fresh;
+      }
+    }
+    this.d.items[id] = it;
+    if (s && counted) {
+      const left = tally(s.archived) - 1;
+      if (left > 0) s.archived = left; else delete s.archived;
+    }
+    return it;
+  }
+
+  // {type: "restore", session_id, item, file, reopen, record | record_error}: the dialog's Reopen on an
+  // archived row. The writer reads the line from archive/<sid>/<file> (or a legacy <yyyy-mm>.jsonl) and
+  // attaches it as `record` (the parsed item), or `record_error` when it could not (it drops either when
+  // the event brings its own, so `file` is where the record was read). With a record of this session and
+  // this id: restoreItem (counted unless `file` is a legacy month file), then, when the item is closed, the
+  // reopen act's own change (act "reopen": setStatus, so resolvedBy, resolvedNote and the dismiss marks go;
+  // a staged confluence is called off). A restore always reopens: a closed item put back would be past
+  // retention and leave again at the next run, so `reopen` (the dialog sends true) is not read. Anything
+  // else changes nothing. Either way `out.restore` = {item, ok, error?} (apply() records the event in
+  // `ingested` as for any other).
+  on_restore(ev, s, at, out) {
+    const id = str(ev.item);
+    const say = (ok, error = null) => { out.restore = { item: id, ok, ...(error ? { error: String(error).slice(0, 300) } : {}) }; };
+    if (ev.record_error !== undefined && ev.record_error !== null) return say(false, str(ev.record_error) ?? "the archive file could not be read");
+    const rec = ev.record;
+    if (!rec || typeof rec !== "object" || Array.isArray(rec)) return say(false, "no record was read from the archive");
+    if (!id || rec.id !== id) return say(false, `the archive line is not ${id ?? "the item asked for"}`);
+    if (rec.anchor?.sessionId !== s.sessionId) return say(false, "the archived item belongs to another session");
+    const it = this.restoreItem(rec, { counted: !ARCHIVE_LEGACY.test(String(ev.file ?? "")) });
+    if (!it) return say(false, "the archive line is not an item");
+    if (isClosed(it)) this.act(it.id, "reopen", null, at);
+    say(true);
   }
 
   // ledgr-data/snapshot.json, read by the extractor: open, answered and deferred items, plus

@@ -2,7 +2,8 @@
 
 Date: 2026-11-10. Status: built the same day (see Section 11 of the design doc for departures). Written against the repo at commit 4433d65 (pins
 committed). Line numbers are as read on 2026-11-10. Builds on `Herdr ledger mod design.md` (Phases 1
-to 3), `Pins.md`, and the build notes in `docs/build-notes/`.
+to 3), `Pins.md`, and the build notes in `docs/build-notes/`. Retention (2026-11-19, `Retention.md` 6)
+added archived rows under CLOSED and a read-only dialog for them; the sections it touched say so.
 
 The panel becomes a scan list: one line per item, driven by the pointer or by arrows and Enter.
 Clicking a row, or Enter on it, opens a centered dialog (`kind: "dialog"`, 0.6 × 0.75 of the
@@ -37,6 +38,7 @@ screen with `TextView.markdown(...).selectable(true)`, Esc back).
 | Second open | From inside the dialog: in place (`retarget`). From the panel: the open one is closed first | 2.8 |
 | Files | mod.json, keys.json, the installer, the store and every engine file unchanged | 4 |
 | Must happen first | Probe P1 (staging with a dialog open, where the keyboard goes after it closes) | 6.4, 7 |
+| Archived items (added 2026-11-19, `Retention.md` 6) | CLOSED ends with `archived (N) · show` (entry `arch:items`); shown, archived rows read from ledgr-data/archive/ (state word "archived", dim, no quick action); the dialog shows one whole and read-only (`props.archived`), its one action Reopen | 1.3, 1.4, 1.7, 1.10, 2.1, 2.4, 2.5, 2.8 |
 
 ## 1. The list (Builder A)
 
@@ -46,7 +48,7 @@ screen with `TextView.markdown(...).selectable(true)`, Esc back).
 |---|---|
 | Header, session menu, hold, space switch, off, away and empty states, footer folds, the flash line | The expanded row bodies: `details` (panel.js:2157-2251), `pinDetails` (:1494-1551), the open part of `branchRow` (:2349-2369) |
 | Lane heads: PINS (fold, search box, count), the selection bar ("3 selected · Ask about these… · clear"), YOUR QUESTIONS (fold, Clear N in two clicks, count), ASKED OF YOU (fold, "extracting turn N", "agent working", threshold menu, count) | The answer input and the option chips (:2134-2141, :2238-2244) |
-| Fold lines: "N more ›" and "fewer ‹", "archived (N)", turn group heads with "◆ N blocking", "below threshold (N)", the BRANCHES sub-head | Defer ▾, Not needed, Reopen, Promote (the row's "promote" pill too, :2114-2117), Ask about this, Copy for prompt, Stage /btw, Go to anchor, Resume session… |
+| Fold lines: "N more ›" and "fewer ‹", "archived (N)" (pins), CLOSED's "archived (N) · show" (archived items, 2026-11-19), turn group heads with "◆ N blocking", "below threshold (N)", the BRANCHES sub-head | Defer ▾, Not needed, Reopen, Promote (the row's "promote" pill too, :2114-2117), Ask about this, Copy for prompt, Stage /btw, Go to anchor, Resume session… |
 | The turn group's sheet line "Paste N answers into pane t3" and the error line with Retry | Branch… / Branch again…, the Branch confirmation and its manifest, Ask here (a question with pins), Call off the confluence, Paste confluence again |
 | Pin checkboxes and the selection; search results grouped by session with "open session" | Conclude… / Edit conclusion…, the Conclude editor, Paste into trunk, Ask for a conclusion, Close branch, Focus the branch, Show the preamble |
 | Row quick actions: Done, Paste answer | A pin's Ask here… / Branch… / Note / Copy / Go to anchor / Archive / Restore / Delete, "show whole message", the "Copy" pill on search results (:1479-1481) |
@@ -93,6 +95,7 @@ First match wins. Tones are `theme()` color names.
 
 | Kind | When | Word | Tone |
 |---|---|---|---|
+| ask, question | read back from the archive (`archiveFile`, 2026-11-19), before every other row | archived | dim |
 | ask | resolved, `resolvedBy` answer | answered by you | done |
 | ask | resolved, `resolvedBy` agent | closed by agent | done |
 | ask | resolved, `resolvedBy` branch | resolved by branch | done |
@@ -135,7 +138,9 @@ First match wins. Tones are `theme()` color names.
 
 Both are small bordered buttons (`h(18)`, `px(5)`, text 10.5) that stop the click's propagation, so
 they never open the dialog. Hover is tracked per row with `.on_hover((h, cx) => …)` into
-`this.hoverKey`, with a render only when it changes. Pins and branches have no quick action.
+`this.hoverKey`, with a render only when it changes. Pins and branches have no quick action, nor has an
+archived row (2026-11-19): `rowModel` gives it `quick` all false and `archived: true`, its tooltip ending
+"Archived: out of the list; its dialog reads it and can reopen it."
 
 ### 1.5 Unchanged in the list
 
@@ -176,8 +181,10 @@ their own focus handle and Esc.
   children: `this.entries = [{key, index}]`, where `index` is the line's position among the
   direct children of `ledgr-list`. Keys: `lane:pins`, `lane:mine`, `lane:asks`, `pin:<id>`,
   `more:pins`, `arch:pins`, `pgroup:<sid>` (a search group head; Enter is "open session"),
-  `item:<id>`, `branch:<id>`, `group:<turn>`, `sheet:<turn>`, `sug:<turn>`, `err:<turn>`. The
-  selection bar, the search box, Clear, the threshold menu and the footer are not entries.
+  `item:<id>`, `branch:<id>`, `group:<turn>`, `sheet:<turn>`, `sug:<turn>`, `err:<turn>`, and
+  (2026-11-19) `arch:items`, CLOSED's last line `archived (N) · show`, whose Enter shows or hides the
+  session's archived rows as its click does; each archived row is an `item:<id>` entry like any other.
+  The selection bar, the search box, Clear, the threshold menu and the footer are not entries.
 - `this.cursor` is an entry key, in memory, reset when the shown session changes.
 - Moving: `moveCursor(keys, cursor, delta)` (listing.js); then `this.listScroll.scroll_to_item(index)`
   (`ScrollHandle`, made in the constructor, `.track_scroll(this.listScroll)` on `ledgr-list`). It
@@ -198,6 +205,9 @@ openDetail(kind, id, sid, o = {}, cx)   // panel.js
    sel: kind === "pin" && this.pinSel.has(id) ? this.selPins(st).map((p) => p.id) : [],
    opener: this.panelId, demo: this.demo }))` (`detailSpec`: detailing.js, 2.9).
 3. The cursor moves to that row; `this.flash` is cleared.
+
+`o.archived` (2026-11-19): an archived row's file (`openOf(x)`: `{archived: x.archiveFile}` for a record
+read from the archive), passed on as `props.archived`, so the dialog reads that record from there.
 
 Callers: a row's click, Enter on a row, `open:<handle>`, `runThen` (1.10), and the re-routed
 commands of 1.10. Never from `render` itself: from a handler, or `cx.timer.after(0, (cx) => …)` as
@@ -248,6 +258,8 @@ exactly one of them.
 | expand-all, expand-branches | panel | gone: the panel says "Rows open in the detail dialog: ledgr.open:<handle>" |
 | collapse-all | panel | panel: closes the open dialog, clears the cursor |
 | detail:close, detail:done, detail:whole, detail:pick:<n>, detail:answer:<text> | new | dialog only |
+| archived | new (2026-11-19) | panel: CLOSED opened, the shown session's archived rows shown or hidden, as a click on `archived (N) · show`; `open:<handle>` and `cursor:<handle>` reach an archived row once the rows are read |
+| detail:reopen | new (2026-11-19) | dialog only, on an archived record: Reopen (one `restore` event). On an archived record `detail:done`, `detail:pick:` and `detail:answer:` say it is read-only; `detail:whole` works |
 | tab, backtab, btw, pin, submit, escape | capture box | capture box; the dialog handles tab and backtab only for its own fields (2.7); the panel ignores all six |
 
 "The dialog is open on that item" is `shared("ledgr.detail").open.id === it.id`.
@@ -291,8 +303,12 @@ Capture; else Panel. The detail test comes before `isCapture`, which takes any o
 this.ctl?.release?.(); } catch { /* closing */ } }` (main.js:73-75 does not await today).
 
 Props, checked by `detailProps(p)` (detailing.js): `{view: "detail", session, kind, id, open?, sel?,
-opener?, demo?}` plus Herdr's `overlay`. `kind` is a hint: the record decides (`pn_` a pin, `br_` a
-branch, else an item, an ask or a question by its `direction`).
+opener?, demo?, archived?}` plus Herdr's `overlay`. `kind` is a hint: the record decides (`pn_` a pin, `br_` a
+branch, else an item, an ask or a question by its `direction`). `archived` (2026-11-19, `Retention.md`
+6.3): the archive file of a row listed under CLOSED, kept on an ask or a question only, and only a plain
+`.jsonl` name of at most 128 characters that the writer's shapes take (`detailProps`' third argument;
+`detail.js` passes `ARCHIVE_ITEMS` or `ARCHIVE_LEGACY`), else null. Props rather than a shared request:
+a dialog reads its props once and owns them, where a shared key would be every copy's.
 
 `class Detail extends Reader`:
 
@@ -314,8 +330,11 @@ branch, else an item, an ask or a question by its `direction`).
    focus, terminal, drafts}`; `focus` is "list" after Esc or a closing act, "pane" after a staging
    or a pane focus (with its `terminal`), null otherwise (a click outside).
 
-The item is gone (forgotten session, deleted pin, archived away by the daily housekeeping): the
-body says `DETAIL_GONE` and offers only Close.
+The item is gone (forgotten session, deleted pin): the body says `DETAIL_GONE` and offers only Close.
+Since 2026-11-19 an item housekeeping archived is not gone: opened from its archived row (`props.archived`),
+the dialog reads the session's archive itself (Reader `loadArchive`) and shows the record read-only (2.4);
+"Reading the archive…" meanwhile, and `archiveGoneWords` when no file read holds it. A dialog open on a
+live item that a run archives meanwhile reads the archive once and shows the archived record in its place.
 
 ### 2.2 Size and layout
 
@@ -422,6 +441,18 @@ views.js `subRow`; clicking it retargets the dialog (2.8).
 `props.sel`: the panel's selection when this pin was in it. Ask here… and Branch… then carry the
 whole selection, as `pinsFor` does today (:1554-1556); the dialog cannot change the selection.
 
+**archived ask or question** (2026-11-19, `Retention.md` 6.3)
+
+| Section | Content | Shown when |
+|---|---|---|
+| ARCHIVED | first: when and how it was closed (`archivedWords`: "Closed 5 days ago (date) · answered by you."), where it is kept (`archiveFileWords`), an `archived` badge | always |
+| TEXT, QUOTE, ABOUT, OPTIONS, RESULT, foot | as for a live ask or question; OPTIONS not clickable (closed) | as they apply |
+| ANSWER | never, whatever status the record holds | — |
+| the ask it repeats or is about | a sub-row read from the archive when it is archived too; it opens read-only | it has one |
+| message (right) | its anchor turn, as for a live item | always |
+
+The state word in the header is "archived"; resume and terminal-gone lines are left out.
+
 **branch**
 
 | Section | Content | Shown when |
@@ -476,6 +507,7 @@ panel.js to detail.js unless the Reader column says so.
 | Delete (two clicks, archived only) | pin | `deletePin` (:1653-1666) | `pin_delete` | closes, focus list |
 | Copy (text, quote), Copy message | any | `copyText(text, what, cx)` | clipboard only | stays |
 | a sub-row | any | `retarget(kind, id, session, cx)` | nothing | stays, in place |
+| Reopen (2026-11-19) | an archived ask or question, its only action | `reopenArchived` | `restore` `{session_id, item, file, reopen: true}` (Reader `post`) | stays: "Reopening …", then the live item once `store.json` holds the id (even late); "could not be read" when the writer took the event and the id is not back; after `RESTORE_WAIT_MS` (15 s) with neither, it keeps waiting and says the writer has not taken the event yet. The demo restores into its own store |
 
 "Closes" for a posting act means `postAndClose(type, payload, local, cx)`: it awaits `writeEvent`
 in its own task, then closes, so the close cannot cancel the write (AGENTS.md:910-920: cleanup gets
@@ -518,7 +550,8 @@ Nothing typed is lost when Esc or a click outside closes the dialog:
 ### 2.8 Replacing, and opening in a state
 
 - In place: a sub-row, a usage line or "the question of this branch" calls `retarget(kind, id,
-  session, cx)`: the per-item state (InputStates, `confirm`, `conclude`, `whole`, menus) is reset,
+  session, cx, archived?)` (`archived`, 2026-11-19: an archived record's file; its session's archive is
+  read first when it is not read yet): the per-item state (InputStates, `confirm`, `conclude`, `whole`, menus) is reset,
   the open record is rewritten with the new target, the overlay stays. `release()` reports the last
   target, so the panel's cursor follows it when that item is in its list.
 - From outside: the panel closes the open one before it opens another (1.8).
@@ -526,7 +559,10 @@ Nothing typed is lost when Esc or a click outside closes the dialog:
   "note" (`editPinNote`), "whole" (the message switched to whole), "answer" (focus the answer),
   "defer", "more" (that menu open). Action states, from scripted commands only, run once in
   `cx.timer.after(0, (cx) => …)`: "go", "ask-here", "ask-conclusion", "again", "close" (arms Close
-  branch; the next `close-branch` ends it).
+  branch; the next `close-branch` ends it). On an archived record only "whole" applies.
+- Next and previous (⌘↓ / ⌘↑, 2026-11-11; `listing.js` `laneOf`): on an archived record the lane is
+  `"archive"` (2026-11-19), the session's archived rows as read, the store's ids left out, newest first,
+  each step opening the next record from its own file.
 
 ### 2.9 Modules
 
@@ -722,7 +758,8 @@ changes, so the Python side and `test_compose.mjs` are untouched. Docs are the o
 | listing.js | A | B | `BR_WORD`; `firstLine(text, n = 160)`; `glyphOf(it, sug) → [char, tone]`; `stateOf(kind, x, ctx) → {word, tone}`; `rowModel(kind, x, ctx) → {key, kind, id, sessionId, handle, pill: {text, tone} \| null, text, state: {word, tone}, glyph, quick: {done, paste}, tip}` with `ctx = {threshold, now, here, store, branchLive: (br) => string}`; `entryKey(kind, id)`; `moveCursor(keys, cursor, delta)` (delta ±1, ±8, "home", "end"); `keepPlace(prevKeys, keys, cursor)` |
 | `stageMessage(gate, msg, terminal, cx, w)` | C | A (`Reader.stage`) | 3.2; returns a boolean |
 | detailing.js | B | A (`openDetail`) | `DETAIL`, `KINDS`, `OPEN_STATES`, `detailProps`, `detailSpec`, `kindOf`, `closesAfterStage`, `mergeClosed`, … (2.9) |
-| Dialog props | A writes | B reads | `{view: "detail", session, kind, id, open: OPEN_STATES \| null, sel: [pn_ ids], opener: panelId, demo: boolean}` |
+| Dialog props | A writes | B reads | `{view: "detail", session, kind, id, open: OPEN_STATES \| null, sel: [pn_ ids], opener: panelId, demo: boolean}`; since 2026-11-19 also `archived: "<archive file>"` for an archived row |
+| The archive (2026-11-19) | the retention builders | panel, dialog | `listing.js` `archiveRecords`, `archivedCount`, `closedAtOf`, `laneOf`'s `"archive"` lane; `Reader.loadArchive`; `rowModel().archived`; `Retention.md` 3.2, 6 |
 | `shared("ledgr.detail")` | B writes | A reads | `{open: {overlay, opener, session, kind, id, at} \| null, closed: {overlay, opener, session, kind, id, at, flash, focus: "list" \| "pane" \| null, terminal, drafts: {[itemId]: text}} \| null}` |
 | words.js | B | A | `stageLabels(paste).quick`; existing exports unchanged |
 | Commands | A (panel), B (dialog) | main.js header (B), scripted checks | 1.10, exact names |
@@ -843,6 +880,10 @@ through the panel's own events.
    capture box; ⌘S in the dialog does nothing.
 8. `herdr-app status`: no mod errors. `herdr-app do ledgr.collapse-all` closes an open dialog.
 9. Clean up: Forget the session after closing its pane; `rm -rf /tmp/ledgr-detail-a`.
+10. Archived rows (2026-11-19): `herdr-app do ledgr.demo`, `ledgr.archived`: CLOSED ends with
+    `archived (3) · hide` and three dim "archived" rows with no Done; ↓ to one, Enter: the dialog,
+    ARCHIVED first, no answer box, Reopen alone; ⌘↓ to the next archived row. The real path is
+    `Retention.md` 8.3.
 
 ## 7. Out of scope, and open questions
 

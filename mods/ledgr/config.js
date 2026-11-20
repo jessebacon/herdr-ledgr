@@ -50,7 +50,14 @@ export const DEFAULTS = {
   // command of your own with {path}, {line}, {col} (never a shell or a terminal). Web links open in the
   // browser whatever this says. The settings dialog writes it.
   links: { editor: "open" },
-  retention_days: 14,
+  // Retention (2026-11-19, the writer's housekeeping; store.js archivable, planSlim): closed items stay in
+  // the list this many days, then move to ledgr-data/archive/<sid>/, where the panel's Closed fold still
+  // reads them and Reopen brings one back; a dismissed item never before 7 days. The settings dialog writes
+  // it (1 to 30). Was 14 until Phase 1.
+  retention_days: 3,
+  // retention.turns: the turn records store.json keeps per session (the newest by turn number); older ones
+  // go to an archive file. Each carries the turn's uuid, its extraction result and a head of its text.
+  retention: { turns: 12 },
 };
 
 export const LIMITS = {
@@ -68,12 +75,38 @@ export const LIMITS = {
   pinsPerQuestion: 12,   // pins one parked question carries (the panel's selection, the box, on_capture)
   pinsPreamble: 24000,   // characters of pinned passages a branch preamble carries (branch.js manifest)
   pinSearch: 200,        // pins one search shows (store.js searchPins)
+  // Retention (2026-11-19): the newest turn records per session that keep their `textHead` (the reply's
+  // first 400 characters, read only when the turn's file is gone); older kept ones lose it to an archive file.
+  turnHeads: 2,
 };
 
 export const dataDir = () => `${appHome()}/ledgr-data`;
 export const spoolDir = () => `${dataDir()}/spool`;
 export const terminalsDir = () => `${dataDir()}/terminals`;
 export const turnPath = (sid, turn) => `${dataDir()}/turns/${sid}/${turn}.md`;
+// A session id as a folder name: every character outside A-Za-z0-9._- becomes _ (bin/lib
+// ledgr_extract.safe_name, bin/mcp's folders). The one mapping for every folder named after a session:
+// ledgr-data/mcp/<sid>/ (the hooks and the server) and archive/<sid>/ (retention, 2026-11-19: spool.js
+// archiveDir, which the writer and the reading copies name the folder by; store.js re-exports it). Per code
+// point (the u flag), as Python's re.sub counts: a character outside the BMP is one _, not two.
+export const safeName = (name) => String(name).replace(/[^A-Za-z0-9._-]/gu, "_");
+// The archive's file names (retention, 2026-11-19; spool.js re-exports them): a session's items files,
+// archive/<safeName(sid)>/items-<ms>-<rand6>.jsonl, written once each by the writer's housekeeping, and the
+// legacy archive/<yyyy-mm>.jsonl the housekeeping before it appended to (any session's; only read now). The
+// store tells the two apart on a restore: a legacy line was never counted on session.archived.
+export const ARCHIVE_ITEMS = /^items-\d{1,16}-[a-z0-9]{1,16}\.jsonl$/;
+export const ARCHIVE_LEGACY = /^\d{4}-\d{2}\.jsonl$/;
+
+// retention_days as every reader takes it (store.js archivable, the writer's housekeeping, the settings
+// row): whole days from 1 to 30, a number or a numeric string rounded and clamped; anything else (missing,
+// true, a word) the default. A hand-written 0 is 1 day, never "archive at once".
+export const RETENTION_DAYS = { min: 1, max: 30 };
+export function retentionDays(v) {
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() ? Number(v) : NaN;
+  if (!Number.isFinite(n)) return DEFAULTS.retention_days;
+  return Math.min(RETENTION_DAYS.max, Math.max(RETENTION_DAYS.min, Math.round(n)));
+}
+export const retentionDaysOf = (cfg) => retentionDays(cfg?.retention_days);
 // Remote-style addresses (vps/t7) are written as vps__t7 (spec 2.5).
 export const terminalFile = (t) => `${terminalsDir()}/${String(t).replace(/\//g, "__")}.json`;
 export const binDir = () => `${appHome()}/mods/ledgr/bin`;

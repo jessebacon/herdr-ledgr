@@ -184,7 +184,7 @@ export function manifestView(t, m, frozen = false) {
 // A decide's options: a wrapped set of buttons; the chosen one (the draft) in accent, "(rec.)" on the
 // recommended one. A click makes it the answer (host.setDraft).
 export function optionChips(host, t, it) {
-  const closed = isClosed(it);
+  const closed = isClosed(it) || Boolean(it.archiveFile);   // an archived record's options are shown, never picked
   return h_flex().id(`dt-opts-${it.id}`).flex_wrap().gap(6).children((it.options ?? []).map((o, i) => {
     const chosen = String(it.draft ?? "").trim() === o;
     return div().id(`dt-opt-${it.id}-${i}`).min_w(0).px(8).py(2).rounded(6).border_1().border_color(chosen ? t.accent : t.border)
@@ -369,8 +369,10 @@ export function branchActions(host, t, st, s, br, o) {
     { tip: host.pasteOn() ? "The staged message into the trunk's prompt again (never sent)" : "The staged message to the clipboard again, and focus the trunk" }]);
   if (canC && !concl && !staged && focusOk && host.conclude?.branchId !== br.id) more.push(["ask", "Ask for a conclusion", (_e, cx) => host.askForConclusion(st, br, cx),
     { tip: "Stage a short request for a ledgr-conclusion block in the branch's pane" }]);
+  // Its question may be gone from the store (archived since, retention 2026-11-19, or forgotten): it is null here.
   if (!canC && br.status !== "rejoined") more.push(["conclude", "Conclude…", () => {}, { disabled: true,
-    tip: it && isClosed(it) ? `${H(it)} is ${it.status}: nothing to carry back` : "The branch has not started" }]);
+    tip: !it && br.requestId ? "Its question is no longer in the list (archived under Closed): nothing to carry back"
+      : it && isClosed(it) ? `${H(it)} is ${it.status}: nothing to carry back` : "The branch has not started" }]);
   if (br.preamble) more.push(["pre", host.preOpen.has(br.id) ? "Hide the preamble" : "Show the preamble",
     (_e, cx) => { if (host.preOpen.has(br.id)) host.preOpen.delete(br.id); else host.preOpen.add(br.id); cx.notify(); }]);
   return h_flex().flex_wrap().gap(6).items_center()

@@ -2,12 +2,14 @@
 //   props { view: "panel" }            the panel block (by default a child of the right-hand
 //                                      `panel-body` stack): one line per item; reads store.json, and
 //                                      runs a fallback writer only when no host answers (panel.js)
-//   props { view: "detail", session, kind, id, open?, sel?, opener?, demo? }
+//   props { view: "detail", session, kind, id, open?, sel?, opener?, demo?, archived? }
 //                                      the detail dialog (an overlay the panel opens on a row's click or
 //                                      Enter, 0.6 × 0.75 of the window): one ask, question, pin or branch
 //                                      whole, its text selectable, every action (detail.js;
 //                                      docs/design/Detail.md 2). Its own copy: reads store.json, posts
-//                                      spool events, never the writer
+//                                      spool events, never the writer. archived: the archive file of a row
+//                                      listed under CLOSED (retention, 2026-11-19): the record is read from
+//                                      ledgr-data/archive/, read-only, its one action Reopen
 //   props { view: "settings", opener?, demo? }
 //                                      the settings dialog (the panel's gear, ledgr.settings; 0.5 × 0.7): text
 //                                      scale, threshold, closing list, the ui switches, branch depth, off
@@ -66,6 +68,9 @@
 //   and detail-prev (⌘↓ / ⌘↑, keys.json mod:ledgr; detail:next, detail:prev for scripts): the next or
 //   previous record of the lane in the panel's order, in place (2026-11-11). It ignores pin, submit and
 //   escape (the capture box's); the panel ignores detail-next and detail-prev.
+//   The archive (retention, 2026-11-19): archived (the panel's: CLOSED open, the shown session's archived
+//   rows shown or hidden, as a click on "archived (N) · show"; open:<handle> reaches an archived row once
+//   they are read); the dialog's detail:reopen (Reopen on an archived record: one restore event).
 //   The settings dialog (2026-11-10): settings (the panel's gear: the dialog opens, an open detail dialog
 //   closes first; the host opens it when the panel is not shown), demo-settings (the dialog with the
 //   defaults and sample spaces, nothing saved). The dialog's own: settings:close,

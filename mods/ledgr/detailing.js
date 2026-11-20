@@ -21,14 +21,24 @@ export const OPEN_STATES = [...VIEW_STATES, ...ACTION_STATES];
 export const KEEP_KEY = "detail.conclude";
 
 const PIN_ID = /^pn_[A-Za-z0-9-]{8,64}$/;   // store.js PIN_ID (this module imports nothing)
+// An archive file's name, when the caller gives no check of its own: a plain .jsonl name (no separator, not
+// hidden), never a path. detail.js passes the writer's exact shapes (spool.js ARCHIVE_ITEMS, ARCHIVE_LEGACY).
+const PLAIN_JSONL = /^[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*\.jsonl$/;
 const DAY = 86400e3;
 const str = (v, max = 128) => (typeof v === "string" && v.length >= 1 && v.length <= max ? v : null);
+// How long the dialog says "reopening…" for an archived record before it says the writer has not taken the
+// event yet (retention, 2026-11-19); the record still shows "reopened" when the id comes back later, and the
+// archive file is said to be unreadable only once the writer took the event and the id did not come back.
+// The panel's Clear N waits as long for its event.
+export const RESTORE_WAIT_MS = 15000;
 
 // The dialog's props as given to openOverlay (plus Herdr's `overlay`), checked: {ok: true, session, kind,
-// id, open, sel, opener, demo, overlay} or {ok: false, error}. A bad view, kind or id refuses; an unknown
-// `open` is dropped; `sel` keeps pin ids only, each once, at most maxSel (LIMITS.pinsPerQuestion, passed
-// in); `demo` only when it is true.
-export function detailProps(p, maxSel = 12) {
+// id, open, sel, opener, demo, overlay, archived} or {ok: false, error}. A bad view, kind or id refuses; an
+// unknown `open` is dropped; `sel` keeps pin ids only, each once, at most maxSel (LIMITS.pinsPerQuestion,
+// passed in); `demo` only when it is true; `archived` (retention, 2026-11-19: the record is read from that
+// archive file, not the store), on an ask or a question, only a name isArchiveFile(name) takes (detail.js:
+// the writer's shapes; else a plain .jsonl name, never a path), else null.
+export function detailProps(p, maxSel = 12, isArchiveFile = null) {
   if (!p || typeof p !== "object" || Array.isArray(p)) return { ok: false, error: "no props" };
   if (p.view !== "detail") return { ok: false, error: `not a detail view (${String(p.view ?? "none").slice(0, 20)})` };
   if (!KINDS.includes(p.kind)) return { ok: false, error: `unknown kind ${String(p.kind ?? "none").slice(0, 20)}` };
@@ -37,15 +47,19 @@ export function detailProps(p, maxSel = 12) {
   const max = Math.max(0, Math.floor(Number(maxSel) || 0));
   const sel = [];
   for (const x of Array.isArray(p.sel) ? p.sel : []) if (typeof x === "string" && PIN_ID.test(x) && !sel.includes(x)) sel.push(x);
+  const fileOk = (f) => f.length <= 128 && PLAIN_JSONL.test(f) && (typeof isArchiveFile === "function" ? isArchiveFile(f) === true : true);
+  const archived = typeof p.archived === "string" && fileOk(p.archived) && (p.kind === "ask" || p.kind === "question") ? p.archived : null;
   return { ok: true, session: str(p.session), kind: p.kind, id, open: OPEN_STATES.includes(p.open) ? p.open : null,
-    sel: sel.slice(0, max), opener: str(p.opener), demo: p.demo === true, overlay: str(p.overlay, 256) };
+    sel: sel.slice(0, max), opener: str(p.opener), demo: p.demo === true, overlay: str(p.overlay, 256), archived };
 }
 
 // The OverlaySpec the panel opens the dialog with (2.2): a centered dialog of this mod, never a layout.
+// p.archived (an archived row's file, retention 2026-11-19) goes into the props only when given.
 export function detailSpec(p = {}) {
   return { mod: "ledgr", kind: "dialog", width: DETAIL.width, height: DETAIL.height,
     props: { view: "detail", session: p?.session ?? null, kind: p?.kind ?? null, id: p?.id ?? null, open: p?.open ?? null,
-      sel: Array.isArray(p?.sel) ? [...p.sel] : [], opener: p?.opener ?? null, demo: p?.demo === true } };
+      sel: Array.isArray(p?.sel) ? [...p.sel] : [], opener: p?.opener ?? null, demo: p?.demo === true,
+      ...(typeof p?.archived === "string" && p.archived ? { archived: p.archived } : {}) } };
 }
 
 // The settings dialog (settings.js, 2026-11-10): half the window's width, 0.7 of its height.

@@ -8,7 +8,9 @@ the confluence again, Ask here with pins). A copy only copies. The settings dial
 2026-11-10) stages, copies, runs and opens nothing: it only writes config.json through Reader
 saveConfig (rule 12). A process starts only from opener.js, and only on a click in the detail dialog
 (2026-11-10, rule 13): a link or path the person clicks opens in the browser or the chosen editor (open,
-zed, code or their own command), never a shell, never a terminal, never with a line break. A static check
+zed, code or their own command), never a shell, never a terminal, never with a line break. Only the writer
+writes under ledgr-data/archive/, each file new (spool.js writeNew), and the dialog's Reopen on an archived
+record posts one restore event and nothing else (2026-11-19, rule 14). A static check
 over the mod's own source (comments are stripped first, so the rule may be written down); the runtime
 half is tests/test_nav.mjs and tests/test_links.mjs.
 
@@ -372,6 +374,51 @@ if settings is not None:
 vw = files.get("views.js") or ""
 ok("open_url(" in (re.search(r"^export function webOnly\(url, cx\) \{(.*?)^\}$", vw, flags=re.S | re.M) or [None, ""])[1]
    and vw.count("open_url(") == 1 and 'l.kind === "web"' in vw, "rule 13: views.js opens only a web link, in webOnly, when no handler of the dialog's is given")
+
+# ── rule 14: the archive (retention, 2026-11-19) ───────────────────────────────────────────────────
+# Only the writer writes under ledgr-data/archive/, and only new files: spool.js writeNew (create-only, then
+# read back) is called from writer.js archiveLines alone, which names each file
+# archive/<dir>/<kind>-<ms>-<rand6>.jsonl; the one other write there is housekeep's mkdir of the session's
+# folder (the old month-file append is gone). No other file hands a path naming the archive to a write. The
+# reading copies only read it: Reader loadArchive, namesIn and demoArchiveOf write, post, stage and run
+# nothing, nor do the panel's and the dialog's readArchive; the dialog's Reopen (detail.js reopenArchived)
+# posts the one restore event and stages, copies, runs and execs nothing.
+WRITE = re.compile(r"\b(writeTextFile|writeFile|writeAtomic|writeAtomicWith|writeLarge|writeNew|writeEvent|mkdir|rename|appendFile|unlink|rm|cp|copyFile)\(([^;\n]*)")
+writer_js = files.get("writer.js") or ""
+for rel, t in js.items():
+    hits = [m for m in WRITE.finditer(t) if "archive" in m.group(2).lower()]
+    if rel != "writer.js":
+        ok(hits == [], f"rule 14: {rel} writes under archive/: {[m.group(0)[:80] for m in hits]}")
+hk = method(writer_js, "housekeep")
+ok(hk is not None, "rule 14: writer.js has the method housekeep")
+whole = [m.group(0) for m in WRITE.finditer(writer_js) if "archive" in m.group(2).lower()]
+inside = [m.group(0) for m in WRITE.finditer(hk or "") if "archive" in m.group(2).lower()]
+ok(whole == inside and all(x.startswith("mkdir(") for x in inside), f"rule 14: writer.js names the archive in a write only in housekeep, its folder's mkdir: {whole}")
+ok("writeAtomicWith(" not in (hk or "") and "writeAtomic(" not in (hk or ""), "rule 14: housekeep appends to no file (the month files are never written again)")
+where = sorted(rel for rel, t in js.items() if "writeNew(" in t)
+ok(where == ["spool.js", "writer.js"], f"rule 14: writeNew( only in spool.js (its definition) and writer.js: {where}")
+ok((files.get("spool.js") or "").count("writeNew(") == 1 and "export async function writeNew(" in (files.get("spool.js") or ""), "rule 14: spool.js only defines writeNew")
+wn = fn(files.get("spool.js"), "writeNew") or ""
+ok("writeTextFile(path, text, null)" in wn and "readTextFile(path)" in wn and wn.index("writeTextFile(path, text, null)") < wn.index("readTextFile(path)"),
+   "rule 14: writeNew creates only (writeTextFile's expected null) and reads the file back")
+al = method(writer_js, "archiveLines")
+ok(al is not None and writer_js.count("writeNew(") == 1 and "writeNew(" in al, "rule 14: writer.js calls writeNew( once, inside archiveLines")
+ok(al is not None and "`archive/${dir}/${kind}-${ms}-${rand6()}.jsonl`" in al, "rule 14: archiveLines names each file archive/<dir>/<kind>-<ms>-<rand6>.jsonl")
+READ_ONLY_BANNED = ("writeTextFile(", "writeEvent(", "writeNew(", "this.post(", "writeFile(", "mkdir(", "rename(", "unlink(", "rm(", "appendFile(",
+                    "stage(", "stageMessage(", "stageIntoPrompt(", "run(", "exec(", "hc(", "setShared(", "write_to_clipboard(", "openOverlay(")
+for rel, name in (("reader.js", "loadArchive"), ("reader.js", "readArchiveWithin"), ("reader.js", "demoArchiveOf"), ("panel.js", "readArchive"),
+                  ("detail.js", "readArchive"), ("detail.js", "archiveFor"), ("detail.js", "lookInArchive"), ("detail.js", "archiveAgain")):
+    b = body(rel, name, "14")
+    for bad in READ_ONLY_BANNED:
+        holds(b, lambda b, bad=bad: bad not in b, f"rule 14: {rel} {name} only reads, but calls {bad}")
+na = fn(reader, "namesIn")
+ok(na is not None and "fs.readdir(" in na and not any(bad in na for bad in READ_ONLY_BANNED), "rule 14: reader.js namesIn only lists a folder")
+ra = body("detail.js", "reopenArchived", "14")
+holds(ra, lambda b: b.count("this.post(") == 1 and 'this.post("restore", { session_id: sid, item: it.id, file, reopen: true }' in b,
+      "rule 14: detail.js reopenArchived posts one event, the contract's restore {session_id, item, file, reopen: true}")
+for bad in ("stage(", "stageMessage(", "stageIntoPrompt(", "stageText(", "stageQuestion(", "copyAnswer", "write_to_clipboard(", "run(", "hc(", "exec(",
+            "openOverlay(", "writeEvent(", "writeTextFile(", "goTo", "spawn("):
+    holds(ra, lambda b, bad=bad: bad not in b, f"rule 14: detail.js reopenArchived calls {bad}")
 
 # ── the engine rule (Detail.md 5.2): engine files never import the reading or staging modules ──────
 m = re.search(r"export const ENGINE_FILES = (\[[^\]]*\])", files.get("writer.js", ""))

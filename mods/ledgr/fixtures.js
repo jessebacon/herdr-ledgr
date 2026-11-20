@@ -18,6 +18,10 @@
 // A7 (answered), A9 (raised again), Q3 (a running branch with a ledgr-conclusion), Q2 (rejoined), Q5 (its
 // message not saved), Q6 (a bookmark), Q9 (two pins, answered), P2 (a note). DEMO_DETAIL: the dialog
 // `ledgr.demo-detail` opens without a handle. The settings dialog (2026-11-10): DEMO_SPACES and DEMO_OFF.
+// The archive (retention, 2026-11-19): the demo session counts three archived items (`archived: 3`), and
+// demoArchive holds them as archive files (Ask 16, answered by you; Ask 17, not needed in the first file and
+// closed by the agent in a newer one, which wins; Question 1, cleared), so Closed ends with "archived (3)"
+// and its rows open read-only with Reopen. reader.js loadArchive reads these in the demo, never a file.
 // Drawn when props().demo, FORCE_DEMO (config.js) or `herdr-app do ledgr.demo`. Never saved,
 // never published to shared(), never written to ledgr-data.
 import { passageHash } from "./store.js";
@@ -65,7 +69,12 @@ const T4_CODEX = [
   "LAST LINE OF THE 1,500-WORD MESSAGE: the notes end here.",
 ].join("\n\n");
 
-export const FIXTURE_TURNS = { [`${SID}:17`]: T17, [`${SID}:12`]: T12, [`${SID}:14`]: T14, [`${SIDB}:1`]: TB1, [`${SID2}:4`]: T4_CODEX };
+// Turn 6: the message the archived Ask 16 came from (demoArchive).
+const T6 = `The read replica \`orders-ro\` lags about four seconds behind the primary under load.
+
+Should the nightly report read from the replica or the primary? The replica keeps the load off the primary; the primary is always current. The report's queries are listed in \`reports/nightly.sql\`.`;
+
+export const FIXTURE_TURNS = { [`${SID}:17`]: T17, [`${SID}:12`]: T12, [`${SID}:14`]: T14, [`${SIDB}:1`]: TB1, [`${SID2}:4`]: T4_CODEX, [`${SID}:6`]: T6 };
 
 export function demoData(now = Date.now()) {
   const min = 60e3, day = 86400e3;
@@ -178,7 +187,7 @@ export function demoData(now = Date.now()) {
     pins,
     sessions: {
       [SID]: sess(SID, { agent: "claude-code", terminal: "t21", sessionName: "shop-api migration", cwd: "/Users/example/src/shop-api", repo: "shop-api", transcriptPath: null, turn: 18, state: "working",
-        compactions: [{ turn: 16, at: now - 60 * min, trigger: "auto" }], nextHandle: { A: 16, Q: 10, P: 4 } }),
+        compactions: [{ turn: 16, at: now - 60 * min, trigger: "auto" }], nextHandle: { A: 18, Q: 10, P: 4 }, archived: 3 }),
       [SID2]: sess(SID2, { agent: "codex", terminal: "t27", sessionName: "release notes", cwd: "/Users/example/src/shop-web", repo: "shop-web", turn: 4, state: "idle", surfaced: true, updatedAt: now - 120e3,
         nextHandle: { A: 2, Q: 2, P: 2 }, pending: { turn: 4, at: now + 365 * day } }),   // demo only: never times out
       [SID3]: sess(SID3, { agent: "claude-code", terminal: "t25", sessionName: "flaky test hunt", cwd: "/Users/example", repo: null, turn: 9, state: "ended", updatedAt: now - day }),
@@ -217,6 +226,33 @@ export function demoData(now = Date.now()) {
 export const DEMO_SESSION = SID;
 // The demo item `ledgr.demo-detail` opens the dialog on when no handle is given (a blocking decide).
 export const DEMO_DETAIL = "A15";
+
+// The demo's archive (retention, 2026-11-19), as the files reader.js loadArchive would read under
+// ledgr-data/archive/: {sessions: {[sid]: [{name, text}]}, legacy: [{name, text}]}. The demo session's three
+// (its `archived: 3`): Ask 16 (a decide, answered by you, its message in turn 6), Ask 17 (not needed in the
+// first file; closed by the agent in the second, newer file, whose line wins) and Question 1 (cleared). The
+// names are fixed (an items file's <ms> and <rand6>), so the panel's rows and the dialog read the same files.
+export const DEMO_ARCHIVE_FILES = ["items-1794700000000-q7w2e9.jsonl", "items-1794790000000-m3k8z1.jsonl"];
+export function demoArchive(now = Date.now()) {
+  const min = 60e3, day = 86400e3;
+  const item = (o) => ({ key: o.id, origin: o.direction === "human_to_agent" ? "capture" : "extract_block", terminal: "t21", seq: 1, createdTurn: o.turn,
+    ...o, anchor: { sessionId: SID, turn: o.turn, uuid: null, quote: o.quote ?? null, quoteSource: o.quote ? "block" : undefined, hash: passageHash(o.quote || o.text), settled: true } });
+  const strip = (it) => { const c = { ...it }; delete c.turn; delete c.quote; return c; };
+  const a16 = item({ id: "rq_demo_a16", handle: "A16", direction: "agent_to_human", kind: "decide", level: "needed", turn: 6,
+    text: "Choose where the nightly report reads from", options: ["the read replica", "the primary"], recommended: "the read replica",
+    quote: "Should the nightly report read from the replica or the primary?", draft: "the read replica", answer: "the read replica", answeredBy: "sheet", answeredTurn: 7,
+    status: "resolved", resolvedBy: "answer", resolvedTurn: 7, createdAt: now - 6 * day, updatedAt: now - 6 * day + 20 * min, resolvedAt: now - 6 * day + 20 * min });
+  const a17 = item({ id: "rq_demo_a17", handle: "A17", direction: "agent_to_human", kind: "confirm", level: "needed", turn: 8,
+    text: "Shall I delete the old pgbouncer.ini backup in /etc/pgbouncer?", status: "dismissed", resolvedTurn: 8,
+    createdAt: now - 5 * day, updatedAt: now - 5 * day + 5 * min, resolvedAt: now - 5 * day + 5 * min });
+  const a17b = { ...a17, status: "resolved", resolvedBy: "agent", resolvedNote: "closed by the agent at turn 9", resolvedTurn: 9,
+    updatedAt: now - 5 * day + 40 * min, resolvedAt: now - 5 * day + 40 * min };
+  const q1 = item({ id: "rq_demo_q1", handle: "Q1", direction: "human_to_agent", kind: "question", turn: 5,
+    text: "Does the replica lag matter for the 6 am report?", status: "dismissed", dismissedBy: "clear", clearedAt: now - 4 * day, resolvedTurn: 9,
+    createdAt: now - 6 * day - 30 * min, updatedAt: now - 4 * day, resolvedAt: now - 4 * day });
+  const lines = (...xs) => `${xs.map((x) => JSON.stringify(strip(x))).join("\n")}\n`;
+  return { sessions: { [SID]: [{ name: DEMO_ARCHIVE_FILES[0], text: lines(a16, a17, q1) }, { name: DEMO_ARCHIVE_FILES[1], text: lines(a17b) }] }, legacy: [] };
+}
 
 // The settings dialog's demo (settings.js, 2026-11-10): two spaces Herdr has, the first one the focused
 // pane's, ledgr off in the second, and an off space Herdr no longer has (shown by its id, with Drop).

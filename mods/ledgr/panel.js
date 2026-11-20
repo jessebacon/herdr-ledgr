@@ -52,6 +52,12 @@
 // memory: nothing is read or posted while typing). Checkboxes gather pins from any session into a
 // selection (pinSel, at most LIMITS.pinsPerQuestion); Ask about these… opens the capture box in pins
 // mode (props.pins, props.then); a pin's dialog carries the selection when the pin is in it.
+// The archive (retention, 2026-11-19): closed asks and questions past retention_days leave store.json for
+// ledgr-data/archive/ (the writer's housekeeping); the CLOSED fold ends with "archived (N) · show" (N: the
+// store's count for the session until the archive is read). Shown, the rows are read back (Reader
+// loadArchive) and listed below it, state word "archived", dim, no quick action; the cursor and the list's
+// keys work on them as on any row, and a click or Enter opens the dialog read-only on the record
+// (props.archived: its file), whose one action is Reopen.
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Popup, ScrollHandle } from "gpui-base";
 import { theme, props, shared, setShared, focused, run, openOverlay, closeOverlay, agents, panes, spaces, home } from "herdr";
@@ -63,11 +69,12 @@ import { Writer, writerClaim, claimStuck, engineDrift, fallbackDead, writerWante
 import { isLive } from "./nav.js";
 import { demoData, DEMO_SESSION } from "./fixtures.js";
 import { THRESHOLD_WORDS, itemWords as H, paneWords as P, sessionWords, stageLabels, clearLabel, clearConfirm, clearedWords, OFF_HERE, spaceToggleWords, handleWords,
-  pinsWords, PINS_EMPTY, pinsSearchEmpty, pinsSelectedWords, askAboutPinsWords, pinNameWords, pinLabel, writerHealthWords, NO_WRITER } from "./words.js";
+  pinsWords, PINS_EMPTY, pinsSearchEmpty, pinsSelectedWords, askAboutPinsWords, pinNameWords, pinLabel, writerHealthWords, NO_WRITER,
+  archivedLineWords, ARCHIVED_LINE_TIP, ARCHIVE_READING, archiveEmptyWords, archiveFailedWords } from "./words.js";
 import { loadAdapters, adapterOf, asksMode } from "./adapters.js";
 import { thenRequest, thenStale } from "./pinning.js";
-import { Reader } from "./reader.js";
-import { rowModel, entryKey, moveCursor, keepPlace, ROW } from "./listing.js";
+import { Reader, ARCHIVE_RETRY_MS } from "./reader.js";
+import { rowModel, entryKey, moveCursor, keepPlace, ROW, archivedCount } from "./listing.js";
 import { detailSpec, settingsSpec } from "./detailing.js";
 
 const ICON = (n) => `mods/workspace-chrome/${n}.svg`;
@@ -169,6 +176,11 @@ export class Panel extends Reader {
     this.pinArchToo = false;
     this.pinHereOnly = false;
     this.thenReq = null;
+    // The archive (retention, 2026-11-19): the sessions whose archived rows are shown under CLOSED (per
+    // session, in memory, as the other folds), and each session's rows as read: {list, count, loading, error}
+    // (count: session.archived when the read started; list null until the first read ends).
+    this.archShown = new Set();
+    this.archRows = new Map();
     this.pinSearch = InputState.new({ placeholder: "Search pins, every session" });
     this.pinSearch.on("change", (_e, cx) => { this.pinQuery = this.pinSearch.value(); cx.notify(); });
     this.pinSearch.on("submit", (_e, cx) => { this.searchSubmit(cx); cx.notify(); });
@@ -262,7 +274,7 @@ export class Panel extends Reader {
       if (this.demo && !FORCE_DEMO) {
         if (this.detailId) this.closeDetail();
         this.demo = false; this.demoStore = null; this.flash = ""; this.prevCls = null; this.cursor = null;
-        this.pinSel.clear(); this.thenReq = null;
+        this.pinSel.clear(); this.thenReq = null; this.archRows.clear();
         // A threshold picked in the demo was held in memory only: read config.json again.
         cx.spawn(async (cx) => { this.cfg = await loadConfig(); this.obsVer = undefined; cx.notify(); });
       } else this.enterDemo();
@@ -311,6 +323,13 @@ export class Panel extends Reader {
     }
     // For scripted looks at the lower lane: fold or unfold a lane.
     else if (c === "fold-mine") this.setCollapsed("mine", !this.collapsed.mine);
+    // `archived` (retention, 2026-11-19): CLOSED open, the shown session's archived rows shown or hidden, as
+    // its line's click does.
+    else if (c === "archived") {
+      const st = this.viewStore(), sid = this.current(st);
+      if (!sid) this.flash = "No session shown.";
+      else { this.folds.closed = true; if (this.archShown.has(sid)) this.archShown.delete(sid); else this.archShown.add(sid); }
+    }
     // `pick:<handle>:<n>` posts option n (from 0) of that ask as its answer; `copy-answer:<handle>` is its
     // Paste answer (Copy answer when ui.pasteIntoPrompt is off). The dialog open on that ask does both.
     else if (c.startsWith("pick:") || c.startsWith("copy-answer:")) {
@@ -327,7 +346,7 @@ export class Panel extends Reader {
     else if (c.startsWith("open:") || c.startsWith("cursor:")) {
       const st = this.viewStore(), sid = this.current(st), h = c.slice(c.indexOf(":") + 1), r = this.resolveHandle(st, sid, h);
       if (!r) this.flash = `No ${h} in this session.`;
-      else if (c.startsWith("open:")) this.openDetail(r.kind, r.id, r.sid, {}, cx);
+      else if (c.startsWith("open:")) this.openDetail(r.kind, r.id, r.sid, r.archived ? { archived: r.archived } : {}, cx);
       else { this.focusList(); this.cursor = entryKey(r.kind, r.id); this.reveal(this.cursor); }
     }
     // `list-key:<up|down|pageup|pagedown|home|end|enter|space|escape>`: the list's keys, for scripted
@@ -355,7 +374,7 @@ export class Panel extends Reader {
       const it = r && r.kind !== "pin" && r.kind !== "branch" ? st.item(r.id) : null;
       if (!r) this.flash = `No ${h} in this session.`;
       else if (kind === "ask-here" && (!it || !isHuman(it) || !st.pinsOf(it).length)) this.flash = `No question ${h} with pins in this session.`;
-      else if (!this.detailOn(r.id)) this.openDetail(r.kind, r.id, r.sid, { open: kind === "menu" ? (which === "defer" ? "defer" : "more") : kind }, cx);
+      else if (!this.detailOn(r.id)) this.openDetail(r.kind, r.id, r.sid, { open: kind === "menu" ? (which === "defer" ? "defer" : "more") : kind, archived: r.archived ?? null }, cx);
     }
     else if (c === "fold-asks") { const st = this.viewStore(), sid = this.current(st), s = sid ? st.d.sessions[sid] : null; if (s) this.setAsksOpen(s, !this.asksOpen(s)); }
     // Closes the open dialog and clears the cursor.
@@ -440,13 +459,17 @@ export class Panel extends Reader {
   }
 
   // A handle of the shown session (A3, Q2, P4) or a branch's hc name (br-q3-7c1e, or its id): {kind, id,
-  // sid} (the record's own session) or null.
+  // sid} (the record's own session) or null. An ask or question no longer in the store is looked for among
+  // the session's archived rows as last read (shown under CLOSED): then `archived` names its file.
   resolveHandle(st, sid, h) {
     const k = String(h ?? "").trim();
     if (!st || !k) return null;
     if (/^\[?[AQ]\d+\]?$/i.test(k)) {
       const it = sid ? st.byHandle(sid, k) : null;
-      return it ? { kind: isAgentAsk(it) ? "ask" : "question", id: it.id, sid: it.anchor?.sessionId ?? sid } : null;
+      if (it) return { kind: isAgentAsk(it) ? "ask" : "question", id: it.id, sid: it.anchor?.sessionId ?? sid };
+      const want = k.replace(/[[\]]/g, "").toUpperCase();
+      const rec = sid ? (this.archRows.get(sid)?.list ?? []).find((r) => String(r.handle ?? "").toUpperCase() === want && !st.item(r.id)) : null;
+      return rec ? { kind: isAgentAsk(rec) ? "ask" : "question", id: rec.id, sid: rec.anchor?.sessionId ?? sid, archived: rec.archiveFile } : null;
     }
     if (/^\[?P\d+\]?$/i.test(k)) {
       const p = sid ? st.pinByHandle(sid, k) : null;
@@ -462,6 +485,7 @@ export class Panel extends Reader {
     this.demoStore = new Store(demoData());
     this.override = null;
     this.cursor = null;
+    this.archRows.clear();
     this.flash = "Demo data: nothing here is saved or sent.";
     this.asksManual = { sid: DEMO_SESSION, stopAt: this.demoStore.d.sessions[DEMO_SESSION]?.lastStopAt ?? 0, open: true };
   }
@@ -776,13 +800,14 @@ export class Panel extends Reader {
 
   // The detail dialog (detail.js, its own copy of ledgr) on one item, pin or branch (1.8); the open one,
   // if any, is closed first. o.open: a state the dialog applies once after it loads (detailing.js
-  // OPEN_STATES). A pin in the selection carries the whole selection (props.sel). From a handler or a
-  // timer, never from render. The demo dialog builds its own demo store.
+  // OPEN_STATES). A pin in the selection carries the whole selection (props.sel). o.archived: an archived
+  // row's file (the dialog reads the record from the archive, read-only). From a handler or a timer, never
+  // from render. The demo dialog builds its own demo store.
   openDetail(kind, id, sid, o = {}, cx) {
     const st = this.viewStore();
     this.closeDetail();
     const sel = kind === "pin" && this.pinSel.has(id) ? this.selPins(st).map((p) => p.id) : [];
-    this.detailId = openOverlay(detailSpec({ session: sid, kind, id, open: o.open ?? null, sel, opener: this.panelId, demo: this.demo }));
+    this.detailId = openOverlay(detailSpec({ session: sid, kind, id, open: o.open ?? null, sel, opener: this.panelId, demo: this.demo, archived: o.archived ?? null }));
     this.cursor = entryKey(kind, id);
     this.reveal(this.cursor);
     this.flash = "";
@@ -855,9 +880,13 @@ export class Panel extends Reader {
     // A pin opens in the shown session (spec 1.8): a question built from it parks there, even from search.
     const sid = m.kind === "pin" ? s.sessionId : (m.sessionId ?? s.sessionId);
     // A second drawing of the same row (a child question also in its lane) is no entry: not the cursor.
-    this.put(out, this.listRow(t, st, s, m, x, { ...o, dup: this.entrySeen.has(m.key) }), m.key, (cx) => this.openDetail(m.kind, m.id, sid, {}, cx),
+    this.put(out, this.listRow(t, st, s, m, x, { ...o, dup: this.entrySeen.has(m.key) }), m.key, (cx) => this.openDetail(m.kind, m.id, sid, this.openOf(x), cx),
       m.kind === "pin" ? () => this.togglePinSel(st, x) : null);
   }
+
+  // How a row's dialog opens: an archived record (retention, 2026-11-19) names its archive file, so the
+  // dialog reads it from there, read-only.
+  openOf(x) { return x?.archiveFile ? { archived: x.archiveFile } : {}; }
 
   // The row: one line, h(26). A pin's checkbox; the glyph (a pin, a branch's icon or spinner); the handle
   // in words; one pill; the text's first line; the state word (left out when Paste answer is the
@@ -902,7 +931,7 @@ export class Panel extends Reader {
       .when(!inert && !open && !cur, (el) => el.hover((y) => y.bg(t.hover)))
       .when(Boolean(m.tip), (el) => el.tooltip(m.tip))
       .when(!inert, (el) => el.cursor_pointer()
-        .on_click((_e, cx) => { this.focusList(); this.openDetail(m.kind, m.id, m.kind === "pin" ? s.sessionId : (m.sessionId ?? s.sessionId), {}, cx); })
+        .on_click((_e, cx) => { this.focusList(); this.openDetail(m.kind, m.id, m.kind === "pin" ? s.sessionId : (m.sessionId ?? s.sessionId), this.openOf(x), cx); })
         .on_hover((on, cx) => this.hoverRow(m.key, on, cx)))
       .when(!inert && isItem && this.animOn(), (el) => el.on_mouse_move((e) => { const h = e?.bounds?.height; if (h > 0) this.rowH.set(m.id, { h, at: Date.now() }); }))
       .when(f?.kind === "enter", (el) => el.opacity(f.phase ? 1 : 0).top(f.phase ? 0 : -6).transition("opacity", ease(200)).transition("top", ease(260)))
@@ -1556,8 +1585,61 @@ export class Panel extends Reader {
       rule();
       put(div().px(4).py(2).text_size(t.ts(10.5)).font_semibold().text_color(t.dim).child(`${title} (${list.length})`));
       for (const it of list) this.rowEntry(out, t, st, s, "item", it);
+      if (key === "closed") this.archivedLines(out, t, st, s);
     }
     return out;
+  }
+
+  // ── the archive (retention, 2026-11-19) ──────────────────────────────
+  // CLOSED's last line, "archived (N) · show": N is the store's count for the session (session.archived)
+  // until its archive is read, then the rows read (listing.js archivedCount: the legacy month files' rows
+  // included, which no count holds; the store's ids left out; none read: the count, and a note says why).
+  // Hidden at 0, unless the archive holds rows anyway: at count 0 it is read once (cheap: no folder, or only
+  // legacy files) to find out. A click or Enter shows or hides the rows below it (per session); shown, the
+  // archive is read, and read again when the count changes. Each row is an item row, state "archived", dim,
+  // with no quick action: a click or Enter opens the dialog read-only on it (openOf: props.archived).
+  // Reading: "Reading the archive…"; nothing read: why.
+  archivedLines(out, t, st, s) {
+    const sid = s.sessionId, count = archivedCount(s.archived), a = this.archRows.get(sid) ?? null, shown = this.archShown.has(sid);
+    // Read when shown (or to learn whether a count of 0 hides legacy rows), when the count moved, and again
+    // ARCHIVE_RETRY_MS after a read that failed or got no answer (readArchive is bounded).
+    if ((shown || !count) && !a?.loading && (!a || a.count !== count || (a.error && Date.now() >= (a.retryAt ?? 0)))) this.readArchive(sid, count);
+    // Rows read for another count are kept on screen while shown (read again meanwhile); hidden, the count says it.
+    const list = a?.list && (shown || a.count === count) ? a.list.filter((r) => !st.item(r.id)) : null;
+    const n = archivedCount(count, list);
+    if (!n) return;
+    const tog = () => { if (shown) this.archShown.delete(sid); else this.archShown.add(sid); };
+    this.put(out, div().id("arch-items").flex_none().px(6).py(2).text_size(t.ts(11)).text_color(t.dim).cursor_pointer().rounded(5)
+      .when(this.isCur("arch:items"), (el) => el.bg(t.selected)).tooltip(ARCHIVED_LINE_TIP)
+      .hover((x) => x.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => { this.focusList(); tog(); cx.notify(); })
+      .child(archivedLineWords(n, shown)), "arch:items", () => tog());
+    if (!shown) return;
+    const note = (w) => this.put(out, div().id("arch-note").px(6).py(3).text_size(t.ts(11.5)).text_color(t.dim).child(w));
+    if (a?.error && !list?.length) return note(archiveFailedWords(a.error));
+    if (!list) return note(ARCHIVE_READING);
+    if (!list.length) return note(archiveEmptyWords(count));
+    for (const r of list) this.rowEntry(out, t, st, s, "item", r);
+  }
+
+  // Reads a session's archive (Reader readArchiveWithin: loadArchive, at most ARCHIVE_READ_MS) in a task:
+  // started from render, so through a timer (as the panel's other reads); the rows already read stay shown
+  // meanwhile. count: session.archived now (a change reads it again). A read that failed or got no answer
+  // keeps its error (the line says it) and is tried again after ARCHIVE_RETRY_MS.
+  readArchive(sid, count) {
+    const prev = this.archRows.get(sid) ?? null;
+    const job = { list: prev?.list ?? null, count, loading: true, error: null, retryAt: 0 };
+    this.archRows.set(sid, job);
+    const cx = this.rcx;
+    if (!cx) { this.archRows.delete(sid); return; }
+    cx.timer.after(0, (cx) => cx.spawn(async (cx) => {
+      try { job.list = await this.readArchiveWithin(sid, cx); }
+      catch (e) {
+        job.error = String(e?.message ?? e); job.retryAt = Date.now() + ARCHIVE_RETRY_MS;
+        try { cx.timer.after(ARCHIVE_RETRY_MS + 50, (cx) => cx.notify()); } catch { /* the next render retries */ }
+      }
+      job.loading = false;
+      cx.notify();
+    }));
   }
 
   // Asks below the threshold: one folded line at the bottom of the turn group, "below threshold (N)";

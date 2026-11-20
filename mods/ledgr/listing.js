@@ -3,7 +3,9 @@
 // the quick actions), and the keyboard cursor over the list's entries (moveCursor, keepPlace). Pure: no
 // Herdr, no gpui, nothing read or written; the panel draws the model, and the detail dialog's sub-rows
 // (views.js subRow) draw the same one. Tones are theme() color names ("accent", "dim", …), never
-// colors. Not an engine file.
+// colors. The archive's reading rule (retention, 2026-11-19: archiveRecords) is here too, so the panel's
+// archived rows and the dialog's archived record are read the same way (reader.js loadArchive reads the
+// files; this decides which line counts). Not an engine file.
 import { isAgentAsk, isHuman, isClosed, isSuggestion, isBlocking, levelOf } from "./store.js";
 import { handleWords, branchWords, agoWords, pinsWords } from "./words.js";
 
@@ -91,6 +93,8 @@ export function stateOf(kind, x, ctx = {}) {
     const live = liveOf(x, ctx);
     return w(BR_WORD[live] ?? live ?? "?", BR_TONE[live] ?? "muted");
   }
+  // An item read back from the archive (archiveRecords marks it with its file): out of the list, under Closed.
+  if (x?.archiveFile) return w("archived", "dim");
   const it = x ?? {};
   if (it.status === "resolved") {
     if (it.resolvedBy === "branch") return w("resolved by branch", "done");
@@ -171,6 +175,12 @@ export function rowModel(kind, x, ctx = {}) {
     else if (it.kind === "bookmark") pill = { text: "bookmark", tone: "dim" };
     else if (it.origin === "btw" || it.btwStagedAt) pill = { text: "/btw", tone: "muted" };
   }
+  // An archived record (archiveRecords) is read-only: no quick action; its dialog offers Reopen alone.
+  if (it.archiveFile) {
+    return { key: entryKey(k, it.id), kind: k, id: it.id, sessionId: it.anchor?.sessionId ?? null, handle: handleWords(it.handle), pill,
+      text: itemText(it), state: stateOf(k, it, ctx), glyph: [...glyphOf(it, sug), null], quick: { ...none }, drafted: false, archived: true,
+      tip: [tipOf(it.text, it.anchor?.quote, null), "Archived: out of the list; its dialog reads it and can reopen it."].filter(Boolean).join("\n") };
+  }
   const drafted = ask && draftPending(it);
   const tip = tipOf(it.text, it.anchor?.quote, null);
   return { key: entryKey(k, it.id), kind: k, id: it.id, sessionId: it.anchor?.sessionId ?? null, handle: handleWords(it.handle), pill,
@@ -179,19 +189,99 @@ export function rowModel(kind, x, ctx = {}) {
     drafted, tip: drafted ? [tip, `Your answer, not sent yet: ${cut(squash(it.draft), 120)}`].filter(Boolean).join("\n") : tip };
 }
 
+// ── the archive (retention, 2026-11-19) ──────────────────────────────────
+// What housekeeping moved out of store.json (writer.js housekeep): closed items, one JSON line each (the
+// item exactly as it was in the store), in files written once and never again. A session's are
+// ledgr-data/archive/<sid>/items-<ms>-<rand6>.jsonl (<sid>: spool.js archiveDir, as bin/lib safe_name names
+// it); the legacy ledgr-data/archive/<yyyy-mm>.jsonl hold any session's. A turns-*.jsonl file holds turn
+// records, not items, and is never read here. The names' shapes are spool.js ARCHIVE_ITEMS and
+// ARCHIVE_LEGACY (the writer's own, which it checks a restore event's file against): the caller passes
+// them in, since this module stays pure (no herdr).
+// When an item was closed (what the archive sorts by, newest first, and the dialog says).
+export const closedAtOf = (it) => Number(it?.resolvedAt ?? it?.updatedAt) || 0;
+
+// A file's place in time, by its name's shape (items, legacy: the two patterns): a legacy month file is
+// older than every items file (the old housekeeping wrote them before the first items file), a later month
+// newer (the names sort by month); items files by their <ms>, then name. null: neither shape.
+const fileOrder = (name, items, legacy) => {
+  if (items?.test(name)) return [1, Number(/^items-(\d+)-/.exec(name)?.[1]) || 0, name];
+  return legacy?.test(name) ? [0, 0, name] : null;
+};
+const byOrder = (a, b) => a.o[0] - b.o[0] || a.o[1] - b.o[1] || (a.o[2] < b.o[2] ? -1 : a.o[2] > b.o[2] ? 1 : 0);
+
+// An archive file's text as records: {records, skipped}, its lines in order, each an object with a string id
+// and an item's direction; a line that is not JSON, or not such an object, counted in `skipped`. What
+// archiveRecords reads a file's text with, and what a reading copy keeps per file name (reader.js
+// loadArchive: an items file is written once, so it is parsed once).
+export function parseArchiveText(text) {
+  const records = [];
+  let skipped = 0;
+  for (const line of String(text ?? "").split("\n")) {
+    if (!line.trim()) continue;
+    let it;
+    try { it = JSON.parse(line); } catch { skipped++; continue; }
+    if (!it || typeof it !== "object" || Array.isArray(it) || typeof it.id !== "string" || !it.id
+      || (it.direction !== "agent_to_human" && it.direction !== "human_to_agent")) { skipped++; continue; }
+    records.push(it);
+  }
+  return { records, skipped };
+}
+
+// The reading rule every reader keeps (the contract of 2026-11-19): an id the store holds wins over any
+// archive line (has(id) true: left out); among the lines for one id, the one in the newest file wins, the
+// last line of it. files: [{name, text}] (or {name, parsed}: parseArchiveText's result) in any order (a
+// session's items files and the legacy month files; a name of neither shape (items, legacy: spool.js
+// ARCHIVE_ITEMS, ARCHIVE_LEGACY) is skipped; text null: a file that could not be read). A line that is not JSON, or not an object with a string id and an item's
+// direction, is skipped and counted (the result's `skipped`); a line whose anchor.sessionId is not
+// sessionId is left out, in every file (a legacy file holds every session's, and two session ids may name
+// one folder), as the writer's own read of a restore event leaves it out (spool.js archivedRecord). Returns
+// the records newest first (closed last, first: closedAtOf), each a copy of the item with `archiveFile`,
+// the name a restore event sends back.
+export function archiveRecords(files, { sessionId = null, has = () => false, items = null, legacy = null } = {}) {
+  const list = (Array.isArray(files) ? files : []).map((f) => ({ f, o: fileOrder(String(f?.name ?? ""), items, legacy) })).filter((x) => x.o).sort(byOrder);
+  const won = new Map();
+  let skipped = 0;
+  for (const { f } of list) {
+    // A file as text, or already parsed (f.parsed: parseArchiveText's result, kept by the reading copy).
+    const p = f.parsed && Array.isArray(f.parsed.records) ? f.parsed : typeof f.text === "string" ? parseArchiveText(f.text) : null;
+    if (!p) continue;
+    skipped += Number(p.skipped) || 0;
+    for (const it of p.records) {
+      // Another session's line, or one naming none: the writer would not restore it from this file.
+      if (sessionId && it.anchor?.sessionId !== sessionId) continue;
+      won.set(it.id, { ...it, archiveFile: f.name });
+    }
+  }
+  const out = [...won.values()].filter((r) => !has(r.id))
+    .sort((a, b) => closedAtOf(b) - closedAtOf(a) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  out.skipped = skipped;
+  return out;
+}
+
+// The Closed fold's last line counts (panel.js): the archived rows once read (the store's ids left out,
+// the legacy month files' rows included, which no count holds), else the store's count for the session
+// (session.archived; absent: 0), also when nothing could be read (the line stays, and says so below it).
+export function archivedCount(count, list = null) {
+  if (Array.isArray(list) && list.length) return list.length;
+  return Math.max(0, Math.floor(Number(count) || 0));
+}
+
 // ── the panel's lanes as sequences (the dialog's previous and next, 2026-11-11) ──
 // The record ids of the lane x is drawn in, in the order panel.js draws them (body, pinsLane,
 // suggestions), whatever is folded there: the asks lane by turn, newest first, each turn's asks blocking
 // first then in the message's order, then its asks below the threshold; YOUR QUESTIONS newest first; the
 // session's branches newest first (a refused or failed one an hour old is not drawn); a session's pins
 // newest first, the archived ones apart; the OLDER THAN A DAY, DEFERRED and CLOSED folds, asks and
-// questions together, the most recently changed first. Child questions are in YOUR QUESTIONS only.
-// {lane, ids}: lane "asks", "mine", "branches", "pins", "archived", "older", "deferred", "closed", or
-// null (nothing to step through). opts: {threshold, now}.
-export function laneOf(store, kind, x, { threshold, now = Date.now() } = {}) {
+// questions together, the most recently changed first. Child questions are in YOUR QUESTIONS only. An
+// archived record (archiveFile, retention 2026-11-19): the Closed fold's archived rows, as read (opts.archive,
+// archiveRecords' order: newest first; without it, the record alone).
+// {lane, ids}: lane "asks", "mine", "branches", "pins", "archived", "older", "deferred", "closed",
+// "archive", or null (nothing to step through). opts: {threshold, now, archive}.
+export function laneOf(store, kind, x, { threshold, now = Date.now(), archive = null } = {}) {
   if (!store || !x) return { lane: null, ids: [] };
   const k = rowKind(x, kind);
   const ids = (list) => list.map((r) => r.id);
+  if (x.archiveFile && (k === "ask" || k === "question")) return { lane: "archive", ids: ids(Array.isArray(archive) && archive.some((r) => r?.id === x.id) ? archive : [x]) };
   if (k === "pin") {
     const archived = x.status === "archived";
     return { lane: archived ? "archived" : "pins", ids: ids(store.pinsIn(x.sessionId, { archived })) };

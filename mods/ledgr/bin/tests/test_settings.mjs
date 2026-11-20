@@ -235,18 +235,29 @@ try {
   A.match(fs.readFileSync(path.join(MOD, "bin/lib/ledgr_config.py"), "utf8"), /"links": \{"editor": "open"\}/, "ledgr_config.py mirrors links.editor: open");
 
   // ── the rows ───────────────────────────────────────────────────────────
-  A.deepEqual(S.SETTING_KEYS, ["textScale", "threshold", "handoff", "pasteIntoPrompt", "animations", "foldAsksWhileWorking", "openPanelOnAsks", "maxDepth", "editor", "spaces"], "the rows in the dialog's order");
+  A.deepEqual(S.SETTING_KEYS, ["textScale", "threshold", "handoff", "pasteIntoPrompt", "animations", "foldAsksWhileWorking", "openPanelOnAsks", "retentionDays", "maxDepth", "editor", "spaces"], "the rows in the dialog's order (Closed items stay in the list with the list's rows, 2026-11-19)");
   for (const k of S.SETTING_KEYS) { A.ok(Array.isArray(W.SETTING_WORDS[k]) && W.SETTING_WORDS[k][0] && W.SETTING_WORDS[k][1].length > 20, `${k}: a label and a line in words.js`); A.ok(S.SETTING_PATHS[k], `${k}: its config.json path`); }
   const rows0 = S.settingRows(C.DEFAULTS, []);
   A.deepEqual(rows0.map((r) => r.key), S.SETTING_KEYS);
   A.deepEqual(Object.fromEntries(rows0.map((r) => [r.key, r.value])), { textScale: 1, threshold: "needed", handoff: "ledgr", pasteIntoPrompt: true, animations: true,
-    foldAsksWhileWorking: false, openPanelOnAsks: false, maxDepth: 2, editor: "open", spaces: [] }, "the defaults' values");
-  A.equal(rows0[0].label, "Text scale"); A.equal(rows0[2].label, "Who owns the closing list"); A.equal(rows0[8].label, "Open files with"); A.equal(rows0[8].path, "links.editor");
-  A.equal(rows0[9].path, "spaces.disabled");
+    foldAsksWhileWorking: false, openPanelOnAsks: false, retentionDays: S.clampDays(C.DEFAULTS.retention_days), maxDepth: 2, editor: "open", spaces: [] }, "the defaults' values");
+  A.equal(rows0[0].label, "Text scale"); A.equal(rows0[2].label, "Who owns the closing list"); A.equal(rows0[9].label, "Open files with"); A.equal(rows0[9].path, "links.editor");
+  A.equal(rows0[10].path, "spaces.disabled");
+  // Closed items stay in the list (retention_days, 2026-11-19): 1 to 30 days, its one line in words.
+  A.equal(rows0[7].label, "Closed items stay in the list"); A.equal(rows0[7].path, "retention_days");
+  A.ok(rows0[7].words.startsWith("After that they move under Closed, archived, where they can still be read and reopened"), "its line: where they go and that they can be read and reopened");
+  A.deepEqual(S.RETENTION, { min: 1, max: 30 });
+  A.equal(S.retentionDaysOf({ retention_days: 5 }), 5); A.equal(S.retentionDaysOf({ retention_days: "7" }), 7, "a numeric string");
+  A.equal(S.retentionDaysOf({ retention_days: 45 }), 30, "a hand-written 45 reads as 30, as the store and the writer read it (config.js retentionDays)");
+  A.equal(S.retentionDaysOf, C.retentionDaysOf, "one reading of retention_days (config.js)");
+  A.equal(S.retentionDaysOf({ retention_days: 2.6 }), 3, "rounded");
+  for (const low of [0, -3, 0.4, 0.5]) A.equal(S.retentionDaysOf({ retention_days: low }), 1, `${low}: one day, never "archive at once"`);
+  for (const bad of ["x", null, undefined, {}, true, false, ""]) A.equal(S.retentionDaysOf({ retention_days: bad }), S.clampDays(C.DEFAULTS.retention_days), `${JSON.stringify(bad)}: the default`);
+  A.equal(S.clampDays(0), 1); A.equal(S.clampDays(31), 30); A.equal(S.clampDays(12.4), 12); A.equal(S.clampDays("x"), 1);
   const cfgX = { ...C.DEFAULTS, instruct_block: false, extract: { threshold: "BLOCKING" }, ui: { textScale: 7, pasteIntoPrompt: false, animations: false, foldAsksWhileWorking: true },
-    surface: { openPanelOnAsks: true }, branch: { maxDepth: 6 }, links: { editor: "  ZED " } };
+    surface: { openPanelOnAsks: true }, branch: { maxDepth: 6 }, links: { editor: "  ZED " }, retention_days: 9 };
   A.deepEqual(Object.fromEntries(S.settingRows(cfgX, []).filter((r) => r.key !== "spaces").map((r) => [r.key, r.value])), { textScale: 1.6, threshold: "blocking", handoff: "prose",
-    pasteIntoPrompt: false, animations: false, foldAsksWhileWorking: true, openPanelOnAsks: true, maxDepth: 6, editor: "zed" }, "values read as the mod and the hooks read them (instruct_block false is prose)");
+    pasteIntoPrompt: false, animations: false, foldAsksWhileWorking: true, openPanelOnAsks: true, retentionDays: 9, maxDepth: 6, editor: "zed" }, "values read as the mod and the hooks read them (instruct_block false is prose)");
   A.equal(S.settingRows({ links: { editor: "subl {path}:{line}" } }, []).find((r) => r.key === "editor").value, "subl {path}:{line}", "a command of your own, as written");
   A.equal(S.settingRows({ links: { editor: 7 } }, []).find((r) => r.key === "editor").value, "open", "anything else is the default");
   A.equal(W.THRESHOLD_WORDS.needed, "blocking + needed", "the threshold's words");
@@ -272,6 +283,12 @@ try {
   A.deepEqual(ed("foldAsksWhileWorking", true), { ui: { foldAsksWhileWorking: true } }); A.deepEqual(ed("openPanelOnAsks", true), { surface: { openPanelOnAsks: true } });
   A.equal(S.editFor("animations", "yes"), null, "a switch takes a boolean only");
   A.deepEqual(ed("maxDepth", 3), { branch: { maxDepth: 3 } }); A.deepEqual(ed("maxDepth", 9), { branch: { maxDepth: 4 } }, "0 to 4 here"); A.deepEqual(ed("maxDepth", -2), { branch: { maxDepth: 0 } });
+  A.deepEqual(ed("retentionDays", 5, { ui: { animations: false } }), { ui: { animations: false }, retention_days: 5 }, "retention_days written at the top level, other keys kept");
+  A.deepEqual(ed("retentionDays", 0), { retention_days: 1 }, "at least a day"); A.deepEqual(ed("retentionDays", 99), { retention_days: 30 }, "at most 30");
+  A.deepEqual(ed("retentionDays", "12"), { retention_days: 12 }); A.deepEqual(ed("retentionDays", 6.6), { retention_days: 7 });
+  for (const bad of ["x", "", null, true, {}]) A.equal(S.editFor("retentionDays", bad), null, `refused: ${JSON.stringify(bad)}`);
+  A.match(S.savedLine("retentionDays", 5), /^Closed items stay in the list: 5 days \(retention_days in ledgr-data\/config\.json\)\.$/);
+  A.match(S.savedLine("retentionDays", 1), /: 1 day \(/); A.match(S.savedLine("retentionDays", 40), /: 30 days \(/);
   A.deepEqual(ed("spaces", { id: SA, off: true }, { spaces: { disabled: [SB] } }), { spaces: { disabled: [SB, SA] } });
   A.deepEqual(ed("spaces", { id: SB, off: false }, { spaces: { disabled: [SB, SA] } }), { spaces: { disabled: [SA] } });
   A.deepEqual(ed("spaces", { id: SZ, drop: true }, { spaces: { disabled: [SZ, SA] } }), { spaces: { disabled: [SA] } }, "Drop takes a stale id out");
@@ -397,6 +414,15 @@ try {
       A.deepEqual(L.openerArgv(cfgFile().links.editor, { path: "/r/a.js", line: 3 }).argv, ["/Apps/My Ed", "-g", "/r/a.js:3"], "saved back: still one argument with its space"); }
     draw(v, cx); click("st-editor-open", cx); await drain(cx); A.equal(cfgFile().links.editor, "open", "back to open");
     draw(v, cx); click("st-depth-up", cx); await drain(cx); A.equal(cfgFile().branch.maxDepth, 3);
+    // Closed items stay in the list: − and + write retention_days, 1 to 30.
+    { const d0 = S.retentionDaysOf(v.cfg);
+      r = draw(v, cx); A.ok(UI().ids.has("st-days-value") && r.all.includes(W.daysWords(d0)), "the days shown");
+      click("st-days-up", cx); await drain(cx); A.equal(cfgFile().retention_days, Math.min(30, d0 + 1), "+ one day, written"); A.match(v.flash, /^Closed items stay in the list: /);
+      draw(v, cx); click("st-days-down", cx); draw(v, cx); click("st-days-down", cx); await drain(cx); A.equal(cfgFile().retention_days, Math.max(1, d0 - 1), "− twice");
+      v.set("retentionDays", 1, cx); await drain(cx); r = draw(v, cx); A.equal(UI().ids.get("st-days-down")._h.on_click, undefined, "at 1 day: − is off");
+      A.ok(r.all.includes("1 day"), "1 day");
+      v.set("retentionDays", 30, cx); await drain(cx); draw(v, cx); A.equal(UI().ids.get("st-days-up")._h.on_click, undefined, "at 30 days: + is off");
+      A.equal(cfgFile().retention_days, 30); }
     draw(v, cx); click("st-depth-down", cx); draw(v, cx); click("st-depth-down", cx); draw(v, cx); click("st-depth-down", cx); await drain(cx); A.equal(cfgFile().branch.maxDepth, 0, "down to 0: Branch off");
     r = draw(v, cx); A.ok(r.all.includes("0 (off)"));
     click(`st-space-off-${SB}`, cx); await drain(cx); A.deepEqual(cfgFile().spaces.disabled, [SA, SZ, SB], "shop-api off"); A.match(v.flash, /ledgr is off in shop-api/);

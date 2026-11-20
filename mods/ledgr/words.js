@@ -242,6 +242,43 @@ export const LINK_WORDS = {
   demo: (p, tried, how) => `(demo) Would open ${p} with ${how}${tried?.length ? `, looking for ${tried.join(", ")}` : ""}; nothing is opened in the demo.`,
 };
 
+// ── the archive (retention, 2026-11-19) ─────────────────────────────────
+// Closed items past retention_days leave store.json for ledgr-data/archive/<sid>/; the Closed fold ends with
+// one line for them, and each opens read-only in the dialog, with Reopen.
+const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+export const daysWords = (n) => plural(n, "day");
+// The Closed fold's last line: "archived (3) · show", "archived (3) · hide".
+export const archivedLineWords = (n, shown) => `archived (${n}) · ${shown ? "hide" : "show"}`;
+export const ARCHIVED_LINE_TIP = "Closed items past their days in the list (settings: Closed items stay in the list), kept in ledgr-data/archive/: read them here, reopen one from its dialog";
+export const ARCHIVE_READING = "Reading the archive…";
+// Shown, and nothing could be read: none of the count (n) or no file left for the session.
+export const archiveEmptyWords = (n) => (n ? `None of the ${plural(n, "archived item")} could be read from ledgr-data/archive/.` : "Nothing archived for this session.");
+// The archive could not be listed or read at all (the panel's line, the dialog).
+export const archiveFailedWords = (why) => `The archive could not be read: ${String(why ?? "unknown error").slice(0, 160)}. It is read again in a moment.`;
+// The dialog's ARCHIVED section: when it was closed and how ("answered by you", "not needed", …), and where
+// it is kept. how: listing.js stateOf's word for the record as it was.
+export function archivedWords(it, how, now = Date.now()) {
+  const at = Number(it?.resolvedAt ?? it?.updatedAt) || 0;
+  const day = at ? new Date(at).toLocaleDateString() : null;
+  return `Closed ${at ? `${agoWords(at, now)}${day ? ` (${day})` : ""}` : "at a time not recorded"}${how ? ` · ${how}` : ""}.`;
+}
+// dir: the session's folder under archive/ (spool.js archiveDir: its id made safe), shortened past 12
+// characters; a legacy month file sits at the archive's top.
+export const archiveFileWords = (dir, file) => {
+  const d = String(dir ?? ""), at = /^\d{4}-\d{2}\.jsonl$/.test(String(file ?? "")) ? "" : `${d.length > 12 ? `${d.slice(0, 8)}…` : d}/`;
+  return `Archived: out of the list and the chips, kept in ledgr-data/archive/${at}${file ?? "?"}. Read-only here; Reopen brings it back, open.`;
+};
+// Reopen on an archived record: waiting for the writer, done, or not done.
+export const reopeningWords = (h, file) => `Reopening ${h}: the ledgr writer brings it back from ${file ?? "the archive"}…`;
+export const reopenedWords = (h, was = null) => `${h} reopened from the archive: it is back in the list, open.${was ? ` It was ${was}; that handle is another item's now.` : ""}`;
+// The usual wait passed and the writer has not taken the restore event yet: nothing is known to be wrong.
+export const reopenSlowWords = (h) => `Reopening ${h}: the ledgr writer has not taken it yet; it comes back once the writer applies it (the panel's status line says when the writer is stuck). Reopen sends it again.`;
+export const restoreFailedWords = (h, file) => `${h} was not reopened: the archive file ${file ?? "?"} could not be read (ledgr-data/archive/). It stays archived.`;
+// Opened on an archived record that is in no archive file the dialog could read.
+export const archiveGoneWords = (file) => `This archived item could not be read from ${file ?? "the archive"} (ledgr-data/archive/): the file is gone, or no line of it holds this item.`;
+// A command that would change an archived record (Done, an answer): it is read-only.
+export const ARCHIVED_READONLY = "Archived: read-only here; Reopen brings it back to the list.";
+
 // A branch whose session has not finished a turn yet (its first one is running): the dialog's message column.
 export const BRANCH_NO_TURN = "The branch has not finished a turn yet: its last message shows here once a turn ends.";
 
@@ -299,6 +336,7 @@ export const SETTING_WORDS = {
   animations: ["Animations", "Rows fade in and out, highlights decay, the chip pulses once; off, nothing ledgr draws moves."],
   foldAsksWhileWorking: ["Fold asks while the agent works", "The ASKED OF YOU lane folds while the agent works and opens when its turn ends; off, only your clicks fold it."],
   openPanelOnAsks: ["Open the panel on new asks", "When a turn ends with new asks and the panel is hidden, show it."],
+  retentionDays: ["Closed items stay in the list", "After that they move under Closed, archived, where they can still be read and reopened; one closed as not needed stays at least 7 days."],
   maxDepth: ["Branch depth", "How deep branches of branches may go; 0 turns Branch off."],
   editor: ["Open files with", "A file path you click in the detail dialog's message opens here: open (the system's default app; a script opens as text, never run), zed or code at its line, or your own command with {path}, {line} and {col}. Web links open in the browser."],
   spaces: ["Off spaces", "Where ledgr does nothing: no chip, no ⌘J, no instruction or extraction for its agents. Their items are kept."],
