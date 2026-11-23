@@ -4,8 +4,11 @@
 count per level), "level_min" (at least), "levels_only" (no other level), "level_by_text" ({"a|b":
 level}: an ask whose text or quote contains a or b, case-insensitive, has that level), "rejected_min";
 "quote_max" (no quote longer than that many characters); "none_matching" (no ask whose text or quote
-contains any of these, case-insensitive). Runs adapters/claude/extract.sh --dry-run per fixture
-with a throwaway LEDGR_DATA (default config).
+contains any of these, case-insensitive). The summary (2026-11-23): "summary_all" (every ask has a
+non-empty summary), "summary_max" (none longer than that many characters), "summary_names"
+({"a|b": ["c|d", "e"]}: the asks whose text or quote contains a or b include one whose summary
+contains, for each entry, one of its alternatives, case-insensitive). Runs
+adapters/claude/extract.sh --dry-run per fixture with a throwaway LEDGR_DATA (default config).
 
   python3 -I -B tests/run-extract-fixtures.py                 offline: the real key is never read
                                                               (missing Keychain service), so model
@@ -92,6 +95,18 @@ def check(res, exp):
             errs.append(f"an ask matches {pat!r}: {hits}")
     if "quote_max" in exp and any(len(a.get("quote") or "") > exp["quote_max"] for a in asks):
         errs.append(f"a quote over {exp['quote_max']} characters: {[len(a.get('quote') or '') for a in asks]}")
+    if exp.get("summary_all") and not all(isinstance(a.get("summary"), str) and a["summary"].strip() for a in asks):
+        errs.append(f"an ask without a summary: {[a['text'] for a in asks if not a.get('summary')]}")
+    if "summary_max" in exp and any(len(a.get("summary") or "") > exp["summary_max"] for a in asks):
+        errs.append(f"a summary over {exp['summary_max']} characters: {[len(a.get('summary') or '') for a in asks]}")
+    for pat, needs in (exp.get("summary_names") or {}).items():
+        alts = [x.lower() for x in pat.split("|")]
+        hits = [a for a in asks if any(x in (a.get("text") or "").lower() or x in (a.get("quote") or "").lower() for x in alts)]
+        lacks = [[n for n in needs if not any(x.lower() in (a.get("summary") or "").lower() for x in n.split("|"))] for a in hits]
+        if not hits:
+            errs.append(f"no ask matching {pat!r}")
+        elif all(lacks):
+            errs.append(f"{pat!r}: no summary names {min(lacks, key=len)}")
     if "rejected_min" in exp and len(res.get("rejected") or []) < exp["rejected_min"]:
         errs.append(f"rejected {res.get('rejected')} has fewer than {exp['rejected_min']}")
     if any(a.get("level") not in ("blocking", "needed", "optional") for a in asks):
@@ -145,6 +160,8 @@ def main(argv):
                 print(f"     [{a.get('level')}/{a['kind']}] {a['text']}" + (f"  options={a['options']} rec={a['recommended']!r}" if a["options"] else "")
                       + (f"  repeat_of={a['repeat_of_handle']}" if a.get("repeat_of") else "")
                       + (f"  quote({len(a['quote'])}): “{a['quote'][:90]}{'…' if len(a['quote']) > 90 else ''}”" if a.get("quote") else "  (quote dropped)"))
+                if a.get("summary"):
+                    print(f"       summary({len(a['summary'])}): " + a["summary"].replace("\n", "\n         "))
         fails += bool(errs)
     import shutil
     shutil.rmtree(tmp, ignore_errors=True)

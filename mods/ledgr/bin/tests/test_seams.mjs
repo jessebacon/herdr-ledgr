@@ -18,7 +18,8 @@
 //   d. retention.coldDays 0 written by the settings dialog's writer while a freeze run is in flight: nothing
 //      commits; written after a run committed: every session comes back, and the panel lists none as older;
 //   e. Python's snapshot_copy and cold_record_error (bin/lib) and the doctor's cold_days_of agree with store.js
-//      snapshot(), coldRecordError and config.js coldDaysOf on shared fixtures.
+//      snapshot(), coldRecordError and config.js coldDaysOf on shared fixtures; and (2026-11-23) an ask's summary:
+//      neither snapshot keeps it, and bin/lib ledgr_asks.summary_of makes the same text as store.js cleanSummary.
 //   node tests/test_seams.mjs        (tests/test-seams.sh; a scratch folder of its own, removed at the end)
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -124,6 +125,7 @@ export class View {}
 export const div = () => el("div");
 export const svg = (src) => el("svg", { _src: src });
 export const img = (src) => el("img", { _src: src });
+export const image = (src) => el("image", { _src: src });
 `);
 nm("gpui-base", `${UI_SRC}
 export const v_flex = () => el("v_flex");
@@ -151,7 +153,7 @@ fs.writeFileSync(path.join(APP, "AGENTS.md"), "x");      // config.js liveHome: 
 globalThis.__herdr = { props: {}, shared: {}, runs: [], overlays: [], closed: [], n: 0 };
 globalThis.localStorage = (() => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; })();
 
-const { Store, coldRecordError } = await import(`${dir}/store.js`);
+const { Store, coldRecordError, cleanSummary } = await import(`${dir}/store.js`);
 const C = await import(`${dir}/config.js`);
 const SP = await import(`${dir}/spool.js`);
 const { Writer } = await import(`${dir}/writer.js`);
@@ -406,7 +408,9 @@ print(json.dumps({sid: X.session_items(sid, now_ms=d["now"]) for sid in d["sids"
     mapTerminal("t77", S2, 12);
     const mcp = new Mcp("t77");
     await mcp.init();
-    const r1 = await whileWriting(wb, mcp.call("declare_asks", { items: [{ level: "blocking", kind: "decide", text: "Pick the window for the seam test" }] }));
+    // (2026-11-23: every declared item carries a summary, or the server refuses the call)
+    const SEAM_SUMMARY = "Pick this weekend or next for the seam test.\n\n- this weekend: I run it on Saturday\n- next: I wait for the release";
+    const r1 = await whileWriting(wb, mcp.call("declare_asks", { items: [{ level: "blocking", kind: "decide", text: "Pick the window for the seam test", summary: SEAM_SUMMARY }] }));
     const sc1 = r1.structuredContent ?? {}, tx1 = mtext(r1);
     A.equal(sc1.ok, true, `declare_asks on a faulted session: ok (${tx1.slice(0, 300)})`); A.ok(!r1.isError);
     A.equal(sc1.writer, "held", "writer: held (its copy found in cold/held/)");
@@ -454,6 +458,8 @@ print(json.dumps({"lines": lines, "problems": problems}))`);
     A.equal(after.item(openAsk.id).status, "resolved", "the held act applied");
     const declared = after.itemsOf(S2).filter((it) => it.text === "Pick the window for the seam test");
     A.equal(declared.length, 1, "the held declaration applied once"); A.match(declared[0].handle, /^A\d+$/);
+    A.equal(declared[0].summary, SEAM_SUMMARY, "...with the summary the agent declared (the server's event, held, replayed, applied)");
+    A.equal(asksEv.asks?.[0]?.summary, SEAM_SUMMARY, "(the server's spool event carries it on the item)");
     A.ok(Number(declared[0].handle.slice(1)) >= rec2.session.nextHandle.A, "its handle past every one the session had (nextHandle kept on the stub)");
     A.equal(after.d.ingested.filter((id) => id === "seam-b-act").length, 1); A.equal(after.d.ingested.filter((id) => id === sc1.event_id).length, 1);
     A.deepEqual(heldOf(S2), [], "the held copies gone"); A.equal(fs.existsSync(path.join(HELD, C.safeName(S2))), false, "...and the folder");
@@ -567,7 +573,7 @@ print(json.dumps({"lines": lines, "problems": problems}))`);
     const mk = (i, o) => ({ id: `rq_e${i}`, handle: `A${i}`, direction: "agent_to_human", text: `t${i}`, anchor: { sessionId: Z, turn: 1, quote: "short" }, status: "open",
       createdAt: t - DAY, updatedAt: t - DAY, draft: "typed", pins: ["pn_x"], ...o });
     const items = [
-      mk(1, {}), mk(2, { status: "answered" }), mk(3, { status: "deferred" }), mk(4, { status: "rejoin_pending" }), mk(5, { status: "resolved" }),
+      mk(1, { summary: "Say yes to apply the five changes.\n\n- one\n- two" }), mk(2, { status: "answered", summary: "Pick a night." }), mk(3, { status: "deferred" }), mk(4, { status: "rejoin_pending" }), mk(5, { status: "resolved" }),
       mk(6, { status: "dismissed", resolvedAt: t - 2 * DAY }), mk(7, { status: "dismissed", resolvedAt: t - 8 * DAY }), mk(8, { status: "dismissed", resolvedAt: null, updatedAt: t - DAY }),
       mk(9, { status: "dismissed", updatedAt: String(t - DAY) }), mk(10, { anchor: { sessionId: Z, turn: 1, quote: long } }), mk(11, { anchor: { sessionId: Z, quote: "q".repeat(200) } }),
       mk(12, { anchor: { sessionId: Z, quote: "é".repeat(150) + "😀".repeat(26) } }), mk(13, { status: "dismissed", resolvedAt: t - 7 * DAY + 60e3 }), mk(14, { anchor: { sessionId: Z, quote: null } }),
@@ -585,18 +591,27 @@ print(json.dumps({"lines": lines, "problems": problems}))`);
     const errs = bad.map((r, i) => coldRecordError(JSON.parse(JSON.stringify(r ?? null)), sids[i]));
     const days = [7, 0, "0", 3, "3", 2.4, 2.5, 0.4, -1, 366, 365, "x", "", null, undefined, true, "  9 ", 1e400, 60, 0.5];
     const jsDays = days.map((v) => C.coldDaysOf({ retention: { coldDays: v } }));
-    const py = python(PYPATH + `import ledgr_extract as X
+    // An ask's summary (2026-11-23): the hooks' validator (bin/lib ledgr_asks.summary_of) and the store's (cleanSummary)
+    // make one text of the same input, so the store's second pass changes nothing a producer sent.
+    const sums = ["", "   ", "\n\n\t \r\n", "  Do this.\r\n\r\n\r\n- a\r\n- b \n\n", "one\n  \n\t\n \ntwo", "one\ntwo", "one\n\ntwo", "x\ry",
+      "**bold**, `code`  \nhard break\n  - indented", "\u00a0nbsp\u00a0", "x".repeat(1000), "x".repeat(1500), `${" ".repeat(10)}${"y".repeat(1000)} `,
+      `${"z".repeat(999)} ${"w".repeat(50)}`, "😀".repeat(1001), "😀".repeat(600), `${"é".repeat(998)}\n\n\nab`, 42, null, true, ["a"], { a: 1 }];
+    const py = python(PYPATH + `import ledgr_extract as X, ledgr_asks as K
 d = json.load(sys.stdin)
 snap = [c for c in (X.snapshot_copy(it, d["now"]) for it in d["items"]) if c is not None]
 errs = [X.cold_record_error(r, s) for r, s in zip(d["bad"], d["sids"])]
+sums = [K.summary_of({"summary": s}) for s in d["sums"]] if hasattr(K, "summary_of") else None
 days = None
 if os.path.exists(os.path.join(os.environ["LEDGR_SETUP"], "ledgr_setup.py")):
     import ledgr_setup as L
     days = [L.cold_days_of({"retention": {"coldDays": v}} if v != "__undef__" else {"retention": {}}) for v in d["days"]]
-print(json.dumps({"snap": snap, "errs": errs, "days": days}, ensure_ascii=False))`,
+print(json.dumps({"snap": snap, "errs": errs, "days": days, "sums": sums}, ensure_ascii=False))`,
       { now: t, items: JSON.parse(JSON.stringify(items)), bad: bad.map((r) => JSON.parse(JSON.stringify(r ?? null))), sids,
-        days: days.map((v) => (v === undefined ? "__undef__" : Number.isFinite(v) || typeof v !== "number" ? v : null)) });
+        days: days.map((v) => (v === undefined ? "__undef__" : Number.isFinite(v) || typeof v !== "number" ? v : null)), sums });
     A.deepEqual(py.snap, JSON.parse(JSON.stringify(js)), "snapshot_copy keeps, drops and shapes every item as store.js snapshot() does");
+    A.ok(items.filter((it) => it.summary).length === 2 && !js.some((c) => "summary" in c), "(two of them carry a summary, which neither snapshot keeps)");
+    A.deepEqual(py.sums, sums.map(cleanSummary), "ledgr_asks.summary_of and store.js cleanSummary make the same summary of every input");
+    A.ok(py.sums.every((s) => s === null || cleanSummary(s) === s), "...and the store's second pass changes none of the validator's");
     A.equal(js.length, 12, `(${js.length} kept of ${items.length}: the resolved one and the dismissal past 7 days left out)`);
     A.ok(js.some((c) => c.id === "rq_e10" && c.anchor.quote === undefined) && js.some((c) => c.id === "rq_e11" && c.anchor.quote.length === 200), "(a quote of 201 UTF-16 units dropped, one of 200 kept)");
     A.deepEqual(py.errs, errs, "cold_record_error refuses the same records, word for word, as store.js coldRecordError");
@@ -715,5 +730,5 @@ print(json.dumps({"rc": rc, "out": out}))`], { env: { PATH: "/usr/bin:/bin:/usr/
 } finally {
   fs.rmSync(dir, { recursive: true, force: true });
 }
-console.log(`OK: seams, ${checks} checks (cold sessions across the writer, the panel and its Reader, the settings writer, the MCP server, the Python readers and the doctor: a freeze read back and thawed by an act; a lost file held, said by the MCP server and the doctor, replayed in order once; archived, cold, reopened while cold; coldDays 0 during and after a run; Python and JavaScript agree; a corrupt store's restart keeps the only copy and the doctor lists it; --thaw-all against the real writer; ${oldRan ? "an older build's round trip" : "no older build given (LEDGR_OLD_BUILD)"}${HAVE_SETUP ? "" : "; the doctor's checks left out: no setup/ beside this mod"}), 0 failure(s)`);
+console.log(`OK: seams, ${checks} checks (cold sessions across the writer, the panel and its Reader, the settings writer, the MCP server, the Python readers and the doctor: a freeze read back and thawed by an act; a lost file held, said by the MCP server and the doctor, replayed in order once; archived, cold, reopened while cold; coldDays 0 during and after a run; Python and JavaScript agree (an ask's summary too: held, replayed, out of both snapshots, one cleaning); a corrupt store's restart keeps the only copy and the doctor lists it; --thaw-all against the real writer; ${oldRan ? "an older build's round trip" : "no older build given (LEDGR_OLD_BUILD)"}${HAVE_SETUP ? "" : "; the doctor's checks left out: no setup/ beside this mod"}), 0 failure(s)`);
 process.exit(0);

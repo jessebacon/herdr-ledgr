@@ -94,7 +94,7 @@ Envelope `{v, id, type, at, terminal, session_id}`, files `<ms>-<type>-<pid>-<ra
 | `prompt` | hooks | `turn`, `prompt_id`, `local`, `prompt_head`, `refs` |
 | `pending` | hooks | `turn`, `passage_hash` (also `session` if no `session_id`). Ends the turn (state idle, so the interrupt check does not wait for stop); chip `p` until that turn's `asks`, or 30 s |
 | `stop` | hooks | `turn`, `prompt_id`, `text_path`, `text_head`, `passage_hash`, `message_uuid`, `api_message_id`: the uuid goes on every item of that session and turn without one (parked questions settle here) |
-| `asks` | hooks | `turn`, `prompt_id`, `message_uuid`, `api_message_id`, `passage_hash`, `source`, `asks[]`, `model`, `provider`, `error`, `error_detail`, `block_error`, `rejected` (section 10). Per ask: `text`, `kind`, `level` (blocking, needed, optional; an older event without it: `blocking` true means blocking, else needed), `options`, `recommended`, `blocking` (= level blocking), `quote`, `hash`, `origin`, `repeat_of` (an `rq_` id), `repeat_of_handle` |
+| `asks` | hooks | `turn`, `prompt_id`, `message_uuid`, `api_message_id`, `passage_hash`, `source`, `asks[]`, `model`, `provider`, `error`, `error_detail`, `block_error`, `rejected` (section 10). Per ask: `text`, `kind`, `level` (blocking, needed, optional; an older event without it: `blocking` true means blocking, else needed), `options`, `recommended`, `blocking` (= level blocking), `quote`, `hash`, `origin`, `repeat_of` (an `rq_` id), `repeat_of_handle`, `summary` (2026-11-23, when it has one: what the user must do, at most 1,000 characters, cleaned again by `cleanSummary`; section 21) |
 | `session_end` | hooks | envelope |
 | `capture` | box | envelope + `agent`, `turn`, `session_name`, `cwd`, `request` (a Request, `handle: null`; the writer assigns `Q<n>`) |
 | `act` | panel | `item`, `action` (`resolve`, `dismiss`, `reopen`, `defer`, `draft`, `btw`, `seen`, `promote`), `arg` |
@@ -1198,5 +1198,90 @@ the late-commit case of `setup/tests`.
 `config.json` still says `retention_days` 14 and Phase 1 has not run on the live store: Phase 2 freezes
 nothing before Phase 1's first run has finished, and the installer's move to 3 days decides how far under
 the cap the store lands.
+
+## 21. An ask's summary: the store's half (2026-11-23)
+
+Jesse, looking at Ask 42 in the dialog: the context around an ask often does not say precisely what the agent
+wants. An agent ask gains one optional string, `summary` (what the user must do, precisely, readable without the
+reply), at every layer: the tool input, the block, the extractor's output, the `asks` event's item, the store's item.
+Three builders against one contract: B1 the Python side (`BUILD-NOTES-hooks.md`), B2 the store and the writer
+(this section), B3 the dialog and the list (`BUILD-NOTES-detail.md`). Function names, not line numbers.
+
+### 21.1 The rule, applied twice
+
+`config.js` `LIMITS.summary` 1000 (the number of `bin/lib/ledgr_asks.py` `MAX_SUMMARY`). `store.js` `cleanSummary(v)`:
+a string, else none; CR LF and a lone CR become LF; a run of blank lines (whitespace-only lines among them) becomes
+one blank line; the outer whitespace goes; then a cut at 1,000 code points (as Python counts; never half a surrogate
+pair) and the trailing whitespace again. Never a refusal for length. Empty after that is none: `null`, and the item
+has no key (lean records: never `summary: null`). Line breaks and markdown are kept, a line's own spaces too.
+B1's `summary_of` makes the same text of every input `test_seams.mjs` e gives both, and the store's second pass
+changes none of the validator's. Since review fix 7.4 the two clean with one whitespace set, JavaScript's
+(`ledgr_asks.JS_SPACE`, used by its `BLANK_RUN` and its trim): U+FEFF (`\ufeff`) counts as whitespace on both sides,
+and U+0085 (`\x85`) and U+001C to U+001F (`\x1c`-`\x1f`), which Python's own `\s` would count, count on neither, so
+they agree on exotic whitespace too (checked under Node on 14 inputs: `BUILD-NOTES-hooks.md`, "Review fixes and
+round 2's Python part", 7.4).
+
+### 21.2 Where an ask item is made or met again (`store.js` `on_asks`)
+
+`fields` (text, kind, level, options, recommended, blocking) gains `summary` only when `cleanSummary` gives one, so
+every `Object.assign(…, fields)` replaces a stored summary with a usable new one and keeps it when the event brings
+none, empty or broken, as options are kept when the event has no `options` key.
+
+| Path | What happens to `summary` |
+|---|---|
+| A new item (a first ask, or a resolved or dismissed one raised again) | the event's, cleaned, or no key; a re-raised one carries nothing from the old item (as its text) |
+| `same`: this turn's item with the same text and passage, or a tool ask of this turn with the same text (a replayed or re-run extraction, the Stop settle of a declaration, a later `declare_asks` call of the turn) | a usable one replaces, none keeps; this holds for a closed item too (as for its text), which then differs from an archive plan made before and stays for the next run (`removeItems`) |
+| `replaces_turn`: the same turn's later declaration | an ask it no longer names (untouched) is deleted as before; one it names again goes through `same`; a changed text is a new item with its own summary |
+| An open or deferred ask named again (`repeat_of`, `repeat_of_handle`, or the same text at a later turn by key) | follows the text: replaced by a usable one, kept when none |
+| An answered ask named again | reopened as it was: text, options and summary unchanged (the text is not taken there either) |
+| A capture (`on_capture`) | `summary` deleted from the spread Request: a parked question has none |
+
+### 21.3 Everything else carries the item whole
+
+`snapshot()` deletes `summary` from its copies (with `draft` and `pins`): the extractor and `open_asks` do not need
+it, and the snapshot stays small; B1's `snapshot_copy` drops it too, so a cold session's items read from its file
+match (`test_seams.mjs` e). The archive (`archivable`'s copies, the items files' lines, `restoreItem`), cold files
+(`planFreeze`'s record, `commitFreeze`'s check, `thaw`, `mergeCold`) and the sweep's proof (`coldLacks`, the writer's
+`archiveCopies`) compare and copy whole items by their JSON, so a summary is one field among the others: a file
+whose summary the store does not hold, or holds differently, is not proven. Nothing changed in `writer.js` or
+`spool.js`: the writer applies the event through `store.apply`, writes `store.toText()` and `snapshot()`, and its
+archive and cold files are `JSON.stringify` of whole items.
+
+### 21.4 The demo and the fixture
+
+`fixtures.js`: A15 (the dialog's `DEMO_DETAIL`, a blocking decide) carries `DEMO_SUMMARY_A15`, a sentence, a
+two-item markdown list with bold labels and a closing sentence; A8 (a review, found by the model) carries
+`DEMO_SUMMARY_A8`, one paragraph with a file path (`reports/pool-settings.md`, so B3's linkify has one). Every other
+demo ask has none. `fixture_cold.mjs` `liveShape({summaries: true})` (off by default, so other callers see the store
+as before) gives every third agent ask a summary of about 270 characters without touching the seed; those 186 items
+grow to about 1.2 KB (the store 0.84 MB rather than 0.81). `test_store.mjs` section 6 of the cold sessions uses it,
+so the freeze, the oracle and the round trip carry the field.
+
+### 21.5 Tests
+
+`test_store.mjs` 1,900 checks (87 ask summary: `cleanSummary` on its cases; a new item; none, empty, whitespace or
+not a string leaves no key and no null; a capture's Request with one; a re-run replacing, keeping on none, cutting a
+replacement; the tool flow, mid-turn, `replaces_turn`, the Stop settle without the key and with one; re-raises
+open by id, by handle, by key, answered, resolved and dismissed; the snapshot; the archive's copy, a summary changed
+between the plan and the removal, the line restored whole, the dialog's Reopen; a freeze, the file, a merge that
+never saves, a thaw identical, `coldLacks` on an identical, a changed and a dropped summary). `test_writer.mjs` 1,165
+(section 53, 14 checks: through the real writer, store.json and snapshot.json, a later event, a freeze and a thaw by
+an act). `test_seams.mjs` 141 (the held `declare_asks` now carries a summary, which the server requires, and the
+replayed item holds it; e: two snapshot items with one, and `summary_of` against `cleanSummary`). Mutations checked by
+hand, each failing `test_store.mjs`: no `delete c.summary` in `snapshot()`; no cleaning; a missing summary written as
+undefined; a missing one deleting the stored one in `same` and in the open re-raise; an open re-raise not replacing;
+an answered re-raise taking `fields`; a UTF-16 cut; no blank-run collapse; a new re-raised item inheriting the old
+summary; `restoreItem` and `thaw` dropping it.
+
+### 21.6 Known limits
+
+- `store.js` and `config.js` are engine files: the overlay's `my-tabs` copy follows at the next `install.sh`, and
+  a host runs the new code only once Herdr reloads it. An `asks` event an old writer applies loses its summary for
+  good (the spool file is deleted once applied).
+- A summary adds to every ask that has one (the extractor and the tool require one from now on): up to 1,000
+  characters on items that were about 1 KB, against the 1 MiB cap and `HOUSE_SIZE`.
+- Rolling back to a build before this one keeps the summaries on stored items (an unknown field is carried whole),
+  and a re-emit there keeps them too (its `fields` have no `summary`); its `snapshot()` does write them into
+  snapshot.json, and new asks there get none.
 
 Pins (2026-11-07: the PINS lane, search, Ask here, the hold control, the box's ⌘S): `BUILD-NOTES-pins.md`.

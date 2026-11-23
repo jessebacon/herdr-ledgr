@@ -4,6 +4,9 @@ extract(msg, cfg, rec, sid, snapshot_path=None, turn=None, turn_text=None) -> {s
 provider, usage, ms, error, block_error, extract_request_id, [error_detail], [truncated], [rejected]}
   Every ask carries `level` (blocking | needed | optional, ledgr_asks.LEVELS); asks of every level
   are returned. Which levels become open rows is the mod's choice (config extract.threshold).
+  `summary` (2026-11-23): what the user must do, readable without the reply. The model writes one for
+  every ask (required in asks.schema.json); a block item or a tool declaration carries its own, which
+  goes through unchanged (ledgr_asks.summary_of); none, and the key is left out.
   `rejected`: why asks were dropped for an unknown level (block or model), when any were.
   0. the turn was declared by tool (bin/mcp's declare_asks left ledgr-data/mcp/<session>/<turn>.json)
      and the reply has no valid non-empty block (a block is the newer statement and wins): source
@@ -74,7 +77,7 @@ def snapshot_copy(it, now_ms):
     """One store.json item as store.js snapshot() writes it, or None when the snapshot leaves it out: kept
     are open, answered, deferred and rejoin_pending items, and dismissed ones within 7 days; the copy gets
     `sessionId` from its anchor, loses a quote over 200 characters (counted as JavaScript counts), and its
-    draft and pins."""
+    draft, pins and summary (2026-11-23: the snapshot stays small; nothing that reads it needs one)."""
     st = it.get("status")
     when = it.get("resolvedAt") if it.get("resolvedAt") is not None else it.get("updatedAt")
     if st not in SNAPSHOT_STATES and not (st == "dismissed" and _num(when) >= now_ms - DISMISSED_DAYS * 86400_000):
@@ -88,6 +91,7 @@ def snapshot_copy(it, now_ms):
     c["anchor"] = anc
     c.pop("draft", None)
     c.pop("pins", None)
+    c.pop("summary", None)
     return c
 
 
@@ -243,7 +247,9 @@ def tool_asks(decl, sid, turn, text, snapshot_path=None):
     against the session's recorded asks (this turn's own left out: they are the declaration itself).
     Options and the recommendation come from the declaration, else from the writer's item in
     snapshot.json (a cold session's from its file, session_items); when neither has them the key is left
-    out, so the writer keeps the item's own."""
+    out, so the writer keeps the item's own. The summary comes from the declaration alone, unchanged (the
+    snapshot carries none); a declaration without one (an older server) leaves the key out, and the writer
+    keeps the item's own."""
     items = session_items(sid, snapshot_path)[0]
     mine = {}
     for it in items:
@@ -257,7 +263,7 @@ def tool_asks(decl, sid, turn, text, snapshot_path=None):
     for a in decl.get("asks") or []:
         if not isinstance(a, dict):
             continue
-        r = {k: a.get(k) for k in ("text", "level", "kind", "quote")}
+        r = {k: a.get(k) for k in ("text", "level", "kind", "quote", "summary")}
         r["repeat_of"] = a.get("repeat_of_handle") or a.get("repeat_of")
         src = a if isinstance(a.get("options"), list) else mine.get(A.norm_key(a.get("text") or ""))
         if isinstance(src, dict) and isinstance(src.get("options"), list):

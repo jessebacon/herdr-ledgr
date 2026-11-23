@@ -151,11 +151,24 @@ key), but a reworded repeat arrives as a new ask.
 
 ## declare_asks
 
-Input: `{"items": [{level, kind, text, quote?, options?, recommended?, repeat_of?}]}`. This is the
+Input: `{"items": [{level, kind, text, summary, quote?, options?, recommended?, repeat_of?}]}`. This is the
 ledgr-asks item schema. `level` is `blocking` or `needed`; an `optional` item is accepted the way the
 validator accepts it, kept as a suggestion and not counted. `kind` is one of decide, confirm, do,
 provide, review. `repeat_of` takes a handle from `open_asks`. There are at most 20 items.
 
+- `summary` (2026-11-23) is required on every item: what the user must do, precisely, readable without
+  the reply (exactly what is needed and in what form, what the agent already did or ruled out, what it
+  will do with each answer, its recommendation and why, anything that cannot be undone). Markdown; it
+  goes through `ledgr_asks.summary_of`: line breaks kept (CR LF read as LF), a run of blank lines made
+  one, the outer whitespace dropped (JavaScript's whitespace, U+FEFF included, as `store.js`
+  `cleanSummary` reads it), cut at 1,000 characters (`MAX_SUMMARY`; a note says so), never refused for
+  length. The schema has no `maxLength`, so a client that checks it does not refuse a long one. A call
+  with an item (an object, within the 20) whose summary is missing, null, blank or not a string is
+  refused whole, unlike the per-item rejections below: `isError`, nothing written (no spool event, no
+  state file), `{ok: false, error: "every item needs a summary", missing_summary: [2, 3, 4],
+  summary_not_string: [4], earlier_items_stand: false}`, and a text that names the items, says which
+  summary is not a string, says when an earlier call of the turn stands ("ledgr recorded nothing
+  (earlier items of this turn stand): …"), and says in two sentences what a summary holds.
 - Every item goes through `ledgr_asks.validate`. Items rejected with a reason: not an object, empty
   text, an unknown level, the same text as an earlier item, and anything past 20. The rest is
   recorded. When every item is rejected, the result is `isError` and nothing is written.
@@ -209,8 +222,9 @@ provide, review. `repeat_of` takes a handle from `open_asks`. There are at most 
   session): `{v, session_id, terminal, turn, calls, event_ids, synthetic, pointer, asks, handles}`.
   `asks` holds the asks exactly as the last event sent them, every field included: `text`, `kind`,
   `level`, `options`, `recommended`, `blocking`, `quote`, `repeat_of`, `repeat_of_handle`, `hash`,
-  `origin`, `quote_verified`, and on a repeat `repeat_status` and `repeat_match`. The Stop hook can
-  re-validate and re-emit them without reading `snapshot.json`.
+  `origin`, `quote_verified`, `summary`, and on a repeat `repeat_status` and `repeat_match`. The Stop
+  hook can re-validate and re-emit them without reading `snapshot.json` (which carries no summary), and
+  carries each summary through unchanged.
 
 The event (`ledgr_spool.asks`, so the envelope and the order rules are the usual ones):
 
@@ -219,7 +233,8 @@ The event (`ledgr_spool.asks`, so the envelope and the order rules are the usual
  "turn": 14, "prompt_id": "<from the map>", "message_uuid": null, "api_message_id": null, "passage_hash": null,
  "source": "tool", "asks": [{"text": "Choose the retry policy", "kind": "decide", "level": "blocking",
    "options": ["fast", "safe"], "recommended": "safe", "blocking": true, "quote": "I stopped here.",
-   "repeat_of": null, "repeat_of_handle": null, "hash": "111b4f0d27af", "origin": "tool", "quote_verified": false}],
+   "repeat_of": null, "repeat_of_handle": null, "hash": "111b4f0d27af", "origin": "tool", "quote_verified": false,
+   "summary": "Answer fast or safe. The client is built; I stopped before wiring its retries. Fast retries 5 times in 2 s, safe 3 times over 30 s. I recommend safe: the API rate-limits bursts."}],
  "model": null, "provider": "mcp", "usage": null, "ms": 3, "error": null, "block_error": null,
  "extract_request_id": null, "replaces_turn": false, "tool_call": 1, "quotes": "unverified",
  "synthetic": false, "client": {"name": "claude-code", "version": "…"},
@@ -282,7 +297,7 @@ agent did, and Reopen brings back one the agent closed, which `open_asks` then l
 ## For the writer's maintainer (store.js)
 
 The writer applies a `source: "tool"` event like a block event. `on_asks` handles it today without a
-change, with three gaps (the fourth item is `resolve_asks`'s `act`):
+change, with three gaps (the fourth item is `resolve_asks`'s `act`, the fifth the summary):
 
 1. **Origin.** `on_asks` sets `origin = ev.source === "block" ? "extract_block" : "extract_model"`
    and `quoteSource` the same way, so tool asks are labelled as model asks today. Proposed:
@@ -302,6 +317,11 @@ change, with three gaps (the fourth item is `resolve_asks`'s `act`):
    `actor: "agent"`, `handle` and `turn` (and `note` when given). `on_act` already resolves the item;
    with `actor === "agent"` it also sets `resolvedBy: "agent"`. `tests/test_mcp.py` (`FakeWriter`)
    implements that.
+
+5. **`summary`** (2026-11-23). Every tool ask carries one. `on_asks` keeps it on a new item (cleaned
+   again by `store.js` `cleanSummary`), a later event for the same item (the Stop settle, a
+   `replaces_turn` call) replaces it with a non-empty one and keeps it when the event has none, and
+   `snapshot()` leaves it out.
 
 Ordering is unchanged. A tool event's `<ms>` file name is later than the turn's `prompt` and earlier
 than its `pending`, `stop` and final `asks`. `on_stop` already puts the message uuid on every item
@@ -331,7 +351,19 @@ blocking ask. Proposed, in `claude_extract.hook_mode` (agent-neutral, so better 
 
 When this server is registered, the SessionStart instruction can say: "If the ledgr `declare_asks`
 tool is available, call it instead of writing the block, then end the reply with the pointer line it
-returns." The server's own `instructions` field says the same for clients that show it. Both
+returns." The server's own `instructions` field says the same for clients that show it. Since
+2026-11-23 the server's `instructions`, the `declare_asks` description, the `summary` property's
+description and both `lib/asks-instruction-*.txt` also carry one rule in one wording family: ledgr
+exists to cut the back and forth and to clear what blocks the agent, never to hand work to the user, so
+the agent first does all the task needs that it can do itself, declares only what is left that only
+the user can give, never declares work it could do itself or asks the user to look up, verify or
+summarise what it can, and gives each item a summary that stands on its own. It stops before a step
+the task needs that cannot be undone and asks for a go-ahead, which is one of the things only the user
+can give; a step beyond what it was asked is an offer, neither taken nor declared, a line of prose at most.
+(Two reviews the same day: 7.1 found that the first wording forbade "check the DM link on your phone"
+and left no door for a go-ahead before a destructive step; 10.1 found that the second, "a go-ahead
+for such a step", also covered a step beyond the task, so an agent would declare a go-ahead for an
+unrelated refactor.) Both
 `lib/asks-instruction-ledgr.txt` and `-both.txt` end with the `resolve_asks` line: "When the user's
 message answers or drops an open ask (open_asks lists them with handles such as A4), call
 resolve_asks with those handles before declaring anything new." The server's `instructions` carries
@@ -381,11 +413,19 @@ runtime first probes stdio servers for revision 2026-07-28, and the v1 runtime (
 
 ## Tests
 
-`tests/test_mcp.py` (162 checks, in `tests/run-all.sh`) spawns the server over real stdio with a
+`tests/test_mcp.py` (181 checks, in `tests/run-all.sh`) spawns the server over real stdio with a
 scratch `LEDGR_DATA` and covers the following:
 
 - both handshakes, `tools/list`, the error codes, a batch;
 - a valid declaration and its event;
+- the summary (2026-11-23): the schema (required, no `maxLength`) and the rule's wording in the
+  instructions and descriptions; a call with an item whose summary is missing, blank or not a string
+  refused whole (nothing written, the items named, one not a string said so, an earlier call of the
+  turn said to stand, U+FEFF alone as none, the two sentences); one cleaned (CR LF, blank-line
+  runs, outer space) and one cut at 1,000 with a note, on the event and the state file; `tool_asks`
+  carrying both through unchanged, and none from an older declaration; an off space answering off
+  before asking for one; `snapshot_copy` leaving it out. The test client adds a summary to every other
+  section's items (`Client.call`, unless `raw`);
 - rejected items, and every item rejected;
 - a second and an empty call in the same turn;
 - repeats by text and by handle (an old dismissal, another session and this turn's own asks are not

@@ -1037,7 +1037,7 @@ def gather(ctx, st, f, a, file_answers, flags):
         hand = ans["asks_handoff"]
     ans["asks_handoff"] = ask.choose("Who owns the closing list the agent gives you?",
                                      "If ledgr is installed, let it be authoritative: the end of a reply is the terminal's most valuable "
-                                     "screen. ledgr and both add a ~200 to 260-word instruction to each session's context (at start, clear and "
+                                     f"screen. ledgr and both add {instruction_words()} to each session's context (at start, clear and "
                                      "compact, plus one reminder after a missed blocker); the extractor stays the fallback. Changeable "
                                      "later in ledgr-data/config.json (asks.handoff); running sessions follow at their next prompt.",
                                      HANDOFFS, hand if hand in [v for v, _ in HANDOFFS] else "ledgr")
@@ -2266,6 +2266,47 @@ def retention_report(ctx, st, cfg, now=None):
     return lines, problems
 
 
+def instruction_words():
+    """"a ~535 to 597-word instruction": the word counts of the two wordings the hooks print (the mod's
+    bin/lib/asks-instruction-both.txt and -ledgr.txt, counted as wc -w counts), lowest first, so the handoff
+    question never names a stale size again (it said ~200 to 260 while the files had grown to 268 and 330).
+    "an instruction of a few hundred words" when a file cannot be read or is not UTF-8."""
+    counts = []
+    for mode in ("both", "ledgr"):
+        try:
+            with open(os.path.join(REPO, "mods", MOD, "bin", "lib", f"asks-instruction-{mode}.txt"), encoding="utf-8") as fh:
+                counts.append(len(fh.read().split()))
+        except (OSError, ValueError):            # ValueError: UnicodeDecodeError, a file that is not UTF-8
+            return "an instruction of a few hundred words"
+    lo, hi = min(counts), max(counts)
+    return f"a ~{lo}-word instruction" if lo == hi else f"a ~{lo} to {hi}-word instruction"
+
+
+def attachments_report(ctx):
+    """--check's line for ledgr-data/attachments/ (2026-11-23): an image dropped on an answer box in the detail
+    dialog is copied there (mods/ledgr/attach.js) and the answer names its path. How many files and their
+    total size; nothing when the folder is absent. Read-only; ledgr never deletes there, uninstall treats the
+    folder as the rest of ledgr-data/."""
+    d = os.path.join(ctx.data, "attachments")
+    if not os.path.isdir(d):
+        return []
+    try:
+        names = os.listdir(d)
+    except OSError as ex:
+        return [f"  attachments     could not be listed ({ex.strerror or ex})"]
+    n = size = 0
+    for name in names:
+        p = os.path.join(d, name)
+        if name.startswith(".") or not os.path.isfile(p):
+            continue
+        n += 1
+        try:
+            size += os.path.getsize(p)
+        except OSError:
+            pass
+    return [f"  attachments     {n} file{'' if n == 1 else 's'}, {kb(size)} (images attached to answers; ledgr never deletes them)"]
+
+
 # ── cold sessions (retention Phase 2) ─────────────────────────────────────────────────────────
 def cold_days_of(cfg):
     """retention.coldDays as the mod reads it (mods/ledgr/config.js coldDaysOf): a number or a numeric
@@ -2859,6 +2900,8 @@ def cmd_check(ctx, args):
     for ln in clines:
         say(ln)
     bad += cproblems
+    for ln in attachments_report(ctx):
+        say(ln)
     if prov in ("anthropic", "openai-compatible"):
         okk = f["security"] and kc_exists(ctx, prov)
         say(f"  Keychain        service ledgr, account {prov}: {'resolves' if okk else 'MISSING'}")
@@ -3087,7 +3130,7 @@ def cmd_uninstall(ctx, args):
             shutil.rmtree(d)
             notes.append(f"mods/{m}: removed")
     # 7. data
-    purge = args.purge_data if ctx.yes else ask.yesno("Also delete ledgr-data/ (your parked questions, asks, sessions and decisions)?",
+    purge = args.purge_data if ctx.yes else ask.yesno("Also delete ledgr-data/ (your parked questions, asks, sessions, decisions and attached images)?",
                                                       "Keeping it lets a reinstall pick up exactly where you left off.", False)
     if purge and os.path.isdir(ctx.data):
         ctx.backup(ctx.data)

@@ -34,6 +34,12 @@ Without `instruction` but with `turn_text`, the extractor is the only channel.
   part is giving `extract()` the turn and, when it can, the turn's full assistant text.
 - The block grammar and the levels: `lib/parse_block.py`, `lib/ledgr_asks.py` (blocking, needed,
   optional; `extract.threshold` applies to declared and extracted asks alike).
+- The ask's `summary` (2026-11-23): what the user must do, precisely, readable without the reply
+  (`ledgr_asks.summary_of`: markdown, line breaks kept, at most 1,000 characters). Required on
+  `declare_asks` (a call with an item without one is refused whole), an optional last bullet field
+  `summary: …` (the rest of the line) or JSON key in a block, and written by the extractor for every
+  ask it finds. Both instruction wordings ask for it, with the rule that ledgr is there to cut the back
+  and forth and clear blockers, never to hand work to the user; an adapter carries the wording as it is.
 - The extractor and its providers: `lib/ledgr_extract.py`, `providers/`.
 - The landing markers: `lib/ledgr_landing.py` (`ledgr confluence …`, `ledgr answers …`, `ledgr pins
   <session id> <item id>`); `detect_all` finds every message in a prompt (two answer sheets pasted

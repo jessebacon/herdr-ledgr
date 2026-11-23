@@ -84,6 +84,55 @@ export function settingsSpec(p = {}) {
 export const twoColumns = (width) => Number(width) >= DETAIL.twoColumnsAt;
 export const leftWidth = (width) => Math.round(Math.max(DETAIL.minWidth, Number(width) || 0) * DETAIL.leftShare);
 
+// An open ask's answer box (2026-11-23): the left column's main region, as tall as the column leaves free,
+// at least minRows rows of its text (12.5 px times the text scale, a row taken as rowEm of that: generous, so
+// the rows the textarea is told never overflow the height it is given), past that it scrolls inside. In a
+// short column (the minimum over shortShare of the column's height: a small window, a large text scale) the
+// minimum is that share instead, never under floorRows rows. frame: the bordered frame's padding and border
+// (views.js answerBox: py 5, border 1); inner: the textarea's own padding (not known: an estimate, used only
+// for the rows it is told). margin: what is left free under the column's content, so filling it exactly never
+// shows a scrollbar. hysteresis: a growth smaller than this is not made (no relayout for a pixel); a shrink always is.
+export const ANSWER_BOX = { minRows: 8, floorRows: 3, shortShare: 0.6, size: 12.5, rowEm: 1.7, frame: 12, inner: 8, margin: 2, hysteresis: 4 };
+export const answerRowPx = (scale = 1) => ANSWER_BOX.size * (Number(scale) > 0 ? Number(scale) : 1) * ANSWER_BOX.rowEm;
+const rowsPx = (n, scale) => Math.round(n * answerRowPx(scale) + ANSWER_BOX.frame + ANSWER_BOX.inner);
+
+// The frame's least height in px: minRows rows, or in a short column (col: its height, 0 when not measured
+// yet) shortShare of it, never under floorRows rows.
+export function answerMinFrame(scale = 1, col = 0) {
+  const min = rowsPx(ANSWER_BOX.minRows, scale);
+  if (!(Number(col) > 0) || min <= col * ANSWER_BOX.shortShare) return min;
+  return Math.max(rowsPx(ANSWER_BOX.floorRows, scale), Math.round(col * ANSWER_BOX.shortShare));
+}
+
+// The frame's height in px from what the dialog measured (detail.js fitAnswer): col, the left column's height;
+// used, everything in it but the frame (its padding, the parts above and below, the ANSWER section's title,
+// hint row and the gaps). The free height less the margin, at least answerMinFrame; current (the height drawn
+// now) is kept only while it still fits and is under the hysteresis short of it (review fix 7.8: a column a
+// pixel shorter shrinks the frame at once, so it never overhangs), and is at least the minimum. Nothing
+// measured yet: current, else the minimum.
+export function answerFrame({ col = 0, used = null, scale = 1, current = null } = {}) {
+  const min = answerMinFrame(scale, col);
+  const cur = Number.isFinite(current) && current > 0 ? Math.round(current) : null;
+  if (!(Number(col) > 0) || !Number.isFinite(used) || used < 0) return cur !== null && cur >= min ? cur : min;
+  const want = Math.max(min, Math.floor(col - used - ANSWER_BOX.margin));
+  if (cur !== null && cur >= min && cur <= want && want - cur < ANSWER_BOX.hysteresis) return cur;
+  return want;
+}
+
+// The rows the textarea is told for a frame of that height (TextareaState set_rows: should Herdr size it by
+// its rows rather than by the height it is given, it still fills about the frame), at least floorRows.
+export const answerRows = (frame, scale = 1) =>
+  Math.max(ANSWER_BOX.floorRows, Math.floor((Number(frame) - ANSWER_BOX.frame - ANSWER_BOX.inner) / answerRowPx(scale)));
+
+// Herdr's app folder as ledgr names paths under it (2026-11-23, the second review's 9.4: one normalisation for
+// attach.js attachDir and opener.js clipDir, so the two always agree): runs of slashes made one, a trailing slash
+// dropped; null unless it is absolute, is not "/" and has no "." or ".." segment (then no path is ledgr's).
+export function appRoot(home) {
+  const h = typeof home === "string" ? home.replace(/\/+/g, "/").replace(/\/$/, "") : "";
+  if (!h.startsWith("/") || h.split("/").slice(1).some((seg) => seg === "" || seg === "." || seg === "..")) return null;
+  return h;
+}
+
 // What a record is, whatever the props' hint said (2.1): a pin by its pn_ id, a branch by br_, an item by
 // its direction. null: nothing known.
 export function kindOf(id, item = null) {

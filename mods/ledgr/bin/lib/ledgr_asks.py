@@ -2,7 +2,11 @@
 provider. Provider structured-output modes are never trusted: whatever a provider returns goes
 through validate() before it reaches the spool.
 
-Each valid ask: {text, kind, level, options, recommended, blocking, quote, repeat_of, repeat_of_handle, hash, origin}
+Each valid ask: {text, kind, level, options, recommended, blocking, quote, repeat_of, repeat_of_handle, hash, origin,
+[summary]}
+  summary = what the user must do, precisely, readable without the reply (2026-11-23): markdown, line
+  breaks kept, cut at MAX_SUMMARY; left out when the ask has none (summary_of). Optional here: the MCP
+  server's declare_asks requires it itself, a block item may leave it out, the extractor always writes one.
   level = how much the work depends on it: "blocking" (the agent stopped or cannot finish without it),
   "needed" (the person must act for the task to be truly done; the agent went on), "optional" (an
   offer or a suggestion). No level: "needed" ("blocking" when a legacy block says "blocking": true).
@@ -24,7 +28,15 @@ MAX_ASKS = 20
 MAX_TEXT = 400
 MAX_QUOTE = 600
 MAX_OPTIONS = 8
+MAX_SUMMARY = 1000                   # store.js LIMITS.summary: cut there, never rejected for length
 HANDLE = re.compile(r"^A\d{1,6}$")
+# JavaScript's whitespace (\s, String.prototype.trim), which store.js cleanSummary cleans a summary with. Python's
+# own differs: it leaves U+FEFF (a summary of only U+FEFF passed declare_asks while the store kept none, review
+# 7.4) and takes U+001C to U+001F and U+0085. So the summary's cleaning names JavaScript's set.
+JS_SPACE = "\t\n\x0b\x0c\r \xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+BLANK_RUN = re.compile("\n(?:[" + JS_SPACE.replace("\n", "") + "]*\n)+")   # blank or whitespace-only lines: cleanSummary
+_JS_LEAD = re.compile("\\A[" + JS_SPACE + "]+")
+_JS_TAIL = re.compile("[" + JS_SPACE + "]+\\Z")
 
 
 def schema():
@@ -52,12 +64,33 @@ def level_of(it):
     return None
 
 
+def summary_of(it):
+    """The ask's `summary`, normalised, or None when it has none. Line breaks are kept (CR LF and a lone CR
+    read as LF), every run of blank lines (whitespace-only lines among them) becomes one empty line, leading
+    and trailing whitespace goes, then the text is cut at MAX_SUMMARY characters, counted as code points
+    (and trailing whitespace dropped again). Whitespace is JavaScript's (JS_SPACE: U+FEFF counts). Not a
+    string, or empty after that: None (no summary; the key is left out). store.js cleanSummary applies the
+    same steps (the store trusts no producer):
+    s.replace(/\\r\\n?/g, "\\n").replace(/\\n(?:[^\\S\\n]*\\n)+/g, "\\n\\n").trim(), then the cut."""
+    s = it.get("summary") if isinstance(it, dict) else None
+    if not isinstance(s, str):
+        return None
+    return _JS_TAIL.sub("", summary_text(s)[:MAX_SUMMARY]) or None
+
+
+def summary_text(s):
+    """summary_of's steps before the cut (a caller can tell whether the cut took anything)."""
+    s = BLANK_RUN.sub("\n\n", s.replace("\r\n", "\n").replace("\r", "\n"))
+    return _JS_TAIL.sub("", _JS_LEAD.sub("", s))
+
+
 def validate(items, prose, origin, known=None, rejected=None):
     """Normalise raw ask objects. Drops items without a non-empty string `text`, and items whose
     `level` is not blocking, needed or optional (a reason per drop goes to `rejected`, a list, when
     given); a quote is kept only if it is a whitespace-normalised substring of `prose`. `known` maps
     the handles shown to the model to {"id", "status"}; a repeat_of outside it is dropped (never
-    trust an invented id)."""
+    trust an invented id). `summary` is kept as summary_of() gives it, and left out when there is
+    none (a missing summary never drops an ask here)."""
     known = known or {}
     norm_prose = squash(prose)
     out = []
@@ -80,6 +113,7 @@ def validate(items, prose, origin, known=None, rejected=None):
             q = q[:MAX_QUOTE]
         rep = it.get("repeat_of")
         rep = rep.strip() if isinstance(rep, str) and HANDLE.match(rep.strip()) and rep.strip() in known else None
+        summ = summary_of(it)
         out.append({
             "text": text,
             "kind": it.get("kind") if it.get("kind") in KINDS else "do",
@@ -93,6 +127,8 @@ def validate(items, prose, origin, known=None, rejected=None):
             "hash": passage_hash(q or text),
             "origin": origin,
         })
+        if summ:
+            out[-1]["summary"] = summ
     return out
 
 

@@ -29,7 +29,12 @@ const hex = (seed, len) => {   // deterministic, distinct per seed
 const sidOf = (k) => `cccccccc-00${String(k).padStart(2, "0")}-4000-8000-${hex(k, 12)}`;
 const uuid = (seed) => `${hex(seed, 8)}-${hex(seed + 1, 4)}-4${hex(seed + 2, 3)}-8${hex(seed + 3, 3)}-${hex(seed + 4, 12)}`;
 
-export function liveShape({ now = 1795100000000, itemBytes = 1000, turnBytes = 315 } = {}) {
+// summaries (2026-11-23, off by default, so every other caller sees the store as before): every third agent ask
+// (i % 3 === 1) carries a `summary` (a sentence and a two-line list, about 270 characters), built without touching
+// the seed, so every other value is as without it but the quote's padding: the quote pads what is left of
+// itemBytes, which a summary on top of these items leaves none of (186 items of about 1.2 KB, the store 0.84 MB
+// rather than 0.81).
+export function liveShape({ now = 1795100000000, itemBytes = 1000, turnBytes = 315, summaries = false } = {}) {
   const data = { v: 1, items: {}, sessions: {}, branches: {}, terminals: {}, turns: {}, ingested: Array.from({ length: 1000 }, (_, i) => `ev-${uuid(9000 + i * 7)}`),
     forgotten: {}, pins: {}, houseAt: now - 3 * 3600e3, retention: { v: 1, at: now - 2 * DAY } };
   const sids = { active: [], cold: [], empty: [] };
@@ -82,6 +87,7 @@ export function liveShape({ now = 1795100000000, itemBytes = 1000, turnBytes = 3
           status, origin: "tool", terminal: `t${k}`, createdTurn: turn, createdAt: up - 3600e3, updatedAt: up, seq: i % 5,
           ...(status === "answered" ? { answer: say(++seed, 40), answeredTurn: turn + 1 } : {}),
           ...(status === "resolved" || status === "dismissed" ? { resolvedAt: up, resolvedTurn: turn + 1 } : {}) };
+      if (summaries && !human && i % 3 === 1) base.summary = `${say(k * 1000 + i, 140)}.\n\n- ${say(k * 1000 + i + 1, 60)}\n- ${say(k * 1000 + i + 2, 60)}`;
       base.anchor.quote = say(++seed, Math.max(0, itemBytes - JSON.stringify(base).length));
       data.items[id] = base;
     }

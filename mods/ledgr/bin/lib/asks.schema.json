@@ -8,7 +8,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["text", "kind", "quote", "level", "options", "recommended", "repeat_of"],
+        "required": ["text", "kind", "quote", "level", "options", "recommended", "summary", "repeat_of"],
         "properties": {
           "text": { "type": "string" },
           "kind": { "type": "string", "enum": ["decide", "confirm", "do", "provide", "review"] },
@@ -16,6 +16,7 @@
           "level": { "type": "string", "enum": ["blocking", "needed", "optional"] },
           "options": { "type": "array", "items": { "type": "string" } },
           "recommended": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "summary": { "type": "string" },
           "repeat_of": { "anyOf": [{ "type": "string" }, { "type": "null" }] }
         }
       }

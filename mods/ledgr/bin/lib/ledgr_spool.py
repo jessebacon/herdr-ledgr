@@ -18,7 +18,8 @@ stop            when the turn's message id is known   turn, prompt_id, text_path
                                                       api_message_id|null
 asks            extraction finished                   turn, prompt_id, message_uuid|null,
                                                       api_message_id|null, passage_hash, source
-                                                      (block|model|skip|error), asks[], model,
+                                                      (block|model|tool|skip|error), asks[] (each
+                                                      ask's fields below, `summary` among them), model,
                                                       provider, usage, ms, error, block_error,
                                                       extract_request_id, [error_detail], [truncated]
 session_end     session ends (optional hook)          turn, reason
@@ -63,7 +64,10 @@ Branch environment (set by the launcher with `env` in the argv, read by ledgr_ma
 
 passage_hash: sha1 of the whitespace-collapsed final message, first 12 hex chars. Each ask also
 carries `hash` (the same rule over its quote, else its text), `origin`, `repeat_of` and
-`repeat_of_handle`. Order per turn: pending, then stop, then asks.
+`repeat_of_handle`, and, when it has one, `summary` (2026-11-23: what the user must do, precisely,
+readable without the reply; markdown, line breaks kept, at most 1,000 characters; ledgr_asks.summary_of.
+Required on the MCP tool, optional in a block, always written by the extractor; no summary, no key).
+Order per turn: pending, then stop, then asks.
 """
 import os
 

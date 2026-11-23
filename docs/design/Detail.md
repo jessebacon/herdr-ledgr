@@ -6,7 +6,10 @@ to 3), `Pins.md`, and the build notes in `docs/build-notes/`. Retention (2026-11
 added archived rows under CLOSED and a read-only dialog for them; the sections it touched say so. Retention
 Phase 2 (2026-11-19, `Retention.md` 10; built: `BUILD-NOTES-detail.md` 18) added cold sessions: the session
 menu's OLDER SESSIONS fold, a cold session's loading, error and fault views, and the dialog on an item of
-one; the sections it touched say so too.
+one; the sections it touched say so too. The ask's summary and an image in an answer (2026-11-23; built:
+`BUILD-NOTES-detail.md` 19, 19.1 and 20) reordered an ask's left column, made the answer box its main
+region, and added WHAT TO DO and the attachments row: 2.2, 2.4, 2.5, 2.7 and 2.9 say so, 2.11 and 2.12
+are new, and 6.5 gains steps 12 to 14 (the live check of 2026-11-23 and the fix it led to).
 
 The panel becomes a scan list: one line per item, driven by the pointer or by arrows and Enter.
 Clicking a row, or Enter on it, opens a centered dialog (`kind: "dialog"`, 0.6 × 0.75 of the
@@ -43,6 +46,9 @@ screen with `TextView.markdown(...).selectable(true)`, Esc back).
 | Must happen first | Probe P1 (staging with a dialog open, where the keyboard goes after it closes) | 6.4, 7 |
 | Archived items (added 2026-11-19, `Retention.md` 6) | CLOSED ends with `archived (N) · show` (entry `arch:items`); shown, archived rows read from ledgr-data/archive/ (state word "archived", dim, no quick action); the dialog shows one whole and read-only (`props.archived`), its one action Reopen | 1.3, 1.4, 1.7, 1.10, 2.1, 2.4, 2.5, 2.8 |
 | Cold sessions (added 2026-11-19, `Retention.md` 10) | The session menu ends with a folded OLDER SESSIONS (N), rows counted from the stub; shown, a cold session's file is read and merged into the copy's own store, never brought back ("Reading…", then its lanes; unreadable: Try again; the writer cannot read it: Try again, Use without its older items, Forget, and any other file of the session in cold/ named); a dim "older" pill; the dialog on one of its items says "Reading…", never Gone | 1.1, 1.7, 1.10, 2.1, 2.8, 5.2, 6.5 |
+| An ask's summary (added 2026-11-23) | WHAT TO DO after TEXT: the agent's `summary`, what the user must do, precisely; none, no section; the row's tooltip gains it | 2.4, 2.11 |
+| The answer box (2026-11-23) | The ask's main region: the column's full width and, in two columns, its free height in pixels (at least 8 rows); 8 rows in one column; Paste answer under it; QUOTE moved below the answer, dim | 2.2, 2.4 |
+| An image in an answer (added 2026-11-23) | A file under `ledgr-data/attachments/` and one line of the draft naming it: an image's path that a paste or a drop puts into the box whole (added after the live check: the way a capture tool's file reference arrives), a file dropped on the box's frame, or the clipboard's image by ⌘V in the box or Paste image (one pinned `osascript` call); at most 4, 8 MiB each, never deleted by ledgr | 2.5, 2.7, 2.12, 6.5 |
 
 ## 1. The list (Builder A)
 
@@ -385,10 +391,12 @@ click outside close it.
 │ ◆ Ask 15  blocking  decide · turn 17 · declared by the agent   open   claude · shop-api migration · pane t21   Esc │
 ├ left column (the item, scrolls)        │ right column (the message, scrolls) │
 │ TEXT                                   │ THE MESSAGE · turn 17   whole ⇄ around · Copy │
-│ QUOTE                                  │ before (muted)                      │
-│ options / ANSWER                       │ ▌the passage (accent edge)          │
-│ sections of the kind (2.4)             │ after (muted)                       │
-│ foot line                              │                                     │
+│ WHAT TO DO (2.11)                      │ before (muted)                      │
+│ OPTIONS                                │ ▌the passage (accent edge)          │
+│ ANSWER: the box, the free height       │ after (muted)                       │
+│   images (2.12) · hint · Paste answer  │                                     │
+│ RESULT, QUESTIONS ABOUT IT             │                                     │
+│ QUOTE (dim) · foot line                │                                     │
 ├ footer ───────────────────────────────────────────────────────────────────────┤
 │ status line (this.flash)                                                     │
 │ [primary] [Done] [Defer ▾] … [⋯]                         Esc close · Tab next field │
@@ -406,7 +414,12 @@ click outside close it.
 - Footer `dt-foot`: `border_t`; the status line when `this.flash` is set; the actions row
   (`flex_wrap`, `gap(6)`); the key hints at the right (capture.js:416-418 style).
 - No height cap and no scroll area inside a column (panel.js:2150: a capped box inside a scrolling
-  list neither scrolled nor showed a bar). `TextView.scrollable` is not used.
+  list neither scrolled nor showed a bar). `TextView.scrollable` is not used. One exception since
+  2026-11-23: an open ask's answer box is given a height in pixels (2.4) and scrolls inside once its
+  text passes it; the column itself is filled to 2 px short of its viewport, so it shows no scrollbar
+  of its own on that account. The diagram shows an ask's column as it runs since 2026-11-23 (until
+  then QUOTE followed TEXT and the box sat under OPTIONS, two rows growing to ten, Paste answer
+  beside it).
 
 ### 2.3 Readable text
 
@@ -438,18 +451,42 @@ false, folding: false, soft_wrap: true, font_family: settings().font_family })`,
 Left column, top to bottom. "Sub-row" is a one-line row drawn from `rowModel` (listing.js) by
 views.js `subRow`; clicking it retargets the dialog (2.8).
 
-**ask**
+**ask** (the order since 2026-11-23, `detail.js` `itemParts`; until then TEXT, QUOTE, OPTIONS, ANSWER,
+RESULT, QUESTIONS ABOUT IT)
 
 | Section | Content | Shown when |
 |---|---|---|
 | TEXT | the ask, whole | always |
-| QUOTE | the quote, whole (today's 300-character cap, :2231, goes) | there is one |
+| WHAT TO DO | the ask's summary (2.11): markdown, linkified as the text is, behind a 2 px accent edge, the title in accent, Copy | it has one (a closed or archived ask too) |
 | OPTIONS | chips; the chosen one in accent; "(rec.)" | kind decide with options |
-| ANSWER | `answerBox`: the Answer… input, Paste answer (`L.one`), the hint "Enter pastes the answers for turn N" | not closed |
+| ANSWER | `answerBox`: the box (below), then the attachments row (2.12), then the hint "⌘Enter pastes the answers for turn N (Enter starts a new line); pasting or dropping an image attaches it, as a picture or as its file's path; …" (the hint since the fix after the live check) with Paste answer (`L.one`) at its right | open, not archived, its session known |
 | RESULT | "→ answer" (verbatim); who closed it and when (`resolvedByWords`, :2094-2096); "raised again" with the dismissed ask; `it.note`; "deferred until …" | as they apply |
 | QUESTIONS ABOUT IT | sub-rows of its child questions | there are some |
+| QUOTE | the quote, whole (today's 300-character cap, :2231, goes), dim, italic, 12 px, with Copy: the message beside it marks the passage | there is one |
 | foot | `Ask 15 · declared by the agent · blocking · turn 17 · #hash` (:2249-2250) | always |
 | message (right) | its anchor turn (`loadPassage`), the quote marked | always |
+
+The answer box (2026-11-23; `BUILD-NOTES-detail.md` 19 and 19.1). It is the column's main region:
+the column's full width and, in two columns, its free height. A Textarea is sized by `rows`,
+`set_auto_grow` or `.h(px)` (Herdr's typings; `.h_full()` or `.flex_1()` on one is shown nowhere),
+and a box grown by flex inside a scrolling column sizes by its content and would never shrink, so the
+height is computed in pixels from measured heights: with a box, the column's direct children are
+three, `dt-above-<id>` (ARCHIVED to OPTIONS), `dt-sec-ans-<id>` and `dt-below-<id>` (RESULT to the
+foot), and `on_size_change` reports the column (`dt-left`), the two groups and the ANSWER section
+(less the frame drawn: its title, gaps, the attachments row and the hint row), kept per item id
+(`detail.js` `noteFit`, `fitOf`, the newest 32), so a step back with ⌘↑ draws an ask at its own height
+at once. `fitAnswer` (a handler, never render) takes `detailing.js` `answerFrame`: the column's free
+height less a 2 px margin, at least `answerMinFrame` (8 rows of 12.5 px × the text scale × 1.7, plus
+the frame's 12 px and the textarea's own 8: 190 px at scale 1, 292 at 1.6, 156 at 0.8; in a column
+where that is over 0.6 of its height, 0.6 of it, never under 3 rows), the height drawn kept only while
+it still fits and is under 4 px short (`ANSWER_BOX`). The frame gets `.h(frame)`, the textarea
+`.h(frame − 12)`, and `set_rows(answerRows(frame))` in case Herdr sizes it by its rows; no
+`set_auto_grow`, so a long answer scrolls inside. In one column (under 760 px, the message and its
+marked passage in the same scrolling column) the box is `answerMinFrame`, 8 rows, and does not fill
+(review fix, so the passage stays in reach). A click on the frame's padding puts the keyboard in the
+box (`focusAnswer`). Everything else the box did stays: the draft (`typeDraft`, `flushPending`,
+`sendDraft`), the cut at `LIMITS.answer` (since the second review never through an image's line, 2.12), Enter a new line, ⌘Enter the turn's answers once
+(`pasteSheet`, `unbreak`), Tab, ⌘↓ / ⌘↑, the archived view, the demo.
 
 **question**
 
@@ -482,7 +519,7 @@ whole selection, as `pinsFor` does today (:1554-1556); the dialog cannot change 
 | Section | Content | Shown when |
 |---|---|---|
 | ARCHIVED | first: when and how it was closed (`archivedWords`: "Closed 5 days ago (date) · answered by you."), where it is kept (`archiveFileWords`), an `archived` badge | always |
-| TEXT, QUOTE, ABOUT, OPTIONS, RESULT, foot | as for a live ask or question; OPTIONS not clickable (closed) | as they apply |
+| TEXT, WHAT TO DO, QUOTE, ABOUT, OPTIONS, RESULT, foot | as for a live ask or question, in its order; OPTIONS not clickable (closed) | as they apply |
 | ANSWER | never, whatever status the record holds | — |
 | the ask it repeats or is about | a sub-row read from the archive when it is archived too; it opens read-only | it has one |
 | message (right) | its anchor turn, as for a live item | always |
@@ -519,7 +556,11 @@ panel.js to detail.js unless the Reader column says so.
 | Promote | a suggestion | `act(id, "promote")` | `act` promote | stays |
 | typing an answer, an option chip | ask | Reader `typeDraft`, `setDraft` | `act` draft (800 ms after the last change) | stays |
 | Paste answer | ask | Reader `copyAnswer` | stages the one-ask sheet | closes when the paste is decided (3.1) |
-| Enter in the answer box | ask | Reader `copyAnswers(s, turn)` | stages the turn's sheet (today's behaviour, :683-687) | the same |
+| ⌘Enter in the answer box (Enter until 2026-11-11, now a new line) | ask | `pasteSheet` → Reader `copyAnswers(s, turn)` | stages the turn's sheet (today's behaviour, :683-687) | the same |
+| An image file dropped on the answer box (2026-11-23) | open ask | `dropOnAnswer` → `attachDropped` → `attach.js` `copyIn` → `attachWritten` (2.12) | nothing: the copy under `ledgr-data/attachments/`, its line in the draft, then the draft as typing posts it | stays |
+| A paste or a drop that puts an image file's path into the answer box whole (2026-11-23, after the live check) | open ask | `pathsIn` → `attachPathLine` → `attach.js` `copyIn` → `attachWritten` with `replace` (2.12) | the same: the copy, its line in the path's place; refused, the path stays as text | stays |
+| ⌘V in the answer box with no text on the clipboard; Paste image (2026-11-23) | open ask | `pasteImage` → `attach.js` `prepareSlot` → `opener.js` `clipboardImage` → `attachWritten` (2.12) | the same | stays |
+| Remove, Reveal on an attachment's chip (2026-11-23) | open ask | `removeAttach` (the line out of the draft; the file stays), `revealAttach` (`revealLink`'s `open -R`) | the draft; nothing | stays |
 | Ask about this | ask | `askAbout` (:778-782) | opens the capture box | closes, focus none |
 | Copy for prompt; Stage /btw | question without pins | `stageQuestion` (:784-790) | `stageText` (clipboard, pane focused); /btw also `act` btw | closes, focus pane |
 | Copy for prompt | question with pins | `copyPinsMessage` (:1613-1620) | clipboard only | stays |
@@ -563,10 +604,12 @@ acts; its rows follow once the writer has ingested them (normally well under a s
 | Key | In | Does |
 |---|---|---|
 | Esc | anywhere | Herdr closes the top dialog (AGENTS.md:994). The root's `on_key_down` also sees "escape" when it gets it first: it records `closedBy = "esc"` (so the record says focus "list") and calls `close()` |
-| Enter | the answer input | the turn's sheet (2.5) |
+| Enter | the answer box | a new line (2026-11-11: a multi-line `Textarea`; until then the turn's sheet) |
+| ⌘Enter | the answer box, or the dialog on an ask while it holds the keyboard | the turn's sheet (2.5): the `mod:ledgr` `btw` command or the box's own submit with ⌘, one paste (`pasteSheet`; 2026-11-11) |
+| ⌘V | the answer box | text on the clipboard: pasted as text, and an image file's path among it (a capture tool's or Finder's file reference pastes as one) becomes an attachment (2.12, after the live check); an image and no text (the textarea's `paste_other`): the clipboard's image attached (2.12; 2026-11-23). The box's own paste: no `mod:ledgr` binding |
 | Enter | the note input | saves the note |
 | Tab, Shift-Tab | a field of the dialog | `mod:ledgr` binds them to `ledgr.tab` / `ledgr.backtab`; the dialog moves to its next / previous field (answer, note, Conclude text, then the dialog itself), only while `this.keys.is_focused()` or one of its InputStates reported `focus` more recently than `blur`, so a Tab in a capture box opened on top is never taken |
-| ⌘Enter, ⌘S | anywhere | `ledgr.btw`, `ledgr.pin`: ignored by the dialog (they are the capture box's) |
+| ⌘Enter (but on an ask, above), ⌘S | anywhere | `ledgr.btw`, `ledgr.pin`: ignored by the dialog (they are the capture box's) |
 | any other | the dialog itself | nothing; actions are clicks |
 
 Focus on open: an open ask → its answer input; `open: "note"` → the note input; `open: "conclude"` →
@@ -618,7 +661,8 @@ confluence.js, branch.js, store.js predicates.
 | `messageBlocks(t, id, text, quote, { whole })` | :2147-2155 | returns the three blocks as an array (direct children of the column) |
 | `manifestView(t, m, frozen)` | :2254-2259 | |
 | `optionChips(host, t, it)` | :2134-2141 | |
-| `answerBox(host, t, st, s, it)` | :2238-2244 | `host.answer` is the InputState |
+| `answerBox(host, t, st, s, it, o)` | :2238-2244 | `host.answer` is the TextareaState (2026-11-11); since 2026-11-23 `o.frame` (px, 2.4), `o.below` (the attachments row), `o.onFrame`, `o.onDrop` |
+| `attachRow(host, t, it, atts, o)`, `thumb(rel, w, h)` | new, 2026-11-23 | 2.12 |
 | `confirmBox(host, t, st, s, it)` | :2262-2289 | |
 | `confluenceView(host, t, st, s, br)` | :2405-2418 | |
 | `concludeBox(host, t, st, s, br)` | :2422-2453 | |
@@ -631,7 +675,8 @@ confluence.js, branch.js, store.js predicates.
 `gitOk`, `brMsg`, `preOpen`, `pinDel`, `dd`, `ddShut`, `ddFocus`; `act`, `setDraft`, `copyAnswer`,
 `copyAnswers`, `launch`, `openConclude`, `sendToTrunk`, `copyConfluence`, `askForConclusion`,
 `closeBranch`, `focusBranch`, `trunkWord`, `trunkLine`, `branchLive`, `pasteOn`,
-`confirmManifest`, `canConclude`, `retarget`.
+`confirmManifest`, `canConclude`, `retarget`; since 2026-11-23 `pasteImage`, `removeAttach`, `revealAttach`
+(the attachments row).
 
 `detailing.js` (new, B, pure: no herdr, no gpui; loads in Node):
 
@@ -647,6 +692,7 @@ confluence.js, branch.js, store.js predicates.
 | `closesAfterStage(r)` | 3.1 |
 | `mergeClosed(cur, mine)` | 2.1 |
 | `keptConclude(kept, branchId, now, postedAt)`, `keepConclude(kept, branchId, text, now)` | 2.7, over the plain object read from `localStorage` |
+| `ANSWER_BOX`, `answerRowPx`, `answerMinFrame(scale, col)`, `answerFrame({col, used, scale, current})`, `answerRows(frame, scale)` | the answer box's height (2.4; 2026-11-23) |
 
 `detail.js` (new, B): `class Detail extends Reader` (2.1), its `command()`, `render()`, and the action
 methods of 2.5 moved from panel.js (two-space indented, `name(args) {` on one line: the static test
@@ -664,6 +710,119 @@ not in `sessions` (search shows it as forgotten), and `DEMO_DETAIL = "A15"`. Eve
 a demo case: A15 (blocking decide, options, its passage in T17), A7 (answered), A9 (raised again), Q3
 (a running branch with a ledgr-conclusion), Q2 (rejoined), Q5 (its message not saved), Q6 (bookmark),
 Q9 (two pins, answered), P2 (a note).
+
+Since 2026-11-23, A15 and A8 carry summaries (`fixtures.js` `DEMO_SUMMARY_A15`: a sentence, a two-item
+markdown list and a closing sentence; `DEMO_SUMMARY_A8`: one paragraph with a file path, which WHAT TO DO
+links); every other demo ask has none, so the section's absence shows too. A drop, ⌘V or Paste image in a
+demo dialog copies and runs nothing: the status line says what would be saved.
+
+### 2.11 An ask's summary: WHAT TO DO (2026-11-23)
+
+Jesse, 2026-11-23, on an ask that asked him to confirm the changes listed in a table: "there needs to
+be a 'summary' of what I'm supposed to do. Often, the context given around an ask doesn't do a good job
+of explaining precisely what the agent wants." To answer it he had to read a five-row table in the
+message.
+
+An agent ask carries `summary` (the producers: `BUILD-NOTES-hooks.md`, "The ask's summary, and ledgr
+never hands work back"; the store: `BUILD-NOTES-mod.md` 21): what the user must do, precisely, readable
+without the reply. At most 1,000 characters (`LIMITS.summary`), markdown, line breaks kept; the store
+cleans it (`store.js` `cleanSummary`) and an item without one has no key. Parked questions, pins and
+branches have none. The agent declares it (`declare_asks` requires it; a block may give it as its last
+field) or the extractor writes it.
+
+| Where | What |
+|---|---|
+| The dialog | WHAT TO DO, after TEXT (2.4): `listing.js` `summaryOf(it)` (an agent ask's `summary`, trimmed, else ""), `readable` in markdown mode with the dialog's link handler, so its web links and file paths open as the text's do (it is the agent's text, not the person's); `dt-sec-todo-<id>`, a 2 px accent left edge (`dt-todo-edge-<id>`), the title in accent, Copy (`dt-cp-todo-<id>`: "What to do copied (N characters); nothing was pasted.") |
+| No summary | no section and no placeholder |
+| A closed or archived ask | shown, as on an open one |
+| The list | the row's tooltip (`listing.js` `tipOf`) gains "What to do:" and the summary's first 300 characters, line breaks kept, after the text and the quote and before the drafted answer; on archived rows too. `panel.js` unchanged |
+
+### 2.12 An image in an answer (2026-11-23)
+
+Jesse, 2026-11-23: the answer "needs to accept a photo attachment (from clipboard)". No mod API yields
+the clipboard's image: the answer `Textarea` fires `paste_other` on a paste that held no text, with no
+image data, and the only way to read the image is an `exec` of `osascript`, which `test_no_keystrokes.py`
+rule 1 banned by name and rule 13 by shape. Asked through ledgr, he answered: "Yes, allow osascript on
+⌘V in the answer box with the pinned exception." Built: `BUILD-NOTES-detail.md` 20, and the second
+outside review's fixes in 20.1. With 2.11: built
+2026-11-23; the offline suites and `herdr-app check mods/ledgr` pass; installed the same day
+and checked live by the owner (6.5 steps 12 and 13: the layout, the fitted box and ⌘V reaching the box
+seen). The live check found that his captures never reached the clipboard route; the path route below
+came out of it, built 2026-11-23 after the live check (`BUILD-NOTES-detail.md` 20.2; 6.5 step 14). Later
+the same day, on the first installed build, an attachment line made by one of that build's own routes came
+through the answer sheet whole and its thumbnail drew, and the agent read the file with no prompt in that
+one session (6.5 step 13). The path route was then installed on the owner's word ("install"), the day's
+second install (6 files written, the installer's suite run, `--check` healthy, the installed mod identical
+to the repo). Seen live on that install: an image that reached the box became an attachment through it
+(the owner's answer began with the attachment line for a new file, `20261123-181836-3d1f74.png`, a valid
+PNG on disk; "Seems to work!"); he did not say whether he pasted the capture or dropped it on the text, or
+tried both (6.5 step 14).
+
+**The model.** An attached image is a file under `ledgr-data/attachments/` and one line of the answer's
+draft, `attached image (read this file): <absolute path>`, followed by a line break (`withAttach`), so
+what is typed next starts its own line. No new spool event, no store field, no writer change: the line is
+ordinary draft text, so it goes through `typeDraft`, the answer sheet (`confluence.js` `answerLines`
+indents it as a continuation line) and the landing parser unchanged, and the agent reads the file from
+the path with its own tools. The line's pattern ends at the image's extension, so words typed after the
+path on the same line do not unmake it, and the box's cut at `LIMITS.answer` never leaves part of one
+(`cutDraft`: the line goes whole, and the status line says so; the file stays). The file is named
+`<yyyymmdd>-<hhmmss>-<rand6>.<ext>`, lower case, no space or bracket (the hook's `[A3]` ref scan), `ext`
+one of png, jpg, jpeg, gif, webp; a clipboard image is always a PNG. The folder is Herdr's app folder
+normalised once (`detailing.js` `appRoot`: slashes made single, no trailing one, absolute, not "/", no
+"." or ".." segment) for `attach.js` `attachDir` and `opener.js` `clipDir` alike; with no app folder known,
+nothing is attached. At most 4 images to an answer (`ATTACH.perAnswer`), 8 MiB each (`ATTACH.maxBytes`,
+`opener.js` `CLIP_MAX`). Nothing under `attachments/` is ever deleted by ledgr (Remove takes the line out
+of the draft and leaves the file), and nothing is written over: the clipboard's script creates its file
+and cannot replace one, and a copied-in file (dropped, or taken in from its path) goes through Herdr's
+`fs.writeFile`, which has no create-only flag, so there it rests on `prepareSlot` finding the name free
+just before the write.
+
+| What | Where |
+|---|---|
+| The name, the checks, the line, finding the lines in a draft (`attachLines`: ledgr's own files only), adding and removing one (`withAttach`, `withoutAttach`), the cut that never splits one (`cutDraft`), the path for `image()` relative to the app's folder (`appRelative`), sizes in words; `prepareSlot` (the folder made, a free name), `copyIn` (a dropped file read, written with `fs.writeFile`, read back and compared by length; each step bounded at 10 s by `spool.js` `within`; no process), `fileInfo` (size and header, read once), `imageDims` (a PNG's or JPEG's pixel size from its header), `thumbSize` | `attach.js` (new; not an engine file; imported by `detail.js` alone) |
+| The drop: `on_drop` on the answer's frame (absolute paths) → `dropOnAnswer` → each path through `attachDropped` (an image by its name, then `attachRoom`, then `copyIn`) | `views.js` `answerBox` (`o.onDrop`), `detail.js` |
+| The clipboard: the textarea's `paste_other` (⌘V found no text) and the row's Paste image → `pasteImage`: the demo runs nothing; one attaching at a time (`this.attaching`, shared with the drop; `attachBusy` treats a flag older than `ATTACH.staleMs`, 60 s, as stale, and each run clears it only if it is still its own); `attachRoom` before anything runs; `prepareSlot("png")`; `opener.js` `clipboardImage(path)`, bounded by `within` (`ATTACH.clipMs`, 8 s) | `detail.js` `makeAnswer` (one handler, no logic), `pasteImage` |
+| The seam both routes end in: `attachWritten(id, path, cx, {size, how})`, a file already written directly in `attachments/` (`isOurs`), checked again (the ask open, under 4 images, the draft plus the line within 4,000: the draft may have changed meanwhile; refused, the file stays), its line at the end of the draft through `setDraft`, the status words | `detail.js` |
+| The pinned call: `clipboardImage(outPath)` refuses, running nothing, a path that is not absolute, holds a line break or NUL, is not a `.png`, is not directly in `clipDir()` (`appRoot(appHome())` + `/ledgr-data/attachments`) or has not an attachment's own name (`CLIP_NAME`, `<yyyymmdd>-<hhmmss>-<rand6>.png`), and every path when the app folder is not known; then `exec("/usr/bin/osascript", ["-l", "JavaScript", "-e", CLIP_SCRIPT, outPath, String(CLIP_MAX)], { timeout: OPEN_TIMEOUT })` (5 s); `clipResult` maps the answer (written, with its bytes and whether it was converted; no image; too large; why); never throws | `opener.js` |
+| `CLIP_SCRIPT` (JavaScript for Automation, a constant, nothing interpolated): the pasteboard's PNG copied as it is, else any image it holds converted to PNG; no image, or over the limit, it throws before writing; its one write creates the file and never writes over one (`writeToFileOptionsError` with `NSDataWritingWithoutOverwriting`: an existing file is left byte for byte and the run fails; should a write fail part way, the dialog looks and says a partial file may be left at its name, never deleting it); it makes no folder, drives no application, presses no key, runs no shell, changes no pasteboard and reaches no network | `opener.js` |
+| The row under the box (`o.below`): one chip per attachment line in the draft, a thumbnail through `image("ledgr-data/attachments/<name>")` (relative to the app's folder; `image` imported by name), both sides set, fitted in 112 × 72, only when `ui.attachmentThumbs` is not `false`, the file is at most 2 MiB (`ATTACH.thumbBytes`) and its PNG or JPEG header gives at most `ATTACH.thumbPx` (4,096) pixels a side (a tall capture could pass a texture limit no `try` catches; a GIF or WebP is its chip alone), its name, its size (read once from a timer, never in render), Reveal (`open -R`) and Remove; then Paste image ("Attaching…" while one is). A thumbnail `image()` cannot make is left out (`views.js` `thumb`), so the chip shows without it | `views.js` `attachRow`, `thumb`; `detail.js` `attachRowFor`, `attachInfoOf` |
+| Words: `ATTACH_WORDS` (each refusal names the file and why: not an image, the fifth, too large, empty, unreadable, not copied, not read back whole, no room in the answer, the ask closed, busy; no image on the clipboard, says how to copy one); the hint under the box; the footer's `⌘V attach an image` (`detailHints`) | `words.js`, `views.js` |
+| The rules, pinned by identity since the second outside review: 1 (`/usr/bin/osascript` once in the whole mod, counted on the files as they are on disk, comments included, in `opener.js`, as the pinned call), 13 (five shapes; `CLIP_SCRIPT` equal character for character to the copy the test keeps, `CLIP_SCRIPT_PINNED`, with its sha256, `CLIP_SHA256`, taken from `opener.js`'s raw text; the script's words as a second line; `clipRefusal` before the call; `clipboardImage` only in `pasteImage`; `opener.js` takes `exec` and `appHome` from herdr and `appRoot` from `detailing.js`), 16 (among the mod's files only `attach.js` writes or makes anything under `attachments/`; nothing removes or renames there; `opener.js` writes nothing itself; only `detail.js` imports `attach.js`; `pasteImage` checks before it reads and bounds the run; `pasteImage(` in `detail.js` twice, its definition and the `paste_other` handler, and in `views.js` once, Paste image in `attachRow`; `attachRow(` called once, from `answerSection`); `attach.js` in `NOT_ENGINE`. The test strips comments with string, template and regex literals respected (the old pattern cut a line at a `//` inside a string, which let an edited script pass); an argument names another copy of the mod to check | `bin/tests/test_no_keystrokes.py` |
+
+**An image's path that lands in the box** (2026-11-23, built after the live check; `BUILD-NOTES-detail.md`
+20.2). The owner captures with CleanShot, whose clipboard carries a file reference: Herdr's textarea pasted it
+as one plain line, the capture file's absolute path (with spaces in it), and inserted a file dropped on its
+text the same way, so neither `paste_other` nor the frame's `on_drop` fired and no attachment was made (6.5
+step 13). For such a capture tool this route is the one that actually runs:
+
+| What | Where |
+|---|---|
+| The change handler's one new call: `pathsIn(id, before, now, cx)`, with the draft before the change and the box's value after | `detail.js` `makeAnswer` |
+| What the change inserted: the new text less the longest prefix, then the longest suffix, it shares with the text before (`insertedSpan`); it must be at least two characters, so a key typed (one character) never takes a path, whether typed by hand or finished by a keystroke | `attach.js` |
+| Each line of the inserted text, trimmed, that is exactly an absolute path or a `file://` URL (`file:///…`, `file://localhost/…`, percent-decoded; `pathOf`) to an image outside the attachments folder (`pastedPaths`): png, jpg, jpeg, gif, webp in any case are taken; heic, heif, tif, tiff, bmp, svg, avif and ico (`OTHER_IMAGE_EXTS`) are said and left; a path pasted after words on a line is taken, the words keeping their own line | `attach.js` |
+| Taken: checked (an image ledgr takes, the ask open, under 4, room under 4,000 with the line in the path's place), copied in as a drop is (`copyIn`, the same limits, the same one-at-a-time flag), then the attachment line takes the path's place, with a line break after it (`withAttachAt`, `attachWritten` with `replace`); several paths in one paste are taken in order until a limit refuses one | `detail.js` `attachPathLine` |
+| Refused (cannot be read, over 8 MiB, empty, a type ledgr does not take, the fifth, no room, another attach running, the copy failing): the path stays as text, which the agent can read, and the status line says why (`ATTACH_WORDS.stays`); a path line changed while its file was copied is not named, and the status line says so (the copy stays) | `detail.js`, `words.js` |
+| One file, one attachment: a drop registers its sources at once (`recentSrc`); the same path arriving in the text while the drop copies, or within `SAME_SOURCE_MS` (2 s) after, is not taken again (its raw text goes, or the drop's line takes its place), and the same file dropped within 2 s of its path arriving in the text is skipped by the drop | `detail.js` `dropOnAnswer`, `tookLately`, `settledSrc` |
+| The hint under the box: "pasting or dropping an image attaches it, as a picture or as its file's path" | `views.js` `answerBox` |
+| Rule 16 gains three checks: `makeAnswer`'s change handler makes one call, `pathsIn`; `pathsIn` and `attachPathLine` reach no clipboard reader, process or write of their own; `attachPathLine` takes the file in through `copyIn` alone. What it pinned before is unchanged, and the callers of `pasteImage(` are the same | `bin/tests/test_no_keystrokes.py` |
+
+Assumed about Herdr's textarea: that a paste or a drop arrives as one `change` holding the whole path (were it
+delivered in pieces, no piece would be a whole path, and the path would stay text with nothing said); that a
+path is inserted plain, not quoted or with its spaces escaped; that several files pasted at once come one per
+line. The first two held at least once on 2026-11-23, by a paste or a drop (which is not known: 6.5 step 14);
+the third is not seen.
+
+Why a line of the draft rather than a field: the store, the writer, the answer sheet, the landing parser
+and the hooks are left as they are, and the agent needs nothing new to read a file. The exception is
+granted pinned, as the owner put it: one argv shape, one constant script held by its full text, one
+folder, one new file, on the person's paste or click only; any other use of `osascript`, any change to
+the script and any other caller still fail the test until it is changed with them. The second outside
+review showed why words were not enough: edited copies of the mod passed the first guard with a script
+that ran a shell, cleared the clipboard and reached the network, with one that pressed a key through
+System Events behind a `//` inside a string, and with a dialog that ran the script on every resize; the
+test now fails on each. `./install.sh --check` reports the
+folder (how many files, their size); uninstall deletes it only with the rest of `ledgr-data/` on its
+separate yes.
 
 ## 3. Staging from the dialog (Builder C, with A and B)
 
@@ -929,6 +1088,75 @@ through the panel's own events.
     items brings it back; `ledgr.open:<handle>` on another cold session opens the dialog once the file is
     read. The fault view, in a throwaway session only, is `Retention.md` 10.12 step 6; with a second file
     of that session in `cold/`, its words name it. The list is `BUILD-NOTES-detail.md` 18.
+12. The summary and the answer box (2026-11-23), after the install (the writer's host restarted by itself
+    two seconds into the install of 2026-11-23; relaunch Herdr only if a new ask's summary does not show,
+    since an old writer would drop new asks' summaries for good), in a throwaway session as in step 1, started after the install (a running session gets the wording only at its next
+    SessionStart): ask it to draft three changes to a scratch file and to have you confirm them as a
+    table before it applies them. Its declaration carries a summary (one without is refused: `mcp.log`
+    says so). Open the ask: TEXT, WHAT TO DO, OPTIONS, ANSWER, QUOTE dim at the bottom, the foot line;
+    the row's tooltip ends with "What to do: …". Does the summary say what a yes approves without the
+    table, and what the agent recommends (whether agents write good summaries is the question)? The
+    box: does it fill the column in two columns (does the Textarea honour `.h(px)`, or size by its
+    rows? do the size reports fire for the column, the two groups and the section, once per change)?
+    Make the window taller and shorter: the box follows, the column shows no scrollbar of its own.
+    Under 760 px: the box stays at 8 rows and the marked passage is in reach. Text scale 0.8 and 1.6,
+    and the dialog at 420 × 320. ⌘↓ then ⌘↑: the first ask comes back at its own height at once. A
+    long answer scrolls inside the box; the wheel over the box: does it scroll the box or the column?
+    A click in the text keeps its caret; a click on the frame's padding focuses the box. `herdr-app do
+    ledgr.demo-detail`: Ask 15's WHAT TO DO with its list.
+    Seen on 2026-11-23, on the installed build, by the owner: the layout and the fitted answer box ("LOVE
+    the new answer layout"). Not reported yet: whether agents write good summaries, and the step's
+    narrow, scale and wheel checks.
+13. An image in an answer (2026-11-23), the same session: a screenshot to the clipboard (⌃⇧⌘4), a click in
+    the answer box, ⌘V. Does `paste_other` fire? Does macOS ask for permission when a process Herdr
+    started reads the pasteboard, and is the first run slow? Does ⌘V reach the box while the dialog holds
+    the keyboard? Seen on 2026-11-23: ⌘V reaches the box while the dialog holds the keyboard ("it does!").
+    The owner captures with CleanShot ("I use cleanshot actually"), whose clipboard carries a file
+    reference: Herdr's textarea pasted it as the file's plain absolute path, as it inserted a file dropped
+    on its text ("SWEET"), so `paste_other` never fired, the frame's `on_drop` did not get the drop, no
+    attachment line was made and no thumbnail showed ("I don't see a thumbnail"). No prompt was seen ("I
+    just pasted and never saw a permission but I think because herdr is already approved"), but the
+    clipboard script almost certainly never ran then. Later the same day, on the same build: he attached
+    an image to an answer, and the sheet he sent carried the attachment line whole as the answer's first
+    line (`…/ledgr-data/attachments/20261123-171151-ea79b7.png`), with "ok thumbnail worked!!!" under it.
+    Seen: an attachment line made by one of this build's routes (Paste image, a ⌘V with an image and no
+    file reference, or a drop on the frame: the file's name is the same for all three, so which is not
+    known), the thumbnail drawn (an 850 KB PNG), the line landing through the answer sheet, the file
+    created under `attachments/` with the designed name. The agent then read that file with its Read tool,
+    in that one session, in the permission mode it was running in, with no permission prompt or refusal;
+    another mode may still ask. The check of a macOS prompt when the clipboard script runs was dropped by
+    the owner ("I don't think this is necessary now?"), not settled by observation. Step 14 checks the
+    fix. The rest of this step, still to do: the thumbnail's fit in 112 × 72, the caret on a new line
+    after the attachment line, the PNG in `ledgr-data/attachments/` for a clipboard image. Type words
+    right after the path: the chip stays. Paste image with only text on the clipboard: "No image on the
+    clipboard: …". A browser's Copy Image and a Finder copy, by ⌘V and by Paste image. Drop a PNG from
+    Finder on the frame's padding and on the text inside it (is a drop on the text caught?), a file
+    outside the home folder (does `fs.readFile` read it?), a GIF (its chip, no thumbnail), a fifth image,
+    one over 8 MiB, a `.txt`: each refused in words, nothing written. Remove: the line goes, the file
+    stays. ⌘Enter: the sheet, the image line indented under its answer; sent with a word of your own,
+    `hook.log` has `answers_landed` and the agent reads the file and says what it shows; in another
+    permission mode, does that read of a file outside the session's folder ask? `ui.attachmentThumbs:
+    false` in `config.json`: chips without thumbnails. Clean up: the session as in step 9; the files under
+    `attachments/` by hand (ledgr deletes none). The list is `BUILD-NOTES-detail.md` 19, 20 and 20.1.
+14. An image's path that lands in the box (the fix of 2026-11-23, built after the live check;
+    `BUILD-NOTES-detail.md` 20.2; installed 2026-11-23, the day's second install), in a session on that
+    install: a CleanShot capture copied, ⌘V in the answer box. Does Herdr deliver the paste as one change
+    holding the whole plain path (the fix assumes so; the owner's answers suggest it)? Then the path's
+    line becomes `attached image (read this file): …`, the copy in `ledgr-data/attachments/`, the chip,
+    and its thumbnail for a PNG or JPEG (a thumbnail drew for an attachment of the first build, step 13).
+    The same with a file copied in Finder, a file dropped on the text, and a file dropped on the frame's
+    padding (one attachment, never two, for one file); a path pasted after words on a line (the words keep
+    their own line); a path typed by hand (left as text); a `.heic` and a `.tif` (said, left as text); a
+    fifth image and one over 8 MiB (refused in words, the path left as text, "which the agent can read").
+    Sent, the agent reads the attachment and says what it shows. Whether `paste_other` ever fires in his
+    workflow: write down when it does. Seen on 2026-11-23 on the second install: asked to press ⌘V with a
+    capture on the clipboard and, separately, to drop a capture file onto the text, and to say which
+    became a chip with a thumbnail, the owner answered with an answer whose first line was the attachment
+    line for a new file under `attachments/` (`20261123-181836-3d1f74.png`, a valid PNG on disk) and the
+    words "Seems to work!": an image that reached the box became an attachment through the fix, so a path
+    arrived whole in one change at least once. He did not say which of the two ways he used, or whether he
+    tried both; which works (the paste, the drop on the text, or both) is still to see, with the rest of
+    this step.
 
 ## 7. Out of scope, and open questions
 

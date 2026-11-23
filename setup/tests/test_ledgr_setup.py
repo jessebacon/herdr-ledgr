@@ -741,6 +741,54 @@ def test_retention_report():
         shutil.rmtree(root)
 
 
+def test_attachments_report():
+    """--check's line for ledgr-data/attachments/ (2026-11-23): how many files and their total size; nothing
+    when the folder is absent; hidden files and folders left out. Read-only."""
+    root, ctx, _ = scratch()
+    try:
+        ok(L.attachments_report(ctx) == [], "no attachments/ folder: no line")
+        ad = os.path.join(ctx.data, "attachments")
+        os.makedirs(ad)
+        ok(L.attachments_report(ctx) == ["  attachments     0 files, 0 bytes (images attached to answers; ledgr never deletes them)"],
+           f"an empty folder: 0 files: {L.attachments_report(ctx)}")
+        write(os.path.join(ad, "20261123-150102-a1b2c3.png"), b"\x89PNG" + b"x" * 1996)
+        ok(L.attachments_report(ctx) == ["  attachments     1 file, 2 KB (images attached to answers; ledgr never deletes them)"],
+           f"one file: singular: {L.attachments_report(ctx)}")
+        write(os.path.join(ad, "20261123-150140-d4e5f6.jpeg"), b"y" * 1_500_000)
+        write(os.path.join(ad, ".20261123-150141-zzzzzz.png.tmp"), b"z" * 10_000)
+        os.makedirs(os.path.join(ad, "sub"))
+        lines = L.attachments_report(ctx)
+        ok(lines == ["  attachments     2 files, 1.50 MB (images attached to answers; ledgr never deletes them)"],
+           f"two files counted, a hidden file and a folder left out, MB: {lines}")
+        before = sorted(os.listdir(ad))
+        L.attachments_report(ctx)
+        ok(sorted(os.listdir(ad)) == before, "read-only: the folder unchanged")
+    finally:
+        shutil.rmtree(root)
+
+
+def test_instruction_words():
+    """The handoff question names the instruction's size from the two wordings themselves (2026-11-23: it said
+    ~200 to 260 words while they had grown to 268 and 330, and they are about 535 and 597 now)."""
+    counts = [len(read(os.path.join(L.REPO, "mods", "ledgr", "bin", "lib", f"asks-instruction-{m}.txt")).decode("utf-8").split())
+              for m in ("both", "ledgr")]
+    want = f"a ~{min(counts)} to {max(counts)}-word instruction"
+    ok(L.instruction_words() == want, f"instruction_words: {L.instruction_words()!r} == {want!r}")
+    saved = L.REPO
+    try:
+        L.REPO = tempfile.mkdtemp(prefix="ledgr-setup-test-")
+        ok(L.instruction_words() == "an instruction of a few hundred words", "a wording that cannot be read: no number")
+        lib = os.path.join(L.REPO, "mods", "ledgr", "bin", "lib")
+        write(os.path.join(lib, "asks-instruction-both.txt"), "one two three\n")
+        write(os.path.join(lib, "asks-instruction-ledgr.txt"), b"caf\xe9 not UTF-8\n")
+        ok(L.instruction_words() == "an instruction of a few hundred words", "a wording that is not UTF-8: no number, no exception")
+        write(os.path.join(lib, "asks-instruction-ledgr.txt"), "one two three\n")
+        ok(L.instruction_words() == "a ~3-word instruction", f"two wordings of one size: one number ({L.instruction_words()!r})")
+        shutil.rmtree(L.REPO)
+    finally:
+        L.REPO = saved
+
+
 COLD_SID = ["c01d0001-0000-4000-8000-000000000001", "c01d0002-0000-4000-8000-000000000002",
             "c01d0003-0000-4000-8000-000000000003", "c01d0004-0000-4000-8000-000000000004"]
 
@@ -1064,7 +1112,7 @@ def test_thaw_all():
 if __name__ == "__main__":
     for t in (test_dump, test_settings_write, test_mend_newline, test_restore_original, test_retire, test_settings_list, test_handoff,
               test_keep_config_edits, test_mcp, test_recipe, test_writer_report, test_retention_migration, test_retention_report,
-              test_cold_report, test_thaw_all):
+              test_cold_report, test_thaw_all, test_attachments_report, test_instruction_words):
         t()
     print(f"setup: {PASS} passed, {FAIL} failed" + ("" if FAIL else "  OK"))
     sys.exit(1 if FAIL else 0)

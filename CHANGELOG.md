@@ -4,7 +4,225 @@
 
 First public shape of the mod. Built on Herdr 0.1.13, hc 0.1.18, Claude Code 2.1.311.
 
-### Retention Phase 2: cold sessions (2026-11-19)
+### An ask's summary, no work handed back, the answer box, an image in an answer (2026-11-23)
+
+- Jesse, on an ask in the detail dialog that asked him to confirm the changes in a table: the answer box was
+  two rows high with most of the column empty, nothing said precisely what he was to do (a five-row table in
+  the message), and the prompt should make clear that ledgr is not a way for the agent to push work back to
+  him but a way to cut the back and forth and clear blockers; and the answer "needs to accept a photo
+  attachment (from clipboard)". Built by three builders in parallel against one contract (the Python side;
+  the store and the writer; the dialog and the list), integrated, reviewed, then a second round for the
+  image, a second outside review and its fixes. Built 2026-11-23; the offline suites and
+  `herdr-app check mods/ledgr` pass. Installed the same day and checked live by the owner (below), which
+  led to one fix, built 2026-11-23 after the live check and installed the same day.
+- `summary` on an agent ask, named so at every layer: what the user must do, precisely, readable without the
+  reply; at most 1,000 characters (`ledgr_asks.py` `MAX_SUMMARY`, `config.js` `LIMITS.summary`), cut, never
+  refused for length; line breaks kept (CR LF read as LF), a run of blank lines made one, the outer
+  whitespace dropped (JavaScript's whitespace on both sides, U+FEFF included), markdown kept; empty is none
+  and the key is left out. `ledgr_asks.summary_of` and `summary_text`; `validate` keeps it and never drops
+  an ask for lacking one.
+- MCP `declare_asks`: `summary` joins `ITEM_SCHEMA` and its `required` (no `maxLength`, so a client that
+  checks the schema does not refuse a long one). A call with an item whose summary is missing, null, blank
+  or not a string is refused whole: `isError`, no spool event, no `mcp/<session>/<turn>.json`, one
+  `mcp.log` line, `{ok: false, error: "every item needs a summary", missing_summary, summary_not_string,
+  earlier_items_stand}` and words naming the items, saying which summary is not a string, saying when an
+  earlier call of the turn stands, and saying in two sentences what a summary holds (`SUMMARY_WORDS`). An
+  off space still answers `off: true` first. A summary over 1,000 is recorded cut, with a note. The Stop
+  settle carries each summary through unchanged (`ledgr_extract.tool_asks`).
+- The block: an optional last bullet field `summary: …` (any case) that takes the rest of the line, a " · "
+  inside it included, found only after level, kind and text (a text that begins "Summary:" is the text, as
+  before); one line (a line under it is a stray line, reported); the JSON form reads a `summary` key; an
+  item without one is accepted (`parse_block.py` `SUMMARY`).
+- The extractor: `asks.schema.json` requires `summary`; `extract-system.txt` says what it holds, from the
+  message alone: the request first, addressed to the user, with the form of the answer, then what the agent
+  says it did, will do with the answer, recommends and why, and what cannot be undone; for a list or table,
+  each thing a yes approves; never a fact the message does not state; what is unclear said, not guessed; at
+  most 800 characters, one sentence for an optional ask. Which sentences are asks and their levels are
+  unchanged. `providers/anthropic.py` `MAX_TOKENS` 4000 to 8000 (the `mixed` fixture went from 487 to 772
+  output tokens); `openai_compatible.py` stays at 4000. New fixture `tableconfirm` (a table of five changes
+  to confirm: the summary names each, and the one that cannot be undone).
+- The rule, in `asks-instruction-ledgr.txt` and `-both.txt` (the reinject prints the same files), the
+  server's `instructions`, the `declare_asks` description and the `summary` property's: ledgr exists to cut
+  the back and forth and to clear what blocks the agent, not to hand the user work; do all the task needs
+  that you can do yourself; stop before a step the task needs that cannot be undone, and ask for a
+  go-ahead; declare only what is left that only the user can give (a decision that is theirs, something
+  only they know or hold, an action or check you cannot make yourself, a review they asked for, that
+  go-ahead); never declare work you could do yourself or ask the user to look up, verify or summarise what
+  you can; "A step beyond what you were asked is an offer: do not take it and do not declare it; a line of
+  prose is enough."; give each item a summary that stands on its own. It replaces 2026-11-10's "Declare
+  only what the user personally must do, decide, provide or review."; the rule on waits for the agent's
+  own subagents, tools, builds and tests stays. The block's example is now a decision plainly the user's
+  ("Choose how many approvals a production release needs", options one | two, with a summary). Sizes:
+  `ledgr` 330 to 596 words, `both` 268 to 534, in every session's context; the server's instructions
+  1,991 characters, the `declare_asks` description 1,186. The installer's handoff question counts the words
+  when it runs (`instruction_words`; it said ~200 to 260).
+- The store (`store.js` `cleanSummary`, `on_asks`): an item made from an `asks` event keeps `summary`,
+  cleaned again; a later event for the same item (a re-run extraction, the Stop settle, a later call of the
+  turn, an open ask named again) replaces it with a usable one and keeps it when the event brings none, as
+  options; an answered ask raised again keeps its own; a new item for a resolved or dismissed one carries
+  only the event's; a parked question has none. `snapshot()` and `snapshot_copy` leave it out; the archive,
+  cold files, thaw, merge, restore and the sweep's proofs carry and compare the item whole. Demo: A15 and A8
+  carry summaries (`fixtures.js` `DEMO_SUMMARY_A15`, `DEMO_SUMMARY_A8`).
+- The dialog (`detail.js` `itemParts`): an ask's left column is TEXT, WHAT TO DO (the summary, `listing.js`
+  `summaryOf`, markdown linkified as the text is, behind a 2 px accent edge, with Copy; none, no section; on
+  a closed and an archived ask too), OPTIONS, ANSWER, RESULT, QUESTIONS ABOUT IT, QUOTE (dim, 12 px), the
+  foot line. The answer box is the column's full width and, in two columns, its free height: `detail.js`
+  `noteFit` and `fitAnswer` from `on_size_change` reports (the column, the groups above and below the box,
+  the ANSWER section), kept per item id; `detailing.js` `ANSWER_BOX`, `answerMinFrame` (8 rows of 12.5 px ×
+  the text scale × 1.7, plus the frame: 190 px at scale 1; in a short column 0.6 of it, never under 3 rows),
+  `answerFrame` (the drawn height kept only while it fits and is under 4 px short), `answerRows`; the
+  textarea `.h(px)` and `set_rows`, no auto-grow, so a long answer scrolls inside. In one column (under 760
+  px) it stays at 8 rows, so the message and its marked passage stay in reach. Under the box: the
+  attachments row, then the hint and Paste answer (no longer beside the box). A click on the frame's
+  padding puts the keyboard in the box. The list's row tooltip gains "What to do:" and the summary's first
+  300 characters, before the drafted answer.
+- An image in an answer (`attach.js`, new, not an engine file, imported by `detail.js` alone): a file
+  `ledgr-data/attachments/<yyyymmdd>-<hhmmss>-<rand6>.<ext>` (png, jpg, jpeg, gif, webp; the folder from
+  Herdr's app folder normalised once, `detailing.js` `appRoot`, for `attachDir` and `clipDir` alike, and
+  nothing attached when that folder is not known) and one line at the end of the draft, `attached image
+  (read this file): <absolute path>`, followed by a line break (`withAttach`); its pattern ends at the
+  image's extension, so words typed after it do not unmake it, and the box's cut at 4,000 never leaves part
+  of one (`cutDraft`: the line goes whole, and the status line says so); no event, no store field, no writer
+  change: the sheet (`answerLines` indents it), the landing
+  parser and the `[A3]` ref scan take it as they are (`test-hooks.sh`), and the agent reads the file. A drop
+  on the box (`on_drop`, `dropOnAnswer`, `copyIn`: `fs.readFile`, `fs.writeFile`, read back and compared by
+  length, 10 s each); ⌘V in the box when the clipboard holds no text (the textarea's `paste_other`) or the
+  row's Paste image (`pasteImage`, `prepareSlot`, then `opener.js` `clipboardImage`). Both end in
+  `attachWritten`; the ask open, under 4 images (`ATTACH.perAnswer`) and the draft within 4,000 are checked
+  before anything is written and again after; 8 MiB an image (`ATTACH.maxBytes`, `CLIP_MAX`); one at a time,
+  an "attaching" older than `ATTACH.staleMs` (60 s) no longer holding the next back. The row: a chip per
+  line (a thumbnail through `image("ledgr-data/attachments/<name>")`, `image` imported by name, both sides
+  set, fitted in 112 × 72, only for a PNG or JPEG of at most 2 MiB whose header gives at most
+  `ATTACH.thumbPx`, 4,096, pixels a side, and unless `ui.attachmentThumbs` is false, so a GIF or WebP is its
+  chip alone; the name, the size, Reveal, Remove: the line out, the file kept), then Paste image. Nothing
+  under `attachments/` is ever deleted by ledgr, nor written over: the clipboard's script only creates, and
+  a drop's copy, through `fs.writeFile`, which has no create-only flag, takes a name `prepareSlot` found
+  free just before the write. Words: `words.js` `ATTACH_WORDS`; the hint and the footer's `⌘V attach an
+  image`. The demo copies and runs nothing.
+- The pinned call (the owner's exception: "Yes, allow osascript on ⌘V in the answer box with the pinned
+  exception."): `clipboardImage(outPath)` refuses, running nothing, a path not absolute, with a line break
+  or NUL, not a `.png`, not directly in `clipDir()` or without an attachment's own name (`CLIP_NAME`), and
+  everything when Herdr's app folder is not known; then `exec("/usr/bin/osascript", ["-l", "JavaScript",
+  "-e", CLIP_SCRIPT, outPath, String(CLIP_MAX)], { timeout: OPEN_TIMEOUT })`, which `pasteImage` also
+  bounds with `within` (`ATTACH.clipMs`, 8 s). `CLIP_SCRIPT` is a constant: the pasteboard's PNG as it is,
+  else any image it holds converted to PNG; no image, or over the limit, it throws before writing; its one
+  write creates the file and never writes over one (`writeToFileOptionsError` with
+  `NSDataWritingWithoutOverwriting`: an existing file is left as it was and the run fails); it makes no
+  folder, drives no application, presses no key and changes no pasteboard. `clipResult` words each outcome.
+  `opener.js` now imports `exec` and `appHome` from herdr and `appRoot` from `detailing.js`.
+- `test_no_keystrokes.py`: rule 1 lets `/usr/bin/osascript` appear once in the whole mod, counted on the
+  files as they are on disk (comments included), in `opener.js`, as the pinned call; rule 13 holds five
+  shapes, pins `CLIP_SCRIPT` by identity (a full copy, `CLIP_SCRIPT_PINNED`, and its sha256, `CLIP_SHA256`,
+  compared with `opener.js`'s raw text character for character; the word checks kept as a second line),
+  `clipRefusal` before the call and `clipboardImage` only in `pasteImage`; rule 16 (new): among the mod's
+  files only `attach.js` writes or makes anything under `attachments/`, nothing removes or renames there,
+  `opener.js` writes nothing itself, only `detail.js` imports `attach.js`, `pasteImage` checks before it
+  reads and bounds the run, `pasteImage(` appears in `detail.js` twice (its definition, the `paste_other`
+  handler) and in `views.js` once (Paste image in `attachRow`), `attachRow(` is called once, from
+  `answerSection`; `attach.js` in `NOT_ENGINE`. The comment stripper respects literals (JavaScript by a
+  small lexer: strings, templates with nested `${…}`, regex literals where one may start; Python by
+  `tokenize`; shell as before, so a `#` after whitespace inside a quoted shell string is still cut): the old
+  one cut a line at any `//` even inside a string, and its block pattern ran from a `/*` inside a line
+  comment to the next `*/`, hiding lines of `capture.js`, `spool.js` and `adapters.js` from every rule; no
+  rule fails on them. An argument names another copy of the mod to check.
+- The installer: `--check` gains one line for `ledgr-data/attachments/` (`attachments_report`: how many
+  files, their size; nothing when the folder is absent); uninstall's data question names "attached images"
+  and treats the folder as the rest of `ledgr-data/`.
+- `store.js` and `config.js` are engine files: until a writer's host reloads, an old writer applies new
+  `asks` events and drops their summaries for good. Running sessions get the new wording at their next
+  SessionStart, and the server's text and schema after `/mcp` or a resume.
+- The first review (no blocker): the wording, major (it forbade a check only the user can make and left no
+  door for a go-ahead before a step that cannot be undone; the example contradicted the rule); the narrow
+  dialog, major (a filling box pushed the message out of view in one column); and minor ones: a "Summary:"
+  text, a multi-line block summary, U+FEFF, the OpenAI-compatible cap, the refusal's words, the box's
+  hysteresis overhanging a shrinking column, the fit's measures lost on ⌘↓ then ⌘↑.
+- The second review (no blocker in the shipped code; three major findings, two in the guard): edited copies
+  of the mod passed every check with a script that also ran a shell, cleared the clipboard and reached the
+  network, with one that pressed a key through System Events behind a `//` inside a string, and with a
+  dialog that ran the script on every resize (now the pin by identity, the string-aware stripper and the
+  callers' counts above; the guard fails on each copy); and the wording, where "a go-ahead for such a step"
+  also covered a step beyond the task, so an agent would declare a go-ahead for an unrelated refactor (now
+  the step beyond the task is an offer, above; the builder's "Stop only before" lost "only", which read as
+  never stopping for a decision that is the user's). Minor: the script could replace an existing
+  attachment; `clipRefusal` took any `[0-9a-z-]+.png`; `clipDir` and `attachDir` disagreed on a trailing
+  slash and let an empty or "/" app folder through; the "attaching" flag never expired; typing after the
+  line or the cut could break it; thumbnails cropped or past a texture limit; `image` through a namespace
+  import; two literal no-break spaces in `test_seams.mjs`, now escapes.
+- Tests (the builders' counts; those the second review's fixes changed are left to the full run):
+  `test_store.mjs` 1,900 (87 on the summary); `test_writer.mjs` 1,165 (section 53); `test_list.mjs` 518;
+  `test_detail.mjs`, `test_links.mjs`, `test_seams.mjs`, `test_no_keystrokes.py` and `tests/test_clip.mjs`
+  (new, in `test-detail.sh`: the shipped `CLIP_SCRIPT` under `/usr/bin/osascript` on private named
+  pasteboards, an existing file left byte for byte, the general clipboard's change count unchanged; skipped
+  off macOS); `test_parse_block.py` 68 (`fixtures/blocks/bullets_summary.md`); `test_mcp.py` 181;
+  `test-hooks.sh` 235 (the wordings, the examples parse, the image's landing; it fails if "such a step",
+  "short of a step" or "go-ahead for that" comes back); `run-extract-fixtures.py` `summary_all`,
+  `summary_max`, `summary_names`; `setup/tests` 226. Two live Haiku calls passed: `--live tableconfirm`
+  (one blocking confirm whose summary named all five rows and the one that cannot be undone) and `--live
+  mixed` (five asks, each summary beginning with the request).
+- Installed 2026-11-23 on the owner's word ("please install"), with the maintainer's answers file: 51 files
+  written, the two changed engine files copied to the overlay host, the installer's own suite run and
+  `--check` healthy. The writer's log shows its host restarting two seconds into the install (Herdr reloads
+  a mod when its files are saved), so no relaunch was needed for the writer to start again; whether one is
+  ever needed for summaries to be stored is not observed either way: relaunch only if a new ask's summary
+  does not show.
+- The live check, the same day, in the owner's words: the layout, "LOVE the new answer layout"; ⌘V reaching
+  the box while the dialog holds the keyboard, "it does!"; no permission prompt, "I just pasted and never
+  saw a permission but I think because herdr is already approved"; his capture tool, "I use cleanshot
+  actually"; "I don't see a thumbnail"; a file dropped on the text, "SWEET". What his answers showed: a
+  capture pasted into the box and a file dropped on its text both arrived as one plain line, the capture
+  file's own absolute path (with spaces in it), because Herdr's textarea pastes a clipboard that carries a
+  file reference as the file's path and inserts a file dropped on it as its path. So `paste_other` never
+  fired, the frame's `on_drop` did not get the drop, no attachment line was made, and there was no chip or
+  thumbnail; the agent could read the file from the raw path; and the clipboard script almost certainly
+  never ran, so the permission question stays open.
+- The fix, built 2026-11-23 after the live check (`docs/build-notes/BUILD-NOTES-detail.md` 20.2): an image's
+  path that lands in the box in one change, a paste or a drop, is copied in through the `fs` route and
+  replaced by the attachment line; a path typed by hand is left alone; any refusal leaves the raw path as
+  text and the status line says why, ending "its path stays in the answer as text, which the agent can
+  read". `detail.js` `pathsIn` (the change handler's one new call) and `attachPathLine`; `attach.js`
+  `insertedSpan` (what one change inserted: the new text less the longest prefix, then the longest suffix,
+  it shares with the text before; at least two characters, so a path typed by hand, or finished by a
+  keystroke, is never taken), `pathOf` (exactly an absolute path, or a `file://` URL percent-decoded to one),
+  `pastedPaths` (each line of the inserted text that is one, to a png, jpg, jpeg, gif or webp in any case,
+  outside the attachments folder; heic, heif, tif, tiff, bmp, svg, avif and ico said and left,
+  `OTHER_IMAGE_EXTS`), `withAttachAt` (the attachment line in the path's place, words before and after it
+  on their own lines), `withoutRaw`. Copied in as a drop is (`copyIn`, the same limits and one-at-a-time
+  flag); several paths in one paste are taken in order until a limit refuses one; a file dropped on the
+  frame and its path arriving in the text within 2 s (`SAME_SOURCE_MS`) make one attachment; a path line
+  changed while its file was copied is not named, and the status line says so (the copy stays). The hint
+  under the box: "pasting or dropping an image attaches it, as a picture or as its file's path".
+  `test_no_keystrokes.py` rule 16 gains three checks: `makeAnswer`'s change handler makes one call,
+  `pathsIn`; `pathsIn` and `attachPathLine` reach no clipboard reader, process or write of their own;
+  `attachPathLine` takes the file in through `copyIn` alone. What it pinned before is unchanged.
+- Settled live: the fitted answer box and the layout, and ⌘V reaching the box.
+- Later the same day, on the first installed build (before the path fix was installed): the owner attached an
+  image to an answer, and the sheet he sent carried the attachment line whole as the answer's first line,
+  `attached image (read this file): <his app folder>/ledgr-data/attachments/20261123-171151-ea79b7.png`,
+  with "ok thumbnail worked!!!" under it. Seen live: an attachment line made by one of the first build's
+  own routes (Paste image, a ⌘V with an image and no file reference, or a drop on the frame; the file's
+  name is the same for all three, so which is not known), the thumbnail drawn (an 850 KB PNG), the line
+  landing through the answer sheet, the file created under `attachments/` with the designed name. The
+  agent then read that file from the path in the answer with its Read tool, in that one session, in the
+  permission mode it was running in, with no permission prompt or refusal; another mode may still ask.
+  The check of a macOS prompt when the clipboard script runs was dropped by the owner ("I don't think this
+  is necessary now?"), not settled by observation.
+- The fix installed: asked through ledgr whether to install it now or leave it for the next install (it is
+  not needed to attach an image, only to make ⌘V and a drop on the text do it directly), the owner
+  answered "install". Installed 2026-11-23, the day's second install: 6 files written, the installer's own
+  suite run, `--check` healthy, the installed mod identical to the repo. (The lead's own earlier attempt,
+  on the strength of the first "please install", was refused by Claude Code's permission classifier, so
+  the fix waited for his word.)
+- The fix seen live on the second install: asked to press ⌘V with a capture on the clipboard and,
+  separately, to drop a capture file onto the text, and to say which became a chip with a thumbnail, the
+  owner answered with an answer whose first line was the attachment line for a new file under
+  `attachments/` (`20261123-181836-3d1f74.png`, a valid PNG on disk) and the words "Seems to work!". So an
+  image that reached the box became an attachment through the installed fix, a path having arrived whole
+  in one change at least once. He did not say which of the two ways he used, or whether he tried both.
+- Not seen live: which of the two ways works (the paste, the drop on the text, or both); whether
+  `paste_other` ever fires in his workflow; whether agents write good summaries (`docs/design/Detail.md`
+  6.5 steps 12 to 14).
+
+### 598416a: retention Phase 2, cold sessions
 
 - Phase 1 cannot reach open items: a session nobody has touched for a week still carries its open asks and
   turn records in every save. On the contract's copy of that day's store, about 0.86 MB after Phase 1 and

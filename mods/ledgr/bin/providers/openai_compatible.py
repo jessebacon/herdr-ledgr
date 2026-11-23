@@ -6,6 +6,8 @@ import json
 
 from ._http import http_error, post, result
 
+# Kept at 4000 when the Anthropic provider went to 8000 (2026-11-23, review 7.5): an endpoint refuses a value
+# over its model's own cap, so a higher one could fail every call; this provider has never run against a server.
 MAX_TOKENS = 4000
 
 

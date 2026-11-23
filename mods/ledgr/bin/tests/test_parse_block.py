@@ -141,6 +141,65 @@ check("<ledgr-asks> ... </ledgr-asks> (XML tags, seen live from Haiku): read lik
       r["found"] and r["valid"] and len(r["asks"]) == 2 and "<ledgr-asks>" not in r["prose"] and r["asks"][1]["options"] == ["tomllib", "tomlkit"], r)
 r = parse_block.parse(load("valid.md"))
 check("JSON blocks still parse (form json)", r["valid"] and r["form"] == "json" and r["pointer"] is None, r["form"])
+check("no summary given: no summary key (records stay lean, no null)", all("summary" not in a for a in r["asks"]), r["asks"])
+
+# The ask's summary (2026-11-23): an optional last bullet field `summary: ...` taking the rest of the line,
+# or a `summary` key in the JSON form; ledgr_asks.summary_of normalises it.
+r = parse_block.parse(load("bullets_summary.md"))
+s = {a["text"]: a for a in r["asks"]}
+rj = " | ".join(r["rejected"])
+check("summary: found, valid, 7 asks, one stray line rejected", r["valid"] and len(r["asks"]) == 7 and len(r["rejected"]) == 1, (list(s), rj))
+d0 = s.get("Confirm the pipeline changes", {})
+check("summary after quote and options: read, and a ' · ' inside it is part of the summary",
+      d0.get("summary") == "A yes applies all five rows · the rename, the policy and the branch delete among them. "
+                           "Deleting release/5.4 cannot be undone."
+      and d0.get("quote") == "What I'll change, once you confirm." and d0.get("options") == ["yes", "no"], d0)
+check("summary right after the text: read; no quote, no options",
+      s.get("Paste the staging API token", {}).get("summary") == "The token from the staging Key Vault; I need it to run the migration."
+      and s["Paste the staging API token"].get("quote") is None, s.get("Paste the staging API token"))
+check("'SUMMARY:' in any case, its outer space dropped", s.get("Check the dashboard", {}).get("summary")
+      == "Open it on your phone and say if the totals line wraps.", s.get("Check the dashboard"))
+check("an empty summary: accepted, no summary key", "Rotate the old secret" in s and "summary" not in s["Rotate the old secret"],
+      s.get("Rotate the old secret"))
+check("a quote after the summary is part of the summary (it takes the rest of the line)",
+      s.get("Pick the region", {}).get("summary") == "West, unless latency matters more than cost. · \"What I'll change, once you confirm.\""
+      and s["Pick the region"].get("quote") is None, s.get("Pick the region"))
+q3 = s.get("Summary: review the Q3 numbers before Friday", {})
+check("review 7.2: a text that begins 'Summary:' is the text, as before the field (needed, review, no summary key)",
+      q3.get("level") == "needed" and q3.get("kind") == "review" and "summary" not in q3, (list(s), q3))
+check("review 7.3: a summary is one line; the line under it is a stray line, reported, and the bullet keeps its first line",
+      s.get("Pick the cutover night", {}).get("summary") == "Friday or Saturday; I recommend Saturday."
+      and r["rejected"] == ["line 8: not a bullet (- level · kind · text)"], (s.get("Pick the cutover night"), rj))
+r2 = parse_block.parse("Plan. It is late.\n\n```ledgr-asks\n- needed · review · Summary: review X · \"It is late.\" · summary: real one\n```\n")
+check("a text that begins 'Summary:' with a quote and a summary field after it: each in its place",
+      r2["valid"] and r2["asks"][0]["text"] == "Summary: review X" and r2["asks"][0]["quote"] == "It is late."
+      and r2["asks"][0].get("summary") == "real one", r2["asks"])
+
+import json  # noqa: E402
+long_s = "word " * 300
+body = json.dumps([{"text": "Confirm the plan", "kind": "confirm", "level": "blocking",
+                    "summary": "\r\n  Confirm these:\r\n\r\n\r\n- rename the pipeline\n  \n\t\n- delete release/5.4\r\rDone.  \n\n"},
+                   {"text": "Cut me", "kind": "do", "level": "needed", "summary": long_s},
+                   {"text": "Blank", "kind": "do", "level": "needed", "summary": " \n\t\n "},
+                   {"text": "Not text", "kind": "do", "level": "needed", "summary": ["a list"]}])
+r = parse_block.parse("Plan.\n\n```ledgr-asks\n" + body + "\n```\n")
+j = {a["text"]: a for a in r["asks"]}
+check("JSON summary: CR LF and CR read as LF, blank-line runs (whitespace-only lines too) made one, outer space dropped, markdown kept",
+      j.get("Confirm the plan", {}).get("summary") == "Confirm these:\n\n- rename the pipeline\n\n- delete release/5.4\n\nDone.",
+      j.get("Confirm the plan"))
+check("JSON summary over 1,000 characters: cut at 1,000, trailing space dropped, never rejected",
+      j.get("Cut me", {}).get("summary") == long_s[:1000].rstrip() and len(r["asks"]) == 4, j.get("Cut me"))
+check("JSON summary blank or not a string: the ask kept, no summary key",
+      "summary" not in j.get("Blank", {"summary": 1}) and "summary" not in j.get("Not text", {"summary": 1}), r["asks"])
+
+# Review 7.4: whitespace is JavaScript's, as store.js cleanSummary reads it: U+FEFF counts, U+001C and U+0085 do not.
+import ledgr_asks  # noqa: E402
+cs = lambda v: ledgr_asks.summary_of({"summary": v})  # noqa: E731
+check("review 7.4: a summary of only U+FEFF is none (the tool refuses it, as the store keeps none)", cs("\ufeff") is None, repr(cs("\ufeff")))
+check("review 7.4: U+FEFF lines are blank lines, and U+FEFF is outer space",
+      cs("\ufeff\n\ufeff\n\n x \ufeff") == "x" and cs("a\n \ufeff\nb\ufeff") == "a\n\nb", [cs("\ufeff\n\ufeff\n\n x \ufeff"), cs("a\n \ufeff\nb\ufeff")])
+check("review 7.4: U+001C and U+0085 are kept, as JavaScript's trim keeps them; U+3000 and U+00A0 go",
+      cs("\x1cx\x1c") == "\x1cx\x1c" and cs("\x85y") == "\x85y" and cs("\u3000\xa0z\xa0") == "z", [cs("\x1cx\x1c"), cs("\x85y")])
 
 print(f"\n{'OK' if not fails else 'FAILED'}: parse_block, {fails} failure(s)")
 sys.exit(1 if fails else 0)

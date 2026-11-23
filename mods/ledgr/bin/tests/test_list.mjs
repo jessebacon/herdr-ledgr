@@ -234,6 +234,20 @@ try {
   A.equal(LS.draftPending(ask("A5", { draft: "a" })), true); A.equal(LS.draftPending(null), false); A.equal(LS.draftPending(q("Q5", { draft: "a" })), false);
   A.equal(DR({ level: "optional" }).tip.split("\n").at(-1), "Your answer, not sent yet: Two lines of answer", "the tooltip ends with the answer, on one line");
   A.ok(!M("ask", ask("A5")).tip.includes("not sent"), "no draft: the tooltip as before");
+  // The summary (2026-11-23): its first 300 characters after the text and the quote, line breaks kept, before
+  // the answer; none, no line; a question's never (it has none).
+  { const SUM = "Reply **yes** to approve:\n- the five rows of the table";
+    A.equal(M("ask", ask("A5", { text: "Pick one", summary: SUM, anchor: { sessionId: SID, turn: 7, quote: "Which pool mode?" } })).tip,
+      `Pick one\n“Which pool mode?”\nWhat to do: ${SUM}`, "text, quote, then what to do (its line breaks kept)");
+    const long = M("ask", ask("A5", { text: "Pick one", summary: "s".repeat(700) })).tip.split("\n").at(-1);
+    A.equal(long.length, "What to do: ".length + 300, "the summary's first 300 characters"); A.ok(long.endsWith("…"));
+    const withDraft = DR({ summary: "  Say which night.  " }).tip.split("\n");
+    A.deepEqual(withDraft.slice(-2), ["What to do: Say which night.", "Your answer, not sent yet: Two lines of answer"], "the summary before the answer, trimmed");
+    A.ok(!M("ask", ask("A5", { summary: "   " })).tip.includes("What to do"), "a blank summary is none");
+    A.ok(!M("question", q("Q2", { text: "Why?", summary: "not for a question" })).tip.includes("What to do"), "a question: no summary line");
+    A.ok(M("ask", ask("A5", { summary: "Archived too", archiveFile: "items-1-abcdef.jsonl", status: "resolved" })).tip.includes("What to do: Archived too"), "an archived ask's tooltip has it too");
+    A.equal(LS.summaryOf(ask("A5", { summary: "  x \n" })), "x"); A.equal(LS.summaryOf(ask("A5")), ""); A.equal(LS.summaryOf(ask("A5", { summary: 7 })), "", "not a string: none");
+    A.equal(LS.summaryOf(q("Q2", { summary: "x" })), "", "summaryOf: agent asks only"); A.equal(LS.summaryOf(null), ""); }
   // pins
   m = M("pin", pins["pn_test-pin-0001"]);
   A.equal(m.key, "pin:pn_test-pin-0001"); A.equal(m.kind, "pin"); A.equal(m.handle, "Pin 1"); A.equal(m.pill, null); A.equal(m.text, "Pinned passage P1");
@@ -513,7 +527,7 @@ try {
   A.ok(/Store\.fromText\(text\)/.test(fv) && /this\.mergeColdAll\(st\)/.test(fv) && !/mergeColdAll\(live\)|mergeColdAll\(w\.live\)|mergeColdAll\(this\.writer\.live\)/.test(fv), "fallbackView merges into a clone made from the writer's text, never its live store");
   A.ok(/s\.surfaced && shown && this\.seenSent/.test(psrc), "seen posted for a shown surfaced session, a cold one too (store.js: act seen needs no thaw)");
 
-  console.log(`OK: list, ${checks} checks (firstLine, glyphOf, every state word, rowModel pills, text, quick actions and tooltips, the drafted mark, the row's widths at 280 px, entryKey, moveCursor, keepPlace, laneOf and neighbors; the archive's reading rule, rows, count and lane; parseCold and touchedOf; Reader and panel contract as text, cold reading too), 0 failure(s)`);
+  console.log(`OK: list, ${checks} checks (firstLine, glyphOf, every state word, rowModel pills, text, quick actions and tooltips (the summary's line too), the drafted mark, the row's widths at 280 px, entryKey, moveCursor, keepPlace, laneOf and neighbors; the archive's reading rule, rows, count and lane; parseCold and touchedOf; Reader and panel contract as text, cold reading too), 0 failure(s)`);
 } finally {
   if (own) fs.rmSync(dir, { recursive: true, force: true });
 }

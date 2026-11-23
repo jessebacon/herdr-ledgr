@@ -1,0 +1,5 @@
+{"note": "a reply that hands the user a table to confirm, its ask made by one line ('What I'll change, once you confirm'), as in Jesse's Ask 42 (2026-11-23): the summary must say what a yes approves (each row) and that the branch delete cannot be undone; every ask carries a summary",
+ "offline": {"source": "error", "error": "no credential"},
+ "live": {"source": "model", "count_min": 1, "kinds_include": ["confirm"], "summary_all": true, "summary_max": 1000,
+          "summary_names": {"confirm|change|pipeline": ["ledgr-ci|build-ci", "reviewer", "release/5.4", "deploy_token|variable group", "nightly", "undone|undo|irreversible|permanent|cannot be|can't be"]},
+          "max_cost": 0.004}}

@@ -11,11 +11,25 @@
 //     the close), Esc, a staging closing it, retargeting, the Conclude editor, the closed record; Esc while
 //     a paste or a closing act's write is pending, Paste into trunk closing at once, a record that reaches
 //     the store after the dialog opened, a branch in its first turn, commands naming a branch by hc name;
-//   the answer box (2026-11-11): a Textarea (2 to 10 lines), its line breaks kept in the draft and in the
-//     sheet, Enter a new line, ⌘Enter (the btw command or the box's own submit, one paste for both) the
-//     turn's sheet with a suggestion's answer, only while the dialog holds the keyboard; next and previous:
-//     "2 of 11", the lane in the panel's order, no wrap, the draft posted before a move, the open record
-//     following;
+//   the answer box (2026-11-11): a Textarea (eight rows since 2026-11-23, no auto-grow), its line breaks
+//     kept in the draft and in the sheet, Enter a new line, ⌘Enter (the btw command or the box's own submit,
+//     one paste for both) the turn's sheet with a suggestion's answer, only while the dialog holds the
+//     keyboard; next and previous: "2 of 11", the lane in the panel's order, no wrap, the draft posted before
+//     a move, the open record following;
+//   an ask's left column (2026-11-23): TEXT, WHAT TO DO (the summary: markdown, linkified, selectable, Copy),
+//     OPTIONS above the box, RESULT, QUOTE and the foot below it, none of it for a question; the box's frame
+//     at its least (eight rows) until the column, the groups above and below and the section have reported
+//     their heights, then the column's free height (a 4 px hysteresis, a report for another item dropped,
+//     0.6 of a short column, text scale 1.6), the textarea told the rows; Paste answer under the box; a click
+//     on the frame focusing the box; a closed or archived ask's summary, no groups; review fixes 7.7 to 7.9 (one
+//     column at its least, the hysteresis never overhanging, measures kept by item id);
+//   an image in an answer (2026-11-23): attach.js's pure parts; a drop copied into a scratch ledgr-data byte for
+//     byte and named in the draft, its chip and thumbnail; every refusal writing nothing; busy; Remove, Reveal;
+//     the clipboard's PNG through a stubbed exec (paste_other and Paste image), its answers, the fifth and no
+//     room running nothing; the demo running nothing; an image's path that arrives in the box as text (a capture
+//     tool's paste, a drop on the text): taken in when it arrived whole in one change (spaces, file://, two in one
+//     paste, among other lines, after words on a line), never when typed, one attachment for a drop and its text,
+//     every refusal leaving the path and saying so;
 //   links (2026-11-10): the message's paths linked and every markdown TextView taking the click, a question's
 //     verbatim text taking none; a web link to cx.open_url; a path found in the session's folder, then the
 //     repository's top (git's answer), opened with links.editor (open, zed) through a recording exec; a
@@ -143,6 +157,8 @@ export function el(kind, extra = {}) {
     if (k === "children") return (xs) => { for (const x of xs ?? []) t._kids.push(x); return p; };
     if (k === "id") return (v) => { t._id = v; R().ids.set(v, t); return p; };
     if (k === "hover") return (f) => { f(el("style")); return p; };
+    if (k === "h") return (v) => { t._hpx = v; return p; };
+    if (k === "w") return (v) => { t._wpx = v; return p; };
     if (k.startsWith("on_")) return (f) => { t._h[k] = f; return p; };
     return () => p;
   } });
@@ -154,13 +170,14 @@ export class View {}
 export const div = () => el("div");
 export const svg = (src) => el("svg", { _src: src });
 export const img = (src) => el("img", { _src: src });
+export const image = (src) => el("image", { _src: src });
 `);
 nm("gpui-base", `${UI_SRC}
 export const v_flex = () => el("v_flex");
 export const h_flex = () => el("h_flex");
 const state = (o = {}) => { const s = { _value: String(o.value ?? ""), _on: {}, _focused: 0 };
   return Object.assign(s, { value: () => s._value, set_value: (v) => { s._value = String(v); }, on: (e, f) => { s._on[e] = f; return true; },
-    focus: () => { s._focused++; }, release: () => true, set_auto_grow: (a, b) => { s._grow = [a, b]; }, set_rows() {}, set_soft_wrap() {}, set_selected_range() {}, replace(v) { s._value = String(v); } }); };
+    focus: () => { s._focused++; }, release: () => true, set_auto_grow: (a, b) => { s._grow = [a, b]; }, set_rows: (r) => { s._rows = r; }, set_soft_wrap() {}, set_selected_range() {}, replace(v) { s._value = String(v); } }); };
 export const InputState = { new: (o) => state(o) };
 export const TextareaState = { new: (o) => Object.assign(state(o), { _textarea: true, _opts: o ?? {} }) };
 export const EditorState = { new: (o) => state(o) };
@@ -458,7 +475,7 @@ try {
   A.equal(W.PIN_MESSAGE_GONE, "That message is no longer saved; the pin keeps the passage.");
   A.ok(W.DETAIL_GONE.length > 10);
   A.deepEqual(W.detailHints({}), [["Esc", "close"]]);
-  A.deepEqual(W.detailHints({ answer: true }), [["Esc", "close"], ["Tab", "next field"], ["⌘Enter", "paste the turn's answers"], ["Enter", "newline"]], "the answer box: ⌘Enter pastes, Enter is a new line (2026-11-11)");
+  A.deepEqual(W.detailHints({ answer: true }), [["Esc", "close"], ["Tab", "next field"], ["⌘Enter", "paste the turn's answers"], ["Enter", "newline"], ["⌘V", "attach an image"]], "the answer box: ⌘Enter pastes, Enter is a new line (2026-11-11), ⌘V attaches an image (2026-11-23)");
   A.deepEqual(W.detailHints({ answer: true, paste: false })[2], ["⌘Enter", "copy the turn's answers"]);
   A.deepEqual(W.detailHints({ note: true, paste: false }).map((h) => h[0]), ["Esc", "Tab", "Enter"]);
   const PS = "aaaa", OS = "bbbb";
@@ -683,7 +700,7 @@ try {
   reset({ files: { [`${APP}/AGENTS.md`]: "x" } });
   { const { d, cx } = await open(ids.A15);
     A.equal(d.answer?._textarea, true, "the answer box is a TextareaState");
-    A.deepEqual(d.answer._grow, [2, 10], "two lines, growing to ten, then it scrolls"); A.equal(d.answer._opts.rows, 2);
+    A.equal(d.answer._grow, undefined, "no auto-grow (2026-11-23): the frame gives it its height"); A.equal(d.answer._opts.rows, 8, "eight rows at first (text scale 1)");
     draw(d, cx);
     const box = UI().ids.get(`dt-answer-${ids.A15}`);
     A.ok(kinds(box).includes("textarea") && !kinds(box).includes("input"), "drawn as a Textarea, not an Input");
@@ -718,6 +735,418 @@ try {
     A.ok(String(cx.clip ?? "").includes("A15: line one\n  line two"), "live: the sheet staged, both lines");
     A.deepEqual(H().closed, ["ov-1"], "the paste decided: the dialog closed");
     await d.release(); A.equal(H().shared["ledgr.detail"].closed.drafts[ids.A15], "line one\nline two", "the draft reaches the panel with its line break"); }
+
+  // ── an ask's left column (2026-11-23): TEXT, WHAT TO DO, OPTIONS, the answer box as the main region,
+  // then RESULT, QUOTE and the foot; the box sized from what on_size_change reports ──
+  const ids_ = (n) => (n?._kids ?? []).map((k) => k?._id ?? null);
+  const holds = (n, id) => Boolean(n) && typeof n === "object" && (n._id === id || (n._kids ?? []).some((k) => holds(k, id)));
+  const fire = (id, h, cx) => { const n = UI().ids.get(id); A.ok(n?._h?.on_size_change, `${id} reports its size`); n._h.on_size_change({ width: 400, height: h }, cx); };
+  const SUM = "Pick the night. **Thursday** is safer.\n\n- Read docs/cutover.md first\n- Reply with one option";
+  reset({ files: { [`${APP}/AGENTS.md`]: "x" } });
+  { const { d, cx } = await open(ids.A15, { width: 900 });
+    const id = ids.A15, it = d.viewStore().item(id);
+    it.summary = SUM;
+    draw(d, cx);
+    A.deepEqual(ids_(UI().ids.get("dt-left")), [`dt-above-${id}`, `dt-sec-ans-${id}`, `dt-below-${id}`], "the column: the group above, ANSWER, the group below");
+    A.deepEqual(ids_(UI().ids.get(`dt-above-${id}`)), [`dt-sec-text-${id}`, `dt-sec-todo-${id}`, `dt-sec-opts-${id}`], "above: TEXT, WHAT TO DO, OPTIONS");
+    const below = ids_(UI().ids.get(`dt-below-${id}`));
+    A.deepEqual(below.slice(-2), [`dt-sec-quote-${id}`, `foot-${id}`], "below: QUOTE, then the foot line, last");
+    A.ok(!ids_(UI().ids.get(`dt-above-${id}`)).includes(`dt-sec-quote-${id}`), "the quote is no longer above the answer");
+    A.ok(texts(UI().ids.get(`dt-sec-todo-${id}`)).includes("WHAT TO DO"), "the section's title");
+    const md = UI().md.get(`dt-todo-${id}`);
+    A.ok(md.includes("**Thursday**") && md.includes("](https://ledgr.invalid/path/"), "the summary as markdown, its path linkified as the text's are");
+    const tv = UI().ids.get(`dt-todo-${id}-box`)?._kids?.[0];
+    A.equal(tv?._selectable, true, "selectable"); A.ok(tv?._h?.on_link_click, "its links take clicks (openLink)");
+    click(`dt-cp-todo-${id}`, cx); A.equal(cx.clip, SUM, "Copy: the summary as stored"); A.equal(d.flash, W.copiedWords("What to do", SUM.length));
+    // The frame at its least before anything is measured (eight rows at text scale 1), the textarea inside it.
+    const frame0 = UI().ids.get(`dt-answer-frame-${id}`);
+    A.equal(frame0._hpx, D.answerMinFrame(1), "the frame: its least height first"); A.equal(D.answerMinFrame(1), 190);
+    const ta = frame0._kids.find((k) => k?._kind === "textarea");
+    A.equal(ta?._hpx, 190 - D.ANSWER_BOX.frame, "the textarea: the frame's height less its padding and border");
+    A.equal(D.answerRows(190, 1), 8, "eight rows in it");
+    A.ok(holds(UI().ids.get(`dt-answer-row-${id}`), `dt-copy1-${id}`) && !holds(frame0, `dt-copy1-${id}`), "Paste answer under the box, beside the hint, not beside the box");
+    A.ok(texts(UI().ids.get(`dt-answer-row-${id}`)).join(" ").includes("⌘Enter pastes the answers for turn 17"), "the hint in that row");
+    // A click on the frame puts the keyboard in the textarea, unless it has it.
+    d.fieldOn = null; let f0 = d.answer._focused; frame0._h.on_click({}, cx); A.equal(d.answer._focused, f0 + 1, "a click on the frame: the textarea focused");
+    d.fieldOn = d.answer; f0 = d.answer._focused; frame0._h.on_click({}, cx); A.equal(d.answer._focused, f0, "...not again when it has the keyboard (its caret kept)");
+    // The measures: nothing changes until all four are in; then the frame takes the column's free height.
+    fire("dt-left", 700, cx); fire(`dt-above-${id}`, 220, cx); fire(`dt-below-${id}`, 90, cx);
+    A.equal(d.frameH, null, "three of four measures: nothing yet");
+    fire(`dt-sec-ans-${id}`, 190 + 60, cx);   // the section: its frame (190, drawn) and 60 of title and hint row
+    const used = 24 + 220 + 90 + 60 + 24;    // the column's padding, the groups, the chrome, two gaps
+    A.equal(d.frameH, 700 - used - D.ANSWER_BOX.margin, "the free height: 280"); A.equal(d.frameH, 280);
+    A.equal(d.answer._rows, D.answerRows(280, 1), "the textarea told the rows that fill it"); A.equal(d.answer._rows, 12);
+    draw(d, cx);
+    A.equal(UI().ids.get(`dt-answer-frame-${id}`)._hpx, 280, "drawn at 280");
+    A.equal(UI().ids.get(`dt-answer-frame-${id}`)._kids.find((k) => k?._kind === "textarea")._hpx, 268);
+    const n0 = cx.notified;
+    fire(`dt-sec-ans-${id}`, 280 + 60, cx); A.equal(d.frameH, 280, "the section grew with its frame: the same chrome, no change"); A.equal(cx.notified, n0, "...no redraw");
+    fire("dt-left", 702, cx); A.equal(d.frameH, 280, "2 px more: under the hysteresis, no change");
+    fire("dt-left", 701, cx); A.equal(d.frameH, 280, "...1 px back: still fits, kept");
+    fire("dt-left", 699, cx); A.equal(d.frameH, 279, "review 7.8: 1 px less than it needs: it shrinks at once, never overhangs");
+    A.equal(D.answerFrame({ col: 600, used: 200, current: 398 }), 398); A.equal(D.answerFrame({ col: 597, used: 200, current: 398 }), 395, "review 7.8's case: col 597 no longer keeps 398");
+    A.equal(D.answerFrame({ col: 603, used: 200, current: 398 }), 398, "...while 3 px of growth still keeps it");
+    fire("dt-left", 900, cx); A.equal(d.frameH, 480, "the dialog taller: the box grows with it");
+    fire("dt-left", 400, cx); A.equal(d.frameH, 190, "no room left: its least, the column scrolls");
+    d.noteFit("above", "rq_another", 5, cx); A.equal(d.frameH, 190, "a report for another item is dropped");
+    fire("dt-left", 160, cx); A.equal(d.frameH, Math.max(Math.round(D.answerRowPx(1) * 3 + 20), 96), "a very short column: 0.6 of it, never under three rows");
+    // Text scale 1.6: the least is eight rows of the larger text, then 0.6 of a short column.
+    d.cfg = { ...d.cfg, ui: { ...(d.cfg?.ui ?? {}), textScale: 1.6 } };
+    A.equal(D.answerMinFrame(1.6), 292); A.equal(D.answerMinFrame(0.8), 156);
+    fire("dt-left", 1000, cx); A.equal(d.frameH, 1000 - used - 2, "1.6: the free height");
+    fire("dt-left", 500, cx); A.equal(d.frameH, 292, "1.6: eight rows of the larger text");
+    fire("dt-left", 420, cx); A.equal(d.frameH, 252, "1.6 in a short column: 0.6 of it");
+    A.equal(d.answer._rows, D.answerRows(252, 1.6));
+    draw(d, cx); A.equal(UI().ids.get(`dt-answer-frame-${id}`)._hpx, 252, "drawn so");
+    d.cfg = { ...d.cfg, ui: { ...(d.cfg?.ui ?? {}), textScale: 1 } };
+    // A step to the next ask: its box made with the rows of the frame drawn; its own measures start empty.
+    fire("dt-left", 700, cx); const kept = d.frameH;
+    A.equal(d.step(1, cx), true); const id2 = d.target.id;
+    A.equal(d.answer._opts.rows, D.answerRows(kept, 1), "the next ask's box: the rows of the frame drawn now");
+    draw(d, cx); A.equal(d.fit.id, id2); A.equal(d.fit.by.get(id2).chrome, null, "its measures start empty");
+    A.equal(UI().ids.get(`dt-answer-frame-${id2}`)._hpx, kept, "the frame keeps its height meanwhile");
+    fire(`dt-above-${id2}`, 120, cx); fire(`dt-below-${id2}`, 60, cx); fire(`dt-sec-ans-${id2}`, kept + 60, cx);
+    const own2 = 700 - (24 + 120 + 60 + 60 + 24) - 2; A.equal(d.frameH, own2, "its own fit once its measures are in");
+    // Review 7.9: back to the first ask (⌘↑): its measures were kept by its id, so it is drawn at its own frame
+    // at once, with no report from Herdr.
+    A.equal(d.step(-1, cx), true); A.equal(d.target.id, id);
+    A.equal(d.fit.by.get(id).chrome, 60, "the first ask's measures kept by its id"); A.equal(d.fit.by.get(id).frame, kept);
+    A.equal(d.answer._opts.rows, D.answerRows(kept, 1), "its box made with the rows of its own frame");
+    draw(d, cx); A.equal(UI().ids.get(`dt-answer-frame-${id}`)._hpx, kept, "drawn at its own frame, no report needed");
+    A.equal(d.fit.by.get(id2).frame, own2, "...and the other's kept too");
+    for (let i = 0; i < 40; i++) d.fitOf(`rq_fill_${i}`);
+    A.ok(d.fit.by.size <= 32, "at most 32 items' measures kept"); }
+  // One column: the groups first, then the message; the passage still scrolled to; the box at its least,
+  // never filling (review 7.7: the message and its marked passage follow in the same column).
+  { const { d, cx } = await open(ids.A15, { width: 500 });
+    draw(d, cx);
+    const id = ids.A15, n0 = cx.notified;
+    fire("dt-left", 900, cx); fire(`dt-above-${id}`, 150, cx); fire(`dt-below-${id}`, 60, cx); fire(`dt-sec-ans-${id}`, 250, cx);
+    A.equal(d.frameH, null, "one column: nothing fitted"); A.equal(cx.notified, n0, "...no redraw");
+    draw(d, cx); A.equal(UI().ids.get(`dt-answer-frame-${id}`)._hpx, D.answerMinFrame(1), "one column: the frame stays at its least (190)");
+    const root = () => draw(d, cx).tree;
+    root()._h.on_size_change({ width: 900, height: 800 }, cx); A.equal(d.width, 900);
+    A.equal(d.frameH, 900 - (24 + 150 + 60 + 60 + 24) - 2, "wider (two columns): fitted again from its measures, it fills");
+    root()._h.on_size_change({ width: 500, height: 800 }, cx); draw(d, cx); A.equal(UI().ids.get(`dt-answer-frame-${id}`)._hpx, D.answerMinFrame(1), "narrow again: its least at once");
+    draw(d, cx);
+    const kids = ids_(UI().ids.get("dt-left"));
+    A.deepEqual(kids.slice(0, 3), [`dt-above-${ids.A15}`, `dt-sec-ans-${ids.A15}`, `dt-below-${ids.A15}`], "one column: the ask's three parts first");
+    A.ok(kids.length > 3 && d.leftScroll._to.length >= 1 && d.leftScroll._to.at(-1) >= 3 && kids[d.leftScroll._to.at(-1)]?.startsWith("dt-msg-hw-"), "...the marked passage is the child scrolled to"); }
+  // Without a summary: no section, no placeholder; the rest as above.
+  { const { d, cx } = await open(by("A6").id, { width: 900 });
+    const id = by("A6").id; delete d.viewStore().item(id).summary;
+    const { all } = draw(d, cx);
+    A.ok(!UI().ids.has(`dt-sec-todo-${id}`) && !all.includes("WHAT TO DO"), "no summary: no WHAT TO DO");
+    A.deepEqual(ids_(UI().ids.get(`dt-above-${id}`)), [`dt-sec-text-${id}`], "above: TEXT alone (a do has no options)");
+    A.ok(UI().ids.has(`dt-answer-frame-${id}`), "the answer box as usual"); }
+  // A closed ask shows its summary; no answer box, so no groups: the parts in the same order.
+  { const { d, cx } = await open(ids.A15, { width: 900 });
+    const id = ids.A15, it = d.viewStore().item(id);
+    it.summary = SUM; it.status = "resolved"; it.resolvedBy = "agent";
+    draw(d, cx);
+    const kids = ids_(UI().ids.get("dt-left"));
+    A.ok(!UI().ids.has(`dt-above-${id}`) && !UI().ids.has(`dt-answer-${id}`), "closed: no answer box, no groups");
+    A.deepEqual(kids.slice(0, 3), [`dt-sec-text-${id}`, `dt-sec-todo-${id}`, `dt-sec-opts-${id}`], "TEXT, WHAT TO DO, OPTIONS");
+    A.ok(kids.indexOf(`dt-sec-res-${id}`) > 2 && kids.indexOf(`dt-sec-quote-${id}`) > kids.indexOf(`dt-sec-res-${id}`) && kids.at(-1) === `foot-${id}`, "then RESULT, QUOTE, the foot"); }
+  // A question keeps its order (TEXT, QUOTE, ABOUT…), no groups, and never shows a summary.
+  { const { d, cx } = await open(ids.Q6, { width: 900 });
+    d.viewStore().item(ids.Q6).summary = "not for a question";
+    const { all } = draw(d, cx);
+    const kids = ids_(UI().ids.get("dt-left"));
+    A.deepEqual(kids.slice(0, 2), [`dt-sec-quote-${ids.Q6}`, `dt-sec-about-${ids.Q6}`], "a question (a bookmark: no text): its quote, then ABOUT, as before");
+    A.ok(!all.includes("WHAT TO DO") && !UI().ids.has(`dt-above-${ids.Q6}`), "no WHAT TO DO, no groups"); }
+
+  // ── an image in an answer (2026-11-23): a drop copied in by fs, the clipboard's PNG through the pinned call ──
+  {
+    const ATT = path.join(APP, "ledgr-data/attachments"), SRC = path.join(dir, "drops");
+    fs.mkdirSync(SRC, { recursive: true });
+    // A file of n bytes with a PNG's header for w × h pixels (the rest filler: only the header is read).
+    const png = (n, w = 64, h = 48) => { const b = Buffer.alloc(Math.max(n, 33), 7); b.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      b.writeUInt32BE(13, 8); b.write("IHDR", 12, "latin1"); b.writeUInt32BE(w, 16); b.writeUInt32BE(h, 20); return b; };
+    // A JPEG's start: SOI, an APP0 of 16, then SOF0 with h × w.
+    const jpeg = (w, h) => Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, ...Array(14).fill(0), 0xff, 0xc0, 0x00, 0x11, 0x08, h >> 8, h & 255, w >> 8, w & 255, 3, ...Array(12).fill(0)]);
+    const put = (name, bytes) => { const p = path.join(SRC, name); fs.writeFileSync(p, bytes); return p; };
+    const inAtt = () => (fs.existsSync(ATT) ? fs.readdirSync(ATT).sort() : []);
+    const NAME = /^\d{8}-\d{6}-[0-9a-z]{6}\.(png|jpe?g|gif|webp)$/;
+    const AT = await import(`${dir}/attach.js`), OP = await import(`${dir}/opener.js`);
+    // attach.js, the pure parts.
+    A.equal(AT.attachDir(), ATT); A.equal(AT.extOf("/a/B.JPEG"), "jpeg"); A.equal(AT.extOf("/a/b.heic"), null); A.equal(AT.extOf("/a/png"), null);
+    A.match(AT.attachName("png", new Date(2026, 10, 23, 15, 1, 2), "a1b2c3"), /^20261123-150102-a1b2c3\.png$/);
+    const P1 = `${ATT}/20261123-150102-a1b2c3.png`, L1 = `attached image (read this file): ${P1}`;
+    A.equal(AT.withAttach("", P1), `${L1}\n`); A.equal(AT.withAttach("Yes.\n\n", P1), `Yes.\n${L1}\n`, "on a line of its own after the text, a line break after it (review 9.6)");
+    A.deepEqual(AT.attachLines(`Yes.\n${L1}\n  ${L1}\nattached image (read this file): /tmp/x.png`), [{ path: P1, name: "20261123-150102-a1b2c3.png", at: 1 }, { path: P1, name: "20261123-150102-a1b2c3.png", at: 2 }],
+      "ledgr's own files only (a path elsewhere is text)");
+    A.deepEqual(AT.attachLines(`${L1} and the second one`).map((a) => a.path), [P1], "words typed after the path on its line do not unmake it (the match ends at the extension)");
+    A.deepEqual(AT.attachLines(`${L1.slice(0, -4)}.pngx`), [], "...but a longer extension is no attachment's");
+    A.equal(AT.withoutAttach(`Yes.\n${L1}`, P1), "Yes."); A.equal(AT.withoutAttach(`${L1}\nThen this.`, P1), "Then this."); A.equal(AT.withoutAttach("Yes.", P1), "Yes.");
+    A.equal(AT.withoutAttach(`Yes.\n${L1}\n`, P1), "Yes.", "the line break added after it goes with it"); A.equal(AT.withoutAttach(`Yes.\n${L1} words\nMore.`, P1), "Yes.\nMore.");
+    // A cut never leaves part of an attachment line (review 9.6).
+    { const head = "x".repeat(3950);
+      A.deepEqual(AT.cutDraft(`${head}\n${L1}`, 4000), { text: head, dropped: true }, "the cut inside an image's line: the line goes whole");
+      A.deepEqual(AT.cutDraft(`${head}\n${L1} words`, 3951 + L1.length + 2), { text: head, dropped: true }, "...also inside the words after its path");
+      A.deepEqual(AT.cutDraft(`${L1}\n${"y".repeat(4000)}`, 4000), { text: `${L1}\n${"y".repeat(4000 - L1.length - 1)}`, dropped: false }, "a cut in plain text after it: as before");
+      A.deepEqual(AT.cutDraft("short", 4000), { text: "short", dropped: false }); }
+    A.equal(AT.appRelative(P1), "ledgr-data/attachments/20261123-150102-a1b2c3.png", "image()'s path: relative to the app's folder");
+    A.equal(AT.appRelative(P1, `${APP}/`), "ledgr-data/attachments/20261123-150102-a1b2c3.png", "an app folder with a trailing slash: the same (review 9.4)");
+    A.equal(AT.appRelative(P1, "/"), null, "no app folder known: none");
+    // The one normalisation (detailing.js appRoot) behind attachDir and opener.js clipDir: they agree.
+    A.equal(AT.attachDir(), OP.clipDir(), "attachDir and clipDir agree");
+    // Pixel sizes from the header: PNG and JPEG only; a thumbnail fitted in 112 × 72, both sides; none past 4,096.
+    A.deepEqual(AT.imageDims(png(40, 64, 48)), { w: 64, h: 48, kind: "png" }); A.deepEqual(AT.imageDims(jpeg(640, 480)), { w: 640, h: 480, kind: "jpeg" });
+    A.equal(AT.imageDims(Buffer.from("GIF89a....")), null, "a GIF: no thumbnail"); A.equal(AT.imageDims(null), null);
+    A.deepEqual(AT.thumbSize({ w: 64, h: 48 }), { w: 96, h: 72 }); A.deepEqual(AT.thumbSize({ w: 1600, h: 400 }), { w: 112, h: 28 });
+    A.equal(AT.thumbSize({ w: 1000, h: 5000 }), null, "over 4,096 a side: none"); A.equal(AT.thumbSize(null), null);
+    A.equal(AT.appRelative("/elsewhere/x.png"), null); A.equal(AT.isOurs(P1), true); A.equal(AT.isOurs(`${ATT}/x.png`), false); A.equal(AT.isOurs(`${ATT}/sub/20261123-150102-a1b2c3.png`), false);
+    A.equal(AT.sizeWords(300), "1 KiB"); A.equal(AT.sizeWords(3 * 1024 * 1024 + 300000), "3.3 MiB");
+    // The answer sheet carries the line as the answer going on (confluence.js answerLines, unchanged).
+    { const C = await import(`${dir}/confluence.js`); A.deepEqual(C.answerLines("A15", `Thursday.\n${L1}`), ["A15: Thursday.", `  ${L1}`], "the sheet: the line indented under the answer"); }
+
+    fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText);
+    reset({ files: { [`${APP}/AGENTS.md`]: "x" } });
+    const { d, cx } = await open(ids.A15, { demo: false, width: 900 });
+    const id = ids.A15, it = () => d.viewStore().item(id);
+    d.transcriptOk = () => true;   // Reader's transcript check uses Herdr's fs.exists (Node has none); not this test's
+    d.setDraft(it(), "Thursday night.", cx);
+    draw(d, cx);
+    A.ok(UI().ids.has(`dt-att-row-${id}`) && UI().ids.has(`dt-att-paste-${id}`), "the row under the box: Paste image, no chip yet");
+    A.ok(texts(UI().ids.get(`dt-answer-row-${id}`)).join(" ").includes("pasting or dropping an image attaches it, as a picture or as its file's path"), "the hint: a paste or a drop attaches, whichever way the image arrives");
+    const frame = UI().ids.get(`dt-answer-frame-${id}`); A.ok(frame._h.on_drop, "the frame takes a drop");
+    // A drop: copied in (bytes equal), its line at the end of the draft and in the box, the row shows it.
+    const s1 = put("shot one.png", png(300));
+    frame._h.on_drop({ paths: [s1] }, cx); A.match(d.flash, /^Copying the image into ledgr-data\/attachments\//);
+    await drain(cx);
+    let files_ = inAtt(); A.equal(files_.length, 1); A.match(files_[0], NAME, "named <yyyymmdd>-<hhmmss>-<rand6>.png");
+    const c1 = path.join(ATT, files_[0]);
+    A.deepEqual(fs.readFileSync(c1), fs.readFileSync(s1), "the copy's bytes are the file's");
+    A.equal(it().draft, `Thursday night.\nattached image (read this file): ${c1}\n`, "the line at the end of the draft, a line break after it");
+    A.equal(d.answer.value(), it().draft, "...and in the box");
+    A.equal(d.flash, W.ATTACH_WORDS.attached(files_[0], "Ask 15"));
+    A.ok(d.drafts.get(id), "the draft posted as typing is (Reader typeDraft)");
+    draw(d, cx);
+    A.ok(texts(UI().ids.get(`dt-att-${id}-0`)).includes(files_[0]), "its chip: the name");
+    const th = UI().ids.get(`dt-att-th-${id}-0`)?._kids?.[0];
+    A.equal(th?._kind, "image"); A.equal(th?._src, `ledgr-data/attachments/${files_[0]}`, "the thumbnail: image() of the app-relative path");
+    A.equal(th?._wpx, 96); A.equal(th?._hpx, 72, "both sides set: 64 × 48 fitted in 112 × 72 (review 9.7)");
+    A.equal(UI().ids.get(`dt-att-th-${id}-0`)._wpx, 96, "its frame the same size");
+    // Typing after it starts a new line; words typed onto its line keep it (review 9.6).
+    d.answer.set_value(`${it().draft}And one more thing.`); d.answer._on.change({}, cx);
+    A.equal(AT.attachLines(it().draft).length, 1, "typed after it: on the next line, the line kept");
+    d.answer.set_value(it().draft.replace(`${c1}\n`, `${c1} (the second screen)\n`)); d.answer._on.change({}, cx); draw(d, cx);
+    A.equal(AT.attachLines(it().draft).length, 1, "words on its line: still an image"); A.ok(UI().ids.has(`dt-att-${id}-0`), "...its chip kept");
+    d.setDraft(it(), `Thursday night.\nattached image (read this file): ${c1}\n`, cx); draw(d, cx);
+    // Thumbnails off, or a file over 2 MiB: the chip alone.
+    d.cfg = { ...d.cfg, ui: { ...(d.cfg?.ui ?? {}), attachmentThumbs: false } }; draw(d, cx);
+    A.ok(UI().ids.has(`dt-att-${id}-0`) && !UI().ids.has(`dt-att-th-${id}-0`), "ui.attachmentThumbs false: no thumbnail");
+    d.cfg = { ...d.cfg, ui: { ...(d.cfg?.ui ?? {}), attachmentThumbs: true } };
+    d.attachInfo.set(c1, { size: 3 * 1024 * 1024, dims: { w: 64, h: 48 }, gone: false }); draw(d, cx);
+    A.ok(!UI().ids.has(`dt-att-th-${id}-0`) && texts(UI().ids.get(`dt-att-${id}-0`)).includes("3 MiB"), "over 2 MiB: no thumbnail, its size said");
+    d.attachInfo.set(c1, { size: 300, dims: { w: 600, h: 4200 }, gone: false }); draw(d, cx);
+    A.ok(!UI().ids.has(`dt-att-th-${id}-0`), "a tall capture over 4,096 pixels: no thumbnail");
+    d.attachInfo.set(c1, { size: 300, dims: null, gone: false }); draw(d, cx);
+    A.ok(!UI().ids.has(`dt-att-th-${id}-0`), "no PNG or JPEG header read: no thumbnail");
+    d.attachInfo.delete(c1); draw(d, cx); await drain(cx); draw(d, cx);
+    A.deepEqual(d.attachInfo.get(c1), { size: 300, dims: { w: 64, h: 48, kind: "png" }, gone: false }, "a file not attached here: its size and header read once (from a timer)");
+    A.ok(UI().ids.has(`dt-att-th-${id}-0`));
+    // Refusals: nothing written for any of them.
+    const refuse = async (p, re, why) => { const before = inAtt(); UI().ids.get(`dt-answer-frame-${id}`)._h.on_drop({ paths: [p] }, cx); await drain(cx); draw(d, cx);
+      A.match(d.flash, re, why); A.deepEqual(inAtt(), before, `${why}: nothing written`); };
+    await refuse(put("notes.txt", "hi"), /^notes\.txt not attached: ledgr takes png, jpg, gif and webp images/, "not an image by its name");
+    await refuse(put("big.png", Buffer.alloc(8 * 1024 * 1024 + 1)), /^big\.png not attached: it is 8,388,609 bytes, over the 8 MiB an image may be\.$/, "over 8 MiB");
+    await refuse(put("empty.png", Buffer.alloc(0)), /^empty\.png not attached: the file is empty\.$/, "an empty file");
+    await refuse(path.join(SRC, "gone.png"), /^gone\.png not attached: it could not be read \(/, "a file that cannot be read");
+    // Three more in one drop (four in all), then the fifth.
+    frame._h.on_drop({ paths: [put("a.jpg", png(10)), put("b.gif", png(11)), put("c.webp", png(12))] }, cx); await drain(cx);
+    A.equal(AT.attachLines(it().draft).length, 4, "four attached"); A.equal(inAtt().length, 4);
+    A.equal(d.flash.split(" attached to Ask 15").length - 1, 3, "the status line says what became of each");
+    await refuse(put("d.png", png(13)), /^d\.png not attached: an answer takes at most 4 images\.$/, "the fifth");
+    // The answer's room: no file for an image whose line would pass 4,000 characters.
+    const keep = it().draft; d.setDraft(it(), "x".repeat(3990), cx);
+    await refuse(put("e.png", png(14)), /^e\.png not attached: the answer would pass 4,000 characters\.$/, "no room left in the answer");
+    d.setDraft(it(), keep, cx); draw(d, cx);
+    // The box's own cut never leaves part of an image's line: it goes whole, and the status line says so.
+    { const long = `${"x".repeat(3990)}\nattached image (read this file): ${c1}`;
+      d.answer.set_value(long); d.answer._on.change({}, cx);
+      A.equal(d.answer.value(), "x".repeat(3990), "the cut reached the image's line: the line went whole"); A.match(d.flash, /the image line it reached was taken out whole/);
+      d.setDraft(it(), keep, cx); draw(d, cx); }
+    // One at a time; a flag older than a minute holds nothing back (review 9.5).
+    d.attaching = { id, at: Date.now() };
+    UI().ids.get(`dt-answer-frame-${id}`)._h.on_drop({ paths: [put("f.png", png(15))] }, cx); A.equal(d.flash, W.ATTACH_WORDS.busy, "a drop while one is attached: busy");
+    H().execs = []; d.pasteImage(id, cx); A.equal(d.flash, W.ATTACH_WORDS.busy, "a paste too"); A.deepEqual(H().execs, [], "...nothing run");
+    d.attaching = { id, at: Date.now() - 61000 }; A.equal(d.attachBusy(), false, "a minute old: stale");
+    H().execFn = () => ({ code: 1, stdout: "", stderr: "execution error: Error: Error: no image on the clipboard (-2700)" });
+    { const four = it().draft; d.setDraft(it(), "Thursday night.", cx);
+      d.pasteImage(id, cx); A.equal(d.flash, W.ATTACH_WORDS.reading, "...the paste runs"); await drain(cx); A.equal(d.attaching, null); H().execFn = null;
+      d.setDraft(it(), four, cx); }
+    // Remove: the line out, the file kept; Reveal: open -R through the status line's reveal.
+    const firstPath = AT.attachLines(it().draft)[0].path;
+    draw(d, cx); click(`dt-att-rm-${id}-0`, cx);
+    A.ok(!it().draft.includes(firstPath) && it().draft.startsWith("Thursday night."), "Remove: its line out of the draft"); A.ok(fs.existsSync(firstPath), "...the file stays");
+    A.equal(d.flash, W.ATTACH_WORDS.removed(path.basename(firstPath)));
+    draw(d, cx); H().execs = []; click(`dt-att-rev-${id}-0`, cx); await drain(cx);
+    A.deepEqual(H().execs[0]?.slice(0, 2), ["open", ["-R", AT.attachLines(it().draft)[0].path]], "Reveal in Finder: open -R");
+
+    // The clipboard (the owner's pinned exception): paste_other and Paste image run the one call; what it writes is named.
+    let ran = [];
+    const clip = (fn) => { H().execFn = (cmd, args, o) => { ran.push([cmd, args, o]); return fn(args); }; };
+    d.setDraft(it(), "See the screenshot.", cx); draw(d, cx); ran = [];
+    clip((args) => { fs.writeFileSync(args[4], png(222)); return { code: 0, stdout: '{"how":"converted","bytes":222}\n', stderr: "" }; });
+    d.answer._on.paste_other({}, cx); A.equal(d.flash, W.ATTACH_WORDS.reading); await drain(cx);
+    A.equal(ran.length, 1, "⌘V with an image and no text: one run");
+    A.deepEqual(ran[0][0], "/usr/bin/osascript"); A.deepEqual(ran[0][1].slice(0, 4), ["-l", "JavaScript", "-e", OP.CLIP_SCRIPT]);
+    A.equal(ran[0][1].length, 6, "the path and the limit, no pasteboard name"); A.equal(ran[0][1][5], String(8 * 1024 * 1024)); A.deepEqual(ran[0][2], { timeout: 5000 });
+    const out = ran[0][1][4]; A.equal(path.dirname(out), ATT); A.match(path.basename(out), /^\d{8}-\d{6}-[0-9a-z]{6}\.png$/);
+    A.equal(it().draft, `See the screenshot.\nattached image (read this file): ${out}\n`, "the PNG named in the answer");
+    A.equal(d.flash, W.ATTACH_WORDS.attached(path.basename(out), "Ask 15", "converted to PNG"));
+    draw(d, cx); await drain(cx); draw(d, cx); A.ok(UI().ids.has(`dt-att-th-${id}-0`), "its thumbnail (222 bytes, its header read)");
+    // Paste image in the row: the same call (a clipboard holding text and an image fires no paste_other).
+    ran = []; clip((args) => { fs.writeFileSync(args[4], png(50)); return { code: 0, stdout: '{"how":"png","bytes":50}', stderr: "" }; });
+    click(`dt-att-paste-${id}`, cx); await drain(cx); A.equal(ran.length, 1, "Paste image: the same one run"); A.equal(AT.attachLines(it().draft).length, 2);
+    A.equal(d.flash, W.ATTACH_WORDS.attached(path.basename(ran[0][1][4]), "Ask 15"));
+    // No image, too large, failed: their words, nothing named.
+    const draftNow = it().draft;
+    for (const [res, words] of [[{ code: 1, stdout: "", stderr: "execution error: Error: Error: no image on the clipboard (-2700)" }, W.ATTACH_WORDS.noImage],
+      [{ code: 1, stdout: "", stderr: "execution error: Error: Error: too large: 9437184 bytes (-2700)" }, W.ATTACH_WORDS.clipLarge("9 MiB", "8 MiB")],
+      [{ code: 1, stdout: "", stderr: "execution error: Error: Error: the file could not be written (it is there already, or its folder is not) (-2700)" },
+        W.ATTACH_WORDS.clipFailed("the file could not be written (it is there already, or its folder is not)")]]) {
+      clip(() => res); d.pasteImage(id, cx); await drain(cx);
+      A.equal(d.flash, words); A.equal(it().draft, draftNow, "nothing named");
+    }
+    // A write that failed part way and left a file: said, never named, never deleted.
+    clip((args) => { fs.writeFileSync(args[4], "part"); return { code: 1, stdout: "", stderr: "execution error: Error: Error: the file could not be written (it is there already, or its folder is not) (-2700)" }; });
+    d.pasteImage(id, cx); await drain(cx);
+    A.equal(d.flash, `${W.ATTACH_WORDS.clipFailed("the file could not be written (it is there already, or its folder is not)")} ${W.ATTACH_WORDS.partial(path.basename(ran.at(-1)[1][4]))}`, "a partial file: said");
+    A.ok(fs.existsSync(ran.at(-1)[1][4]) && it().draft === draftNow, "...kept, not named");
+    clip(() => { throw new Error("timed out"); }); d.pasteImage(id, cx); await drain(cx);
+    A.equal(d.flash, W.ATTACH_WORDS.clipFailed("the clipboard reader did not finish within 5 s"), "a timeout"); A.equal(d.attaching, null, "...and the next may run");
+    // A run that never comes back (a host call left pending): bounded at 8 s (within), the next may run (review 9.5).
+    { const cx2 = mkcx(); cx2.timer.after = (ms, f) => { cx2.timers.push([ms, f]); return { cancel() {} }; };
+      clip(() => new Promise(() => {})); d.pasteImage(id, cx2); await drain(cx2, 9000);
+      A.equal(d.flash, W.ATTACH_WORDS.clipFailed("it did not finish within 8 s"), "a run that never answers: said after 8 s"); A.equal(d.attaching, null, "...the row free again"); }
+    // Already at four: refused before anything runs.
+    d.setDraft(it(), draftNow, cx);
+    while (AT.attachLines(it().draft).length < 4) d.setDraft(it(), AT.withAttach(it().draft, c1), cx);
+    ran = []; d.pasteImage(id, cx); A.equal(d.flash, "The image on the clipboard not attached: an answer takes at most 4 images."); A.deepEqual(ran, [], "the fifth: nothing run");
+    d.setDraft(it(), "x".repeat(3990), cx); ran = []; d.pasteImage(id, cx);
+    A.equal(d.flash, "The image on the clipboard not attached: the answer would pass 4,000 characters."); A.deepEqual(ran, [], "no room: nothing run");
+    // The seam refuses a path that is not ledgr's, or an ask no longer open.
+    A.equal(d.attachWritten(id, "/tmp/x.png", cx), W.ATTACH_WORDS.notOurs("/tmp/x.png"));
+    it().status = "resolved"; A.equal(d.attachWritten(id, c1, cx), W.ATTACH_WORDS.closed(path.basename(c1))); d.pasteImage(id, cx); A.match(d.flash, /no longer open/);
+    H().execFn = null;
+    // Nothing under attachments/ was ever removed or written over: every file written is still there.
+    A.ok(inAtt().length >= 6 && inAtt().every((f) => NAME.test(f)), "every file kept, each a name of ledgr's shape");
+  }
+  // ── an image that reaches the box as its file's path (2026-11-23, the live check: a capture tool's clipboard and
+  // a drop on the text both insert the file's path as text) ──
+  {
+    const ATT = path.join(APP, "ledgr-data/attachments"), SRC = path.join(dir, "shots", "media_x");
+    fs.mkdirSync(SRC, { recursive: true });
+    const png = (n, w = 64, h = 48) => { const b = Buffer.alloc(Math.max(n, 33), 7); b.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      b.writeUInt32BE(13, 8); b.write("IHDR", 12, "latin1"); b.writeUInt32BE(w, 16); b.writeUInt32BE(h, 20); return b; };
+    const put = (name, bytes) => { const p = path.join(SRC, name); fs.writeFileSync(p, bytes); return p; };
+    const inAtt = () => (fs.existsSync(ATT) ? fs.readdirSync(ATT).sort() : []);
+    const AT = await import(`${dir}/attach.js`);
+    const LEAD = "attached image (read this file): ";
+    // The pure rule: what one change inserted, and the lines that are an image's path and came whole in it.
+    A.deepEqual(AT.insertedSpan("abc", "abXYc"), { start: 2, end: 4 }); A.deepEqual(AT.insertedSpan("ab", "abc"), { start: 2, end: 3 });
+    A.equal(AT.pathOf("  /a/b c.png "), "/a/b c.png"); A.equal(AT.pathOf("file:///a/b%20c.PNG"), "/a/b c.PNG"); A.equal(AT.pathOf("file://localhost/a/x.png"), "/a/x.png");
+    A.equal(AT.pathOf("a/b.png"), null); A.equal(AT.pathOf("//srv/x.png"), null); A.equal(AT.pathOf("file:///a/%E0%A4%A.png"), null, "a bad escape: none");
+    A.deepEqual(AT.pastedPaths("Hi", "Hi\n/x/y.png").map((f) => f.src), ["/x/y.png"]);
+    A.deepEqual(AT.pastedPaths("Hi\n/x/y.pn", "Hi\n/x/y.png"), [], "the last key of a typed path: never");
+    A.deepEqual(AT.pastedPaths("", "See /x/y.png here"), [], "a path inside a pasted sentence: text");
+    A.deepEqual(AT.pastedPaths("Here it is: ", "Here it is: /x/a b.png"), [{ raw: "Here it is: /x/a b.png", text: "/x/a b.png", at: 0, src: "/x/a b.png", ext: "png" }],
+      "a path pasted alone at the end of a line of words: taken (the paste was exactly a path)");
+    A.deepEqual(AT.pastedPaths("", "/x/notes.md"), [], "not an image: plain text, nothing said");
+    A.deepEqual(AT.pastedPaths("", "/x/y.HEIC").map((f) => [f.src, f.ext]), [["/x/y.HEIC", null]], "an image ledgr does not take: found, to be said");
+    A.deepEqual(AT.pastedPaths("", `${ATT}/20261123-150102-a1b2c3.png`), [], "already in attachments/: left alone");
+    A.deepEqual(AT.pastedPaths("/x/y.png", "/x/y.png\n/x/y.png"), [{ raw: "/x/y.png", text: "/x/y.png", at: 1, src: "/x/y.png", ext: "png" }], "only what this change inserted (the second line)");
+    { const f = AT.pastedPaths("/x/y.png", "/x/y.png\n/x/y.png")[0];
+      A.equal(AT.withAttachAt("/x/y.png\n/x/y.png", f, "/A/p.png"), "/x/y.png\nattached image (read this file): /A/p.png\n", "the line it arrived on is the one replaced"); }
+    { const f = AT.pastedPaths("Here it is: ", "Here it is: /x/a b.png")[0];
+      A.equal(AT.withAttachAt("Here it is: /x/a b.png", f, "/A/p.png"), "Here it is:\nattached image (read this file): /A/p.png\n", "mid-line: the words keep their line, the attachment line its own");
+      A.equal(AT.withAttachAt("Here it is: /x/a b.png and more", { ...f, raw: "Here it is: /x/a b.png and more" }, "/A/p.png"), "Here it is:\nattached image (read this file): /A/p.png\nand more");
+      A.equal(AT.withoutRaw("Here it is: /x/a b.png", f), "Here it is:"); A.equal(AT.withAttachAt("changed", f, "/A/p.png"), null, "the line changed: none"); }
+
+    fs.writeFileSync(path.join(APP, "ledgr-data/store.json"), storeText);
+    reset({ files: { [`${APP}/AGENTS.md`]: "x" } });
+    const { d, cx } = await open(by("A6").id, { demo: false, width: 900 });
+    const id = by("A6").id, it = () => d.viewStore().item(id);
+    d.transcriptOk = () => true;
+    const type = (v) => { d.answer.set_value(v); d.answer._on.change({}, cx); };
+    const lines = () => AT.attachLines(it().draft);
+    // A capture tool's paste: one line, its path with spaces. It becomes the attachment line and a chip.
+    const shot = put("CleanShot 2026-11-23 at 4.09.28 PM.png", png(500));
+    d.setDraft(it(), "Here it is:", cx);
+    const n0 = inAtt().length;
+    type(`Here it is:\n${shot}`); A.equal(d.flash, W.ATTACH_WORDS.copying(1)); await drain(cx);
+    A.equal(inAtt().length, n0 + 1, "copied into attachments/");
+    A.equal(lines().length, 1); const c1 = lines()[0].path;
+    A.deepEqual(fs.readFileSync(c1), fs.readFileSync(shot), "byte for byte");
+    A.equal(it().draft, `Here it is:\n${LEAD}${c1}\n`, "its raw line replaced by the attachment line, a line break after it; the rest as it was");
+    A.equal(d.answer.value(), it().draft, "...and in the box");
+    A.equal(d.flash, W.ATTACH_WORDS.attached(path.basename(c1), "Ask 6", "from its path"));
+    draw(d, cx); A.ok(UI().ids.has(`dt-att-${id}-0`) && UI().ids.has(`dt-att-th-${id}-0`), "its chip and thumbnail");
+    // Pasted at the end of a line of words: the words keep their line.
+    { const sm = put("mid line.png", png(77)); d.setDraft(it(), "Look: ", cx); type(`Look: ${sm}`); await drain(cx);
+      const l = lines(); A.equal(l.length, 1); A.equal(it().draft, `Look:\n${LEAD}${l[0].path}\n`, "a path pasted after words on a line: taken, the words kept"); }
+    // Typed one character at a time: stays text.
+    d.setDraft(it(), "", cx); const n1 = inAtt().length;
+    let acc = ""; for (const ch of shot) { acc += ch; type(acc); } await drain(cx);
+    A.equal(it().draft, shot, "a path typed by hand stays as typed"); A.equal(inAtt().length, n1, "nothing copied"); A.equal(lines().length, 0);
+    // A file:// URL.
+    d.setDraft(it(), "", cx);
+    type(`file://${encodeURI(shot)}`); await drain(cx);
+    A.equal(lines().length, 1, "a file:// URL, percent-decoded: taken"); A.equal(it().draft, `${LEAD}${lines()[0].path}\n`);
+    // Two paths in one paste, in order; a path among other pasted text on a line of its own.
+    const a2 = put("one.png", png(40)), b2 = put("two.jpg", png(41));
+    d.setDraft(it(), "Start.", cx);
+    type(`Start.\nLook at these:\n${a2}\nand\n${b2}\nthanks`); await drain(cx);
+    const two = lines(); A.equal(two.length, 2, "two paths: two attachments"); A.match(two[0].name, /\.png$/); A.match(two[1].name, /\.jpg$/, "in order");
+    A.equal(it().draft, `Start.\nLook at these:\n${LEAD}${two[0].path}\nand\n${LEAD}${two[1].path}\nthanks`, "every other line as it was");
+    // The same file by a drop on the frame and by its path in the text within a second: one attachment.
+    d.setDraft(it(), "", cx); draw(d, cx);
+    const s3 = put("both ways.png", png(42)), n3 = inAtt().length;
+    UI().ids.get(`dt-answer-frame-${id}`)._h.on_drop({ paths: [s3] }, cx); type(s3); await drain(cx);
+    A.equal(inAtt().length, n3 + 1, "drop then text: one copy"); A.equal(lines().length, 1, "...one attachment"); A.ok(!it().draft.includes(s3), "...and the raw path gone");
+    d.setDraft(it(), "", cx); draw(d, cx);
+    const s4 = put("text first.png", png(43)), n4 = inAtt().length;
+    type(s4); UI().ids.get(`dt-answer-frame-${id}`)._h.on_drop({ paths: [s4] }, cx); await drain(cx);
+    A.equal(inAtt().length, n4 + 1, "text then drop: one copy"); A.equal(lines().length, 1, "...one attachment"); A.ok(!it().draft.includes(s4));
+    d.setDraft(it(), "", cx); draw(d, cx);
+    const s5 = put("drop done.png", png(44)), n5 = inAtt().length;
+    UI().ids.get(`dt-answer-frame-${id}`)._h.on_drop({ paths: [s5] }, cx); await drain(cx); type(`${it().draft}${s5}`); await drain(cx);
+    A.equal(inAtt().length, n5 + 1, "the drop done first, its path in the text after: one copy"); A.equal(lines().length, 1); A.ok(!it().draft.includes(s5), "...the raw path taken out");
+    // Refusals: the raw path stays and the status line says why.
+    const stays = async (p, re, why) => { d.setDraft(it(), "", cx); const n = inAtt().length; type(p); await drain(cx);
+      A.equal(it().draft, p, `${why}: the path stays as text`); A.equal(inAtt().length, n, `${why}: nothing copied`); A.match(d.flash, re, why);
+      A.ok(d.flash.endsWith("its path stays in the answer as text, which the agent can read."), `${why}: it says the path stays`); };
+    await stays(path.join(SRC, "gone.png"), /^gone\.png not attached: it could not be read \(/, "a file that cannot be read");
+    await stays(put("huge.png", Buffer.alloc(8 * 1024 * 1024 + 1)), /^huge\.png not attached: it is 8,388,609 bytes, over the 8 MiB an image may be/, "over 8 MiB");
+    await stays(put("photo.heic", png(45)), /^photo\.heic not attached: ledgr takes png, jpg, gif and webp images/, "an image type ledgr does not take");
+    { d.setDraft(it(), "", cx); for (const f of ["f1.png", "f2.png", "f3.png", "f4.png"]) { type(`${it().draft}${put(f, png(46))}`); await drain(cx); }
+      A.equal(lines().length, 4, "four taken one paste at a time");
+      const fifth = put("f5.png", png(47)), before5 = it().draft, n = inAtt().length; type(`${before5}${fifth}`); await drain(cx);
+      A.equal(it().draft, `${before5}${fifth}`, "the fifth: its path stays"); A.equal(inAtt().length, n); A.match(d.flash, /^f5\.png not attached: an answer takes at most 4 images; its path stays/); }
+    { d.setDraft(it(), "x".repeat(3900), cx); const p6 = put("room.png", png(48)), n = inAtt().length; type(`${"x".repeat(3900)}\n${p6}`); await drain(cx);
+      A.equal(it().draft, `${"x".repeat(3900)}\n${p6}`, "no room for the attachment line: the path stays"); A.equal(inAtt().length, n);
+      A.match(d.flash, /^room\.png not attached: the answer would pass 4,000 characters; its path stays/); }
+    // Busy: another attach running; the path stays, said.
+    d.setDraft(it(), "", cx); d.attaching = { id, at: Date.now() }; const p7 = put("busy.png", png(49)); type(p7);
+    A.equal(it().draft, p7); A.match(d.flash, /^busy\.png: An image is still being attached; try again when it is done; its path stays/); d.attaching = null;
+    // Never the clipboard's reader, never a process.
+    A.deepEqual((H().execs ?? []).filter(([c]) => c === "/usr/bin/osascript"), [], "the path route runs nothing");
+  }
+  // The demo: a path pasted copies nothing and says so; the path stays.
+  reset({ files: { [`${APP}/AGENTS.md`]: "x" } });
+  { const { d, cx } = await open(ids.A15, { width: 900 }); draw(d, cx);
+    const it = d.viewStore().item(ids.A15), v = `${it.draft ?? ""}\n/Users/x/Shots/CleanShot 1.png`;
+    d.answer.set_value(v); d.answer._on.change({}, cx); await drain(cx);
+    A.equal(d.flash, W.ATTACH_WORDS.demoPath("CleanShot 1.png")); A.equal(d.viewStore().item(ids.A15).draft, v, "the demo: the path stays as text"); }
+  // The demo: nothing copied, nothing run, it says so.
+  reset({ files: { [`${APP}/AGENTS.md`]: "x" } });
+  { const { d, cx } = await open(ids.A15, { width: 900 }); draw(d, cx); H().execs = [];
+    UI().ids.get(`dt-answer-frame-${ids.A15}`)._h.on_drop({ paths: ["/tmp/shot.png"] }, cx);
+    A.equal(d.flash, W.ATTACH_WORDS.demo("shot.png")); d.answer._on.paste_other({}, cx); A.equal(d.flash, W.ATTACH_WORDS.demo("The image on the clipboard"));
+    await drain(cx); A.deepEqual(H().execs ?? [], [], "the demo runs nothing"); A.ok(!String(d.viewStore().item(ids.A15).draft ?? "").includes("attached image"), "...and names nothing"); }
 
   // ── next and previous (2026-11-11): the lane in the panel's order, in place, no wrap ──
   reset({ files: { [`${APP}/AGENTS.md`]: "x" } });
@@ -1292,6 +1721,10 @@ try {
     A.ok(String(UI().md.get(`dt-msg-a-${A16}`) ?? UI().md.get(`dt-msg-h-${A16}`) ?? "").includes("ledgr.invalid"), "its message's file path linked (links working)");
     A.ok(tv?._h?.on_link_click, "an ask's text takes link clicks");
     A.ok(!UI().ids.has(`dt-answer-${A16}`) && d.answer === null, "no answer box");
+    { const rec = d.arch.list.find((x) => x.id === A16), had = rec.summary; rec.summary = "Say which **replica** the report reads from.";
+      draw(d, cx); A.ok(UI().ids.has(`dt-sec-todo-${A16}`) && UI().md.get(`dt-todo-${A16}`).includes("**replica**"), "an archived ask shows its summary (2026-11-23)");
+      A.ok(!UI().ids.has(`dt-above-${A16}`), "...read-only: no answer box, so no groups");
+      if (had === undefined) delete rec.summary; else rec.summary = had; draw(d, cx); }
     for (const b of ["done", "reopen", "promote", "branch", "askhere"]) A.ok(!UI().ids.has(`dt-${b}-${A16}`), `no ${b}`);
     A.ok(![...UI().ids.keys()].some((k) => k.startsWith("ddt-defer-") || k.startsWith("ddt-more-")), "no Defer ▾, no ⋯");
     A.equal(UI().ids.get("dt-acts")._kids.length, 1, "one action"); A.ok(UI().ids.has(`dt-restore-${A16}`), "Reopen");
@@ -1860,7 +2293,7 @@ try {
   A.ok(!src.includes("stageIntoPrompt(") && !src.includes("stageMessage("), "detail.js never calls nav.js's paste itself");
   A.ok(!fs.readFileSync(path.join(MOD, "views.js"), "utf8").includes("terminal.paste"), "views.js runs nothing");
 
-  console.log(`OK: detail, ${checks} checks (props, spec, passage, verbatim, close rules, kept Conclude, words, fixtures, main.js, views, the dialog in every demo case and its flows, the multi-line answer box and ⌘Enter, next and previous, its links, the archive (loadArchive over real files, the CLOSED line and rows, the read-only dialog and Reopen; the review's: a slow writer, archived while open, a bounded read and its retry, a herdr: session's folder); cold sessions (the demo's, Reader over real files, faults, the fallback clone, the panel's menu and views, the live shape across store.js's freeze, the dialog)${DTS ? "; element methods checked against gpui-kit.d.ts" : "; gpui-kit.d.ts not found: element methods unchecked"}${stubs.length ? `; stub ${stubs.join(" and ")} (Builder A's, not in the mod yet)` : ""}), 0 failure(s)`);
+  console.log(`OK: detail, ${checks} checks (props, spec, passage, verbatim, close rules, kept Conclude, words, fixtures, main.js, views, the dialog in every demo case and its flows, the multi-line answer box and ⌘Enter, an ask's left column (WHAT TO DO, the box fitted to the column, one column at its least, measures by item), an image in an answer (a drop copied in, the clipboard through a stubbed exec, the row, every refusal, the demo; an image's path pasted or dropped into the text taken in, typed ones left, one file one attachment), next and previous, its links, the archive (loadArchive over real files, the CLOSED line and rows, the read-only dialog and Reopen; the review's: a slow writer, archived while open, a bounded read and its retry, a herdr: session's folder); cold sessions (the demo's, Reader over real files, faults, the fallback clone, the panel's menu and views, the live shape across store.js's freeze, the dialog)${DTS ? "; element methods checked against gpui-kit.d.ts" : "; gpui-kit.d.ts not found: element methods unchecked"}${stubs.length ? `; stub ${stubs.join(" and ")} (Builder A's, not in the mod yet)` : ""}), 0 failure(s)`);
 } catch (e) {
   console.log(String(e?.stack ?? e).split("\n").slice(0, 8).join("\n"));
   console.log(`FAIL: detail, after ${checks} checks${stubs.length ? ` (stub ${stubs.join(" and ")})` : ""}`);

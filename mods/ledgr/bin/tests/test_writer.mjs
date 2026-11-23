@@ -76,6 +76,9 @@
 //   48. the live-shape fixture; 49. the sweep never decides from memory ahead of disk (risk 2), both orders;
 //   50. the other builders' findings: coldDays 0 during a run, an act by handle, a stale cold_retry or
 //       cold_reset, snapshot.json written again after a thaw; 51. a replayed held event that throws: spool/failed.
+// And an ask's summary (2026-11-23):
+//   53. an asks event's summary in store.json, cleaned, and never in snapshot.json; a later event without one keeps
+//       it; a session frozen with one holds it in its file, and comes back with the item exactly as it was.
 //   node tests/test_writer.mjs <empty scratch folder>      (tests/test-store.sh)
 import assert from "node:assert/strict";
 import * as fsm from "node:fs";
@@ -2498,6 +2501,54 @@ for (const where of ["mkdir", "write", "read back", "save"]) {
     w.release();
   }
 }
+// ── 53. an ask's summary (2026-11-23) through the writer: an asks event's summary in store.json (cleaned again by
+// the store) and never in snapshot.json; a later event for the item without one keeps it; a session frozen with
+// summaries holds them in its file, and an act brings each item back exactly as it was ──
+let summaryChecks = 0;
+{
+  const c0 = checks;
+  const { st, sids: [S, S2] } = coldStore([[300, { idle: 0, items: 0, turns: 0 }], [301, { idle: 9, items: 3, open: 2, turns: 2 }]]);
+  const KEEP = itemId(S2, 0);
+  st.d.items[KEEP].summary = "Pick one of the two options.\n\n- **one**: what I recommend\n- **two**: slower, reversible";
+  const kept = JSON.stringify(st.d.items[KEEP]);
+  home3With(st);
+  const w = await coldWriter("summary");
+  const SUM = "Approve the five changes in the table with a yes.\n\n- rename the pipeline\n- drop the old branch policy";
+  const sAsk = (text, extra = {}) => ({ text, kind: "decide", level: "blocking", blocking: true, options: ["yes", "no"], recommended: "yes", quote: null,
+    repeat_of: null, repeat_of_handle: null, hash: passageHash(text), ...extra });
+  const asksEv = (id, asks) => ({ v: 1, id, type: "asks", at: Date.now(), terminal: "t300", session_id: S, turn: 1, prompt_id: "p1", source: "block", asks });
+  put3(asksEv("sum-1", [sAsk("Confirm the changes in the table", { summary: `  ${SUM.replace(/\n/g, "\r\n")}\r\n\r\n\r\n` }), sAsk("Pick a night"),
+    sAsk("Name the owner", { summary: " \n " })]));
+  await w.reader.drain(cx);
+  A.deepEqual(spool3Files(), [], "(applied)");
+  let s = store3Of();
+  A.equal(s.byHandle(S, "A1").summary, SUM, "store.json: the event's summary, cleaned by the store");
+  A.equal("summary" in s.byHandle(S, "A2"), false); A.equal("summary" in s.byHandle(S, "A3"), false, "none, or only whitespace: no key");
+  A.equal(fsm.readFileSync(store3, "utf8").includes('"summary":null'), false, "never a null summary");
+  const snap = JSON.parse(fsm.readFileSync(`${data3}/snapshot.json`, "utf8"));
+  A.ok(snap.items.some((it) => it.id === s.byHandle(S, "A1").id), "(the ask is in snapshot.json)");
+  A.equal(snap.items.some((it) => "summary" in it), false, "snapshot.json carries no summary");
+  put3(asksEv("sum-2", [sAsk("Confirm the changes in the table")]));
+  await w.reader.drain(cx);
+  A.equal(store3Of().byHandle(S, "A1").summary, SUM, "a later event for the item without one keeps it");
+  // The idle session goes cold with its summary in the file; an act on another item brings it back whole.
+  const t = (await coldRun(w)).cold.freeze;
+  A.deepEqual(t.frozen, [S2], "(the idle session froze; the warm one stayed)");
+  s = store3Of();
+  const F = s.d.sessions[S2].cold.file, rec = JSON.parse(fsm.readFileSync(`${cold3}/${F}`, "utf8"));
+  A.equal(JSON.stringify(rec.items.find((x) => x.id === KEEP)), kept, "the cold file holds the item whole, summary included");
+  A.equal(fsm.readFileSync(store3, "utf8").includes("what I recommend"), false, "(store.json holds it no more)");
+  put3(actEv(S2, itemId(S2, 1), "resolve"));
+  await w.reader.drain(cx);
+  s = store3Of();
+  A.ok(!s.isCold(S2), "(an act brought the session back)");
+  A.equal(JSON.stringify(s.item(KEEP)), kept, "the item back exactly as it was, summary included");
+  A.equal(JSON.parse(fsm.readFileSync(`${data3}/snapshot.json`, "utf8")).items.some((it) => it.id === KEEP && !("summary" in it)), true, "...and in snapshot.json without it");
+  w.release();
+  unhook3();
+  summaryChecks = checks - c0;
+}
+
 Store.prototype.apply = realApply3;
 Writer.prototype.houseStep = realHouseStep;
 SP.SpoolReader.prototype.step = realPassStep;
@@ -2514,4 +2565,5 @@ console.log(`OK: writer, ${checks} checks (the 2026-11-12 stalled event past 1 M
   + `cold sessions: freeze runs written once and read back, given up at every await, taken over, capped; thaw in the pass, `
   + `held events replayed in order once, Try again, Use without, coldDays 0, a mixed store, the sweep only from the store on disk, `
   + `a 1.2 MiB file, the live-shape fixture; the integration's review: a store gone back in time (a corrupt start, a backup, a reset) keeps the `
-  + `only copy, an orphan proven redundant goes, dot-led ids, only not-found is missing, one wanted read a pass, two masked guards), 0 failure(s)`);
+  + `only copy, an orphan proven redundant goes, dot-led ids, only not-found is missing, one wanted read a pass, two masked guards; `
+  + `${summaryChecks} on an ask's summary: in store.json, never in snapshot.json, kept by a later event, whole through a freeze and a thaw), 0 failure(s)`);

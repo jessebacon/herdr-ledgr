@@ -397,6 +397,27 @@ uprm $LM rf2 "ledgr answers $LM
 Answers to your asks from turn 18:
 A5: as in [A7]" >/dev/null
 t "...unwrapped, the same: no refs" jq -e 'map(select(.prompt_id=="rf2"))[0].refs==[]' <<<"$(ev $LM prompt)"
+# An image in an answer (2026-11-23, round 2): the dialog copies a dropped image under ledgr-data/attachments/ and
+# adds one line to the draft, "attached image (read this file): <absolute path>"; answerLines indents it as a
+# continuation line, or it is the answer's first line when the answer is the image alone.
+IMG1="/Users/jesse/.config/herdr-app/ledgr-data/attachments/20261123-150102-a1b2c3.png"
+IMG2="/Users/Jane Doe/.config/herdr-app/ledgr-data/attachments/20261123-150140-d4e5f6.jpeg"
+SHI="ledgr answers $LM
+Answers to your asks from turn 18:
+A5: Use the second layout.
+  attached image (read this file): $IMG1
+A6: The error is in this screenshot.
+  attached image (read this file): $IMG2
+A7: attached image (read this file): $IMG1"
+IMA='length==1 and .[0].handles==["A5","A6","A7"] and .[0].answers=={"A5":("Use the second layout.\nattached image (read this file): "+$i1),"A6":("The error is in this screenshot.\nattached image (read this file): "+$i2),"A7":("attached image (read this file): "+$i1)}'
+uprm $LM im1 "$SHI
+
+thanks" >/dev/null
+t "an answer sheet with an image in two answers (round 2): each attachment line whole in its own answer, one that is only the image too" jq -e --arg i1 "$IMG1" --arg i2 "$IMG2" "$IMA" <<<"$(lmev im1)"
+uprm $LM im2 "My answers:
+$(printf '<pasted_content id="i">\n%s\n\n</pasted_content id="i">' "$SHI")" >/dev/null
+t "...pasted (wrapped) under a lead-in: the same" jq -e --arg i1 "$IMG1" --arg i2 "$IMG2" "$IMA" <<<"$(lmev im2)"
+t "...the ref scan finds no ref in the attachment lines (unwrapped and wrapped)" jq -e 'map(select(.prompt_id=="im1" or .prompt_id=="im2")) | length==2 and all(.refs==[])' <<<"$(ev $LM prompt)"
 
 echo "== landing: pins (Ask here: a parked question with its pinned passages)"
 LP=77777777-3333-0000-0000-000000000004; PQ=rq_0a1b2c3d-0000-4000-8000-00000000aa07
@@ -578,7 +599,10 @@ H4=99999999-0000-0000-0000-0000000000e4; H5=99999999-0000-0000-0000-0000000000e5
 hset ledgr true; out=$(rstart "$HM" t80 $H1)
 t "ledgr: SessionStart prints the ledgr wording, instruct_mode ledgr" test "$out" = "$WL" -a "$(imode $H1)" = ledgr
 t "ledgr wording: the pointer line, no prose list, the bullet example" bash -c 'grep -q "ledgr: 3 items for you, 1 blocking" "$1" && grep -q "do not list it in your prose" "$1" && grep -q "^- blocking · decide · " "$1"' _ "$BIN/lib/asks-instruction-ledgr.txt"
-t "both wordings: only what the user personally must do; a wait on your own subagents is not an ask" bash -c 'for f in "$@"; do tr "\n" " " <"$f" | grep -q "user personally must do, decide, provide or review. Something you are waiting on from your own subagents" || exit 1; done' _ "$BIN/lib/asks-instruction-ledgr.txt" "$BIN/lib/asks-instruction-both.txt"
+t "both wordings: only what only the user can give (the go-ahead among it), never work you could do; a step beyond the task is an offer; a wait on your own subagents is not an ask" bash -c 'for f in "$@"; do tr "\n" " " <"$f" | grep -q "Declare only what is left that only the user can give: a decision that is theirs, something only they know or hold, an action or check you cannot make yourself, a review they asked for, that go-ahead. Never declare work you could do yourself, and never ask the user to look up, verify or summarise what you can. A step beyond what you were asked is an offer: do not take it and do not declare it; a line of prose is enough. Something you are waiting on from your own subagents" || exit 1; done' _ "$BIN/lib/asks-instruction-ledgr.txt" "$BIN/lib/asks-instruction-both.txt"
+t "both wordings (2026-11-23, review 10.1): ledgr cuts the back and forth, never hands work to the user; do all the task needs yourself, stop before a step the task needs that cannot be undone; the earlier words gone" bash -c 'for f in "$@"; do tr "\n" " " <"$f" | grep -q "ledgr exists to cut the back and forth and to clear what blocks you. It is not a way to hand work to the user. Before you declare anything, do all the task needs that you can do yourself: look it up, run it, test it, and where a choice is yours to make, make it and say what you chose. Stop before a step the task needs that cannot be undone, and ask for a go-ahead." || exit 1; ! grep -q -e "find, check or summarise" -e "such a step" -e "short of a step" "$f" || exit 1; done' _ "$BIN/lib/asks-instruction-ledgr.txt" "$BIN/lib/asks-instruction-both.txt"
+t "both wordings: each item stands on its own with a summary, and what the summary holds" bash -c 'for f in "$@"; do tr "\n" " " <"$f" | grep -q "Each item must stand on its own, so the user can act on it without rereading your reply. Give it a summary: exactly what you need from them and in what form, what you have already done or ruled out, what you will do with each possible answer, the answer you recommend and why, and anything that cannot be undone." || exit 1; done' _ "$BIN/lib/asks-instruction-ledgr.txt" "$BIN/lib/asks-instruction-both.txt"
+t "both wordings: the field list ends with the summary in one line, and the example (a decision that is the user's) parses with one" bash -c 'for f in "$@"; do tr "\n" " " <"$f" | grep -q "and last the summary (below), in one line: it takes the rest of the line." || exit 1; "$0" -I -B "$(dirname "$f")/parse_block.py" <"$f" | jq -e ".valid and .form==\"bullets\" and (.asks|length)==1 and .asks[0].text==\"Choose how many approvals a production release needs\" and .asks[0].options==[\"one\",\"two\"] and (.asks[0].summary|startswith(\"The approval gate is built and switched off.\"))" || exit 1; done' "$PYQ" "$BIN/lib/asks-instruction-ledgr.txt" "$BIN/lib/asks-instruction-both.txt"
 out=$(rprompt "$HM" t80 $H1 h1 "go"); t "same mode: the next prompt prints nothing" test -z "$out"
 hset both true; out=$(rprompt "$HM" t80 $H1 h2 "go")
 t "live switch to both: the next prompt prints the both wording once" test "$out" = "$WB" -a "$(imode $H1)" = both
@@ -601,6 +625,10 @@ hset ledgr true; out=$(rprompt "$HM" t83 $H4 o2 "go"); t "...and gets the ledgr 
 rstart "$HM" t84 $H5 >/dev/null; rprompt "$HM" t84 $H5 s1 "go" >/dev/null
 rstop "$HM" t84 $H5 "$(cat "$BIN/tests/fixtures/blocks/bullets.md")"; rwait "$HM" $H5
 t "a bullet block at Stop: source block, form bullets, 3 asks, pointer 3 / 1" jq -e '.[0] | .source=="block" and .block_form=="bullets" and (.asks|length)==3 and .pointer.items==3 and .pointer.blocking==1 and ([.asks[].level]==["blocking","needed","needed"])' <<<"$(rev "$HM" $H5 asks)"
+H6=99999999-0000-0000-0000-0000000000e6
+rstart "$HM" t85 $H6 >/dev/null; rprompt "$HM" t85 $H6 s1 "go" >/dev/null
+rstop "$HM" t85 $H6 "$(cat "$BIN/tests/fixtures/blocks/bullets_summary.md")"; rwait "$HM" $H6
+t "a block with summaries at Stop: each ask's summary on the asks event (a ' · ' inside kept), none for an empty one" jq -e '.[0] | .source=="block" and (.asks|length)==7 and .asks[0].summary=="A yes applies all five rows · the rename, the policy and the branch delete among them. Deleting release/5.4 cannot be undone." and (.asks[3]|has("summary")|not)' <<<"$(rev "$HM" $H6 asks)"
 
 echo "== declared by tool (bin/mcp declare_asks): the Stop hook settles the turn"
 TD="$ROOT/tooldecl"; mkdir -p "$TD"; K1=99999999-0000-0000-0000-0000000000f1
@@ -616,12 +644,13 @@ open(sys.argv[1], "w").write("\n".join(json.dumps(r) for r in recs) + "\n")
 PY2
 rstart "$TD" t85 $K1 >/dev/null; rprompt "$TD" t85 $K1 k1 "go" >/dev/null
 mkdir -p "$TD/mcp/$K1"
-printf '%s' '{"v": 1, "session_id": "'$K1'", "terminal": "t85", "turn": 1, "calls": 1, "asks": [{"text": "Paste the staging token", "level": "blocking", "kind": "provide", "hash": "x", "quote": "I stopped before the migration because the staging token is missing.", "repeat_of_handle": null}, {"text": "Pick the release name", "level": "needed", "kind": "decide", "hash": "y", "quote": "A sentence nobody wrote.", "repeat_of_handle": null}]}' >"$TD/mcp/$K1/1.json"
+printf '%s' '{"v": 1, "session_id": "'$K1'", "terminal": "t85", "turn": 1, "calls": 1, "asks": [{"text": "Paste the staging token", "level": "blocking", "kind": "provide", "hash": "x", "quote": "I stopped before the migration because the staging token is missing.", "repeat_of_handle": null, "summary": "Paste the token from the staging Key Vault.\n\n- I stopped before the migration.\n- With it I run the migration, then the smoke tests."}, {"text": "Pick the release name", "level": "needed", "kind": "decide", "hash": "y", "quote": "A sentence nobody wrote.", "repeat_of_handle": null}]}' >"$TD/mcp/$K1/1.json"
 KJ=$($PYQ -I -c 'import json,sys; print(json.dumps({"session_id":sys.argv[1],"transcript_path":sys.argv[2],"cwd":"/tmp","hook_event_name":"Stop","stop_hook_active":False,"last_assistant_message":"Everything else is ready.\n\nledgr: 2 items for you, 1 blocking"}))' $K1 "$KT")
 rj "$TD" t85 Stop "$KJ"; rwait "$TD" $K1
 t "a tool-declared turn: source tool, no model call, replaces_turn, quotes verified, the pointer read" jq -e '.[0] | .source=="tool" and .provider=="mcp" and .model==null and .replaces_turn==true and .quotes=="verified" and (.asks|length)==2 and .pointer.items==2 and .pointer.blocking==1' <<<"$(rev "$TD" $K1 asks)"
 t "...a quote written before the tool call is verified against the whole turn" jq -e '.[0].asks[0] | .quote=="I stopped before the migration because the staging token is missing." and .quote_verified==true and .origin=="tool" and .level=="blocking"' <<<"$(rev "$TD" $K1 asks)"
 t "...an invented quote is dropped; options left out for the writer to keep" jq -e '.[0].asks[1] | .quote==null and (has("options")|not)' <<<"$(rev "$TD" $K1 asks)"
+t "...each declared summary carried through unchanged (line breaks, the list); none declared, no summary key" jq -e '.[0].asks[0].summary=="Paste the token from the staging Key Vault.\n\n- I stopped before the migration.\n- With it I run the migration, then the smoke tests." and (.[0].asks[1]|has("summary")|not)' <<<"$(rev "$TD" $K1 asks)"
 t "...settled with the final message's uuid" jq -e '.[0].message_uuid=="a3"' <<<"$(rev "$TD" $K1 asks)"
 sleep 0.3; out=$(rprompt "$TD" t85 $K1 k2 "next")
 t "...no reinject after a tool-declared turn" test -z "$out" -a "$(jq -r '.reinject_pending // "none"' "$TD/sessions/$K1.json")" = none

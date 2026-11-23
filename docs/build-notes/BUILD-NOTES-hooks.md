@@ -528,3 +528,169 @@ marked, and a pin of a sentence from the plan was verified from the screen, not 
 - `cli` provider: where `--output-format json` puts the structured result (read from `structured_output`, else `result`), and whether `--setting-sources local` keeps user-level hooks out.
 - `openai-compatible` provider: built to the chat-completions shape; not run against a server.
 - Hook timing: medians 36 to 82 ms per hook at load averages of 12 to 39 (target 100 ms).
+
+## The ask's summary, and ledgr never hands work back (2026-11-23)
+
+Jesse, on Ask 42 in the detail dialog (its text asked him to confirm the changes listed in a table;
+quote "What I'll change, once you confirm."): to answer he had to read a five-row table in the message.
+"there needs to be a 'summary' of what I'm supposed to do … the prompt needs to make it clear that
+ledgr shouldn't allow the agent to push more work back to the user. It's goal is to reduce friction in
+the back and forth and to remove blockers." The dialog's and the store's halves are
+`BUILD-NOTES-detail.md` and `BUILD-NOTES-mod.md` (same date).
+
+- The field, `summary`, named so at every layer: what the user must do, precisely, readable without
+  the reply. `lib/ledgr_asks.py` `summary_of(it)`: a string, else none; CR LF and a lone CR read as
+  LF; every run of blank lines (whitespace-only lines among them) becomes one empty line
+  (`BLANK_RUN`, `\n(?:[^\S\n]*\n)+`); the outer whitespace goes; then a cut at `MAX_SUMMARY` (1,000,
+  code points) and the trailing whitespace again. Empty is none, and the key is left out (no null).
+  These are `store.js` `cleanSummary`'s steps, which applies them again (the store trusts no
+  producer). `validate` keeps it and never drops an ask for lacking one. `summary_text` is the same
+  without the cut (the server's note).
+- MCP `declare_asks`: `summary` joins `ITEM_SCHEMA` and its `required`, with no `maxLength` (a client
+  that checks the schema would refuse a long one, which ledgr cuts). A call with an item (an object,
+  within the 20) whose summary is missing, blank or not a string is refused whole: today an unknown
+  level or an empty text drops that item alone and records the rest, and this field alone refuses the
+  call. `isError`, nothing written (no spool event, no `mcp/<session>/<turn>.json`), one `mcp.log`
+  line, `{ok: false, error: "every item needs a summary", missing_summary: [2, 3, 4]}` and the text
+  "ledgr recorded nothing: items 2, 3 and 4 have no summary, and every item needs one." plus
+  `SUMMARY_WORDS` (two sentences on what a summary holds) and "Call declare_asks again with a summary
+  on every item." The identity check and an off space come first (an off space answers `off: true`
+  whatever the items). A summary over 1,000 is recorded cut, with "Note: item N: summary cut at 1,000
+  characters."
+- The Stop settle: the state file keeps each ask whole, summary included, and
+  `ledgr_extract.tool_asks` passes it to `validate` with text, level, kind and quote, so it goes out
+  unchanged; a declaration from an older server has none and the key stays out (the writer keeps the
+  item's own).
+- The block: an optional last bullet field `summary: …` (any case) that takes the rest of the line, a
+  " · " inside it included; found only after level, kind and text (a text that begins "Summary:" is
+  the text, as before the field: review 7.2 below); a field after it is part of it. The JSON form reads a `summary` key. A block item
+  without one is accepted. Both instruction examples parse to a valid bullet with a summary
+  (test-hooks.sh checks it).
+- The extractor: `asks.schema.json` requires `summary` (a string, after `recommended`);
+  `extract-system.txt` says what it holds, written from the message alone: the request itself first,
+  addressed to the user, with the form of the answer, then what the agent says it did, what it will
+  do with the answer, its recommendation and reason, anything it says cannot be undone; for a list or
+  table, each thing a yes approves; never a fact the message does not state, and what is unclear said
+  rather than guessed; at most 800 characters, one sentence for an optional ask. Which sentences are
+  asks and their levels are unchanged. `providers/anthropic.py` `MAX_TOKENS` 4000 -> 8000 (billed
+  by use; `openai_compatible.py` stays at 4000, review 7.5 below): `mixed` went from 487 output tokens to 772 with
+  summaries, so a list of 20 asks could have reached the old cap and come back as `max_tokens`, no
+  asks at all.
+- `snapshot_copy` (the Python mirror of `store.js` `snapshot()`, for cold files) drops `summary`, as
+  `snapshot()` does: the snapshot stays small, and neither the extractor nor `open_asks` reads it.
+- The wording (as built in round 1; review 7.1 below replaced the rule's core and the example), one
+  rule in one wording family: `asks-instruction-ledgr.txt` and `-both.txt` (the
+  reinject prints the same files), the server's `instructions`, the `declare_asks` description and the
+  `summary` property's description. The 2026-11-10 lead sentence "Declare only what the user
+  personally must do, decide, provide or review." is replaced by the sharper "Declare only what is left
+  that only the user can give: a decision that is theirs, something only they know or hold, an action
+  you cannot take, a review they asked for." (one "Declare only" sentence, not two); the wait rule
+  ("Something you are waiting on from your own subagents …") follows it as before. Sizes: the ledgr
+  wording 330 -> 530 words, both 268 -> 468 (the two paragraphs, the example's summary, the field
+  list's clause, less the replaced sentence); the server's instructions 1,072 -> 1,743 characters,
+  the `declare_asks` description 698 -> 1,007 (test_mcp.py keeps the instructions under 2,048 and
+  the description under 1,200). The extractor prompt 928 -> 1,084 words. A running session gets the
+  new wording at its next SessionStart (`instruct_mode` records the mode, not the text) and the
+  server's after `/mcp` or a resume.
+- Live, two calls (2026-11-23): `--live tableconfirm` (the new fixture, the table of five changes;
+  2914 in, 248 out, $0.00042, 3.1 s): one blocking/confirm ask whose summary named all five rows and
+  the branch delete as irreversible (before the "begin with the request" sentence, it put the request
+  last). `--live mixed` (2901 in, 772 out, $0.00068, 4.3 s): five asks, each summary beginning with
+  the request ("Grant the chat:write application permission …", "Pick which message template should
+  be the default: compact or detailed. …"), the two optional ones one or two sentences. PASS.
+- Tests: `test_parse_block.py` 63 (+11: `fixtures/blocks/bullets_summary.md`, the JSON form's
+  cleaning, the cut, none); `test_mcp.py` 177 (+15); `test-hooks.sh` 232 (+5: the wordings' rule and
+  summary paragraph, the examples parse, a block's summaries at Stop, the tool settle carrying one
+  through); `run-extract-fixtures.py` gains `summary_all`, `summary_max`, `summary_names` and prints
+  each summary live, `tableconfirm` is new, and every model fixture's live section now asks for
+  `summary_all`. The timing table of `test-hooks.sh` runs one real `hc get` when the suite runs inside
+  a Herdr terminal, as before.
+
+### Review fixes and round 2's Python part (same day)
+
+An outside review of round 1 found no blocker; these six were on this side.
+
+- 7.1, the wording (major). "Never ask the user to find, check or summarise something for you" also
+  forbade asks the fixtures treat as right ("check the DM link on your phone", `statusask` and
+  `verify`; Jesse's own table confirmation, `tableconfirm`), and "do all you can yourself", which goes
+  into every session, gave no door for a go-ahead before a destructive step. The canonical example (a
+  template choice the agent already recommended) contradicted "where a choice is yours to make, make
+  it". The core is now, in both wordings (fitted in the server's `instructions` and the `declare_asks`
+  description): "do all you can yourself, short of a step that cannot be undone or that goes beyond
+  what you were asked: …", what only the user can give gains "an action or check you cannot make
+  yourself" and "a go-ahead for such a step", and the last clause is "never ask the user to look up,
+  verify or summarise what you can". The example is a decision plainly the user's, with a
+  recommendation ("Choose how many approvals a production release needs", options one | two). The wait
+  rule and the summary paragraph are unchanged. The extractor prompt is unchanged (no live call this
+  round). Sizes: ledgr 570 words, both 508 (`wc -w`); the server's instructions 1,867 characters
+  (guard: under 2,048), the `declare_asks` description 1,115 (guard: under 1,200).
+- 7.2: a third field that begins "Summary:" is the text again; every block that parsed at HEAD parses
+  the same (a one-off run of HEAD's parser and this one over every block fixture and the reviewer's
+  input: 22 inputs, identical output, the one rejection reason restored to HEAD's words).
+- 7.3: a summary is one line in a block; the field list says so ("and last the summary (below), in one
+  line: it takes the rest of the line"). A line under it is a stray line, reported, as any other.
+- 7.4: the summary's whitespace is JavaScript's (`ledgr_asks.JS_SPACE`, used by `BLANK_RUN` and the
+  trim): U+FEFF counts, U+001C to U+001F and U+0085 do not, as in `store.js` `cleanSummary`. A summary
+  of only U+FEFF is none, so `declare_asks` refuses it (the store would have kept none). Checked
+  against `cleanSummary`'s own source under Node on 14 inputs (U+FEFF, U+001C, U+0085, U+2028, CR,
+  an emoji across the cut): the same output.
+- 7.5: `openai_compatible.py` `MAX_TOKENS` back to 4000 (an endpoint refuses a value over its model's
+  cap; never run against a server). Anthropic stays at 8000.
+- 7.6: the refusal says which summaries are not strings ("item 4's summary is not a string", "the
+  summaries of items 2 and 3 are not strings"; null counts as none) and, for a refused later call of
+  the turn whose earlier call recorded items, "ledgr recorded nothing (earlier items of this turn
+  stand): …", as the all-rejected path says. Data: `summary_not_string`, `earlier_items_stand`.
+
+Round 2 (an image in an answer): an image dropped on the dialog's answer box is copied under
+`ledgr-data/attachments/` and the draft gains one line, "attached image (read this file): <absolute
+path>" (`mods/ledgr/attach.js`, `BUILD-NOTES-detail.md`). The clipboard route (an `osascript` read of
+the clipboard's image) needed an exception to `test_no_keystrokes.py` rules 1 and 13; the owner granted
+it the same day ("Yes, allow osascript on ⌘V in the answer box with the pinned exception.") and it was
+built in this round on the dialog's side (`opener.js` `clipboardImage`, `BUILD-NOTES-detail.md` 20). On
+this side:
+
+- The landing: no parser change. `test-hooks.sh` "an answer sheet with an image in two answers": the
+  attachment line, indented as `answerLines` writes a continuation, lands whole in its own answer (a
+  path with a space in it too), an answer that is only the image lands as that line, wrapped and
+  unwrapped; the prompt's refs are empty (`prompt_refs` skips the sheet's lines, and the file names
+  hold no brackets).
+- `./install.sh --check`: `attachments_report` gives one line, "attachments     N files, size (images
+  attached to answers; ledgr never deletes them)", and nothing when the folder is absent (hidden
+  files and folders not counted). Uninstall deletes the folder with the rest of `ledgr-data/` on its
+  separate yes, backed up first; its question now names "attached images".
+- The handoff question's size: `instruction_words()` counts the two wordings when it runs ("a ~534 to
+  596-word instruction" with the final wording), so it cannot go stale again (it said ~200 to 260 while they were 268 and 330).
+- Tests: `test_parse_block.py` 68 (+5, less the one 7.2 retired: the reviewer's input, a multi-line
+  summary, a "Summary:" text with fields after it, three U+FEFF and whitespace checks); `test_mcp.py`
+  181 (+4: the refusal's words for non-strings and null, U+FEFF refused, a refused later call of the
+  turn and the next turn); `test-hooks.sh` 235 (+3, the image landing; the wording checks follow 7.1,
+  and one now fails if "find, check or summarise" comes back); `setup/tests/test_ledgr_setup.py` 224
+  (+7: `test_attachments_report`, `test_instruction_words`).
+
+### Review 10.1: a step beyond the task is an offer (same day)
+
+A second review: "a go-ahead for such a step" read two ways, because "such a step" also covered a step
+"that goes beyond what you were asked", which is an offer; the `declare_asks` description said "(ask
+for a go-ahead for that)" a few words before "never suggestions or offers". An agent that noticed an
+unrelated refactor would have declared `needed · confirm · Go-ahead to refactor X`, work handed back.
+The core of 7.1 above is replaced, in both wordings (the rule paragraph only: the wait rule, the summary
+paragraph, the example and the field list stay), the server's `instructions` and the `declare_asks`
+description: "do all the task needs that you can do yourself: …", "Stop before a step the task
+needs that cannot be undone, and ask for a go-ahead.", the list of what only the user can give ends
+"that go-ahead", and a new sentence closes it: "A step beyond what you were asked is an offer: do not
+take it and do not declare it; a line of prose is enough." The description says the same in its own
+words ("stop before a step the task needs that cannot be undone, and declare its go-ahead", "never
+suggestions or offers (a step beyond what you were asked is one: do not take it or declare it, a line
+of prose at most)"); two of its other phrases are shorter to stay under the guard. Sizes, after the
+lead took "only" out of "Stop only before" in all four places: ledgr 596 words, both 534 (`wc -w`); the
+server's instructions 1,991 characters (under 2,048), the description 1,186 (under 1,200). `instruction_words` says "an instruction of a few hundred words" for a wording that is
+not UTF-8, as for one it cannot read, instead of raising.
+The checks pinning the wording follow it, and fail if "such a step", "short of a step" or "go-ahead for
+that" comes back.
+
+`test_mcp.py`'s one unexplained failure of round 2 was found: the "off (a synthetic session, its space
+from a live hc get)" round's first call is the server's first spawn of the fake `hc`, which can miss
+the 300 ms lookup deadline (`ledgr_map.HC_TIMEOUT_S`) under load, so that call reads the space as
+unknown (on). A timing flake from before the summary work; the round now makes one call first.
+Tests: `test_mcp.py` 181, `test-hooks.sh` 235, `setup/tests/test_ledgr_setup.py` 226 (+2: a wording
+that is not UTF-8, two wordings of one size), `test_parse_block.py` 68.

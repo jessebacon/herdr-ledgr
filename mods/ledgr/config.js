@@ -73,6 +73,9 @@ export const LIMITS = {
   turnsSearch: 50,    // saved turns searched backward when re-anchoring a quote
   dupWindowMs: 30000, // human double-capture guard
   conclusion: 8000,   // a branch conclusion as edited for the confluence (Phase 3)
+  // An agent ask's summary (2026-11-23): what the user must do, precisely; markdown, line breaks kept. Cut
+  // here, never refused (store.js cleanSummary; bin/lib/ledgr_asks.py MAX_SUMMARY, the same number).
+  summary: 1000,
   // Pins (docs/design/Pins.md 7.1)
   pin: 4000,             // a pin's passage: the box's candidate, store.js on_pin (longer: cut, `clipped`)
   pinNote: 200,          // a pin's one-line note

@@ -26,6 +26,11 @@ const squash = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
 const cut = (s, n) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
 const DAY = 86400e3, HOUR = 3600e3;
 
+// An agent ask's summary (2026-11-23: what the user must do, precisely; store.js cleanSummary kept it):
+// its text, trimmed, or "" (none, or not an agent ask: questions, pins and branches have none). The
+// dialog's WHAT TO DO and the row's tooltip read it here.
+export const summaryOf = (it) => (isAgentAsk(it) && typeof it.summary === "string" ? it.summary.trim() : "");
+
 // An agent ask with an answer typed or picked that has not reached the agent (2026-11-11, "answered but
 // not sent to prompt"): open (a suggestion below the threshold too) or deferred, with a draft that is not
 // the answer a landed sheet recorded. The store keeps the draft after the sheet lands, so the mark keys
@@ -130,10 +135,12 @@ export function stateOf(kind, x, ctx = {}) {
 }
 
 // The row's tooltip: the text's first 300 characters, then the quote's first 120 in quotes; a pin's
-// adds its note.
-function tipOf(text, quote, note) {
-  const t = String(text ?? "").trim(), q = squash(quote);
-  return [t ? cut(t, 300) : null, q ? `“${cut(q, 120)}”` : null, note ? `Note: ${cut(squash(note), 200)}` : null].filter(Boolean).join("\n");
+// adds its note; an ask with a summary (2026-11-23) its first 300 characters, line breaks kept, after
+// "What to do:" (the drafted answer, when there is one, comes after it: rowModel).
+function tipOf(text, quote, note, summary = "") {
+  const t = String(text ?? "").trim(), q = squash(quote), w = String(summary ?? "").trim();
+  return [t ? cut(t, 300) : null, q ? `“${cut(q, 120)}”` : null, note ? `Note: ${cut(squash(note), 200)}` : null,
+    w ? `What to do: ${cut(w, 300)}` : null].filter(Boolean).join("\n");
 }
 
 // One list row (1.2). kind: "ask", "question", "pin", "branch" ("item": an ask or a question by its
@@ -179,10 +186,10 @@ export function rowModel(kind, x, ctx = {}) {
   if (it.archiveFile) {
     return { key: entryKey(k, it.id), kind: k, id: it.id, sessionId: it.anchor?.sessionId ?? null, handle: handleWords(it.handle), pill,
       text: itemText(it), state: stateOf(k, it, ctx), glyph: [...glyphOf(it, sug), null], quick: { ...none }, drafted: false, archived: true,
-      tip: [tipOf(it.text, it.anchor?.quote, null), "Archived: out of the list; its dialog reads it and can reopen it."].filter(Boolean).join("\n") };
+      tip: [tipOf(it.text, it.anchor?.quote, null, summaryOf(it)), "Archived: out of the list; its dialog reads it and can reopen it."].filter(Boolean).join("\n") };
   }
   const drafted = ask && draftPending(it);
-  const tip = tipOf(it.text, it.anchor?.quote, null);
+  const tip = tipOf(it.text, it.anchor?.quote, null, summaryOf(it));
   return { key: entryKey(k, it.id), kind: k, id: it.id, sessionId: it.anchor?.sessionId ?? null, handle: handleWords(it.handle), pill,
     text: itemText(it), state: stateOf(k, it, ctx), glyph: [...glyphOf(it, sug), null],
     quick: { done: !closed, paste: ask && it.status === "open" && !sug && Boolean(squash(it.draft)), promote: ask && !closed && sug },

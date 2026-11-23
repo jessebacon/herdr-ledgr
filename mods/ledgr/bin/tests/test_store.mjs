@@ -2000,8 +2000,16 @@ let coldSizes = "";
 
   // 6. the live-shape fixture: 20 of 42 sessions go cold; counts and chips the same before and after; the store
   // shrinks by exactly what left, less what the stubs gained; the round trip gives every session back
-  const fx = liveShape({ now: NOW });
+  // (2026-11-23: every third agent ask with a summary, so the round trip below carries the field whole)
+  const fx = liveShape({ now: NOW, summaries: true });
   const coldSet = new Set(fx.sids.cold);
+  {
+    const withSummary = Object.values(fx.data.items).filter((it) => typeof it.summary === "string");
+    A.ok(withSummary.some((it) => coldSet.has(it.anchor.sessionId)) && withSummary.some((it) => !coldSet.has(it.anchor.sessionId)), "the fixture's summaries: in sessions that go cold and in ones that stay");
+    const plain = liveShape({ now: NOW }).data, bare = (it) => { const c = JSON.parse(JSON.stringify(it)); delete c.summary; delete c.anchor.quote; return JSON.stringify(c); };
+    A.ok(Object.keys(plain.items).join() === Object.keys(fx.data.items).join() && Object.entries(plain.items).every(([id, it]) => bare(it) === bare(fx.data.items[id]))
+      && JSON.stringify({ ...plain, items: null }) === JSON.stringify({ ...fx.data, items: null }), "(summaries change nothing else in the fixture but the quote's padding)");
+  }
   // promoted asks (needed, optional, and a blocking one) and a working session with questions parked this turn
   let pi = 0;
   for (const it of Object.values(fx.data.items)) {
@@ -2070,6 +2078,8 @@ let coldSizes = "";
     const snap = big.snapshot(NOW);
     A.deepEqual(Object.keys(snap), ["v", "updatedAt", "items", "cold"]);
     A.equal(snap.items.some((it) => coldSet.has(it.sessionId)), false, "snapshot: no cold session's items");
+    A.equal(snap.items.some((it) => "summary" in it), false, "snapshot: no summary (2026-11-23), though warm items hold one");
+    A.ok(big.items().some((it) => typeof it.summary === "string"));
     A.deepEqual(Object.keys(snap.cold).sort(), [...fx.sids.cold].sort(), "snapshot.cold names every cold session");
     A.deepEqual(snap.cold[fx.sids.cold[0]], { file: files[fx.sids.cold[0]].file, fault: null });
     A.deepEqual(JSON.stringify(Store.fromText(orig).snapshot(NOW).cold), "{}", "a store with no cold session: an empty map");
@@ -2382,4 +2392,161 @@ let coldSizes = "";
 }
 const coldChecks = checks - phase1 - phase2 - phase3 - sev - prof - toolChecks - settleChecks - spaceChecks - pinChecks - retChecks;
 
-console.log(`OK: store, ${checks} checks (${phase1} phase 1, ${phase2} phase 2, ${phase3} phase 3, ${sev} severity and resume, ${prof} profiles, handoff and paste words, ${toolChecks} tool asks, ${settleChecks} blocking while working, closed by the agent, answered then settled, ${spaceChecks} spaces off and Clear all, ${pinChecks} pins, ${retChecks} retention${retSizes}, ${coldChecks} cold sessions${coldSizes}), 0 failure(s)`);
+// ── An ask's summary (2026-11-23): cleaned, kept on a new item, replaced by a usable one, kept when none comes, ─
+// out of snapshot.json, whole in the archive, a cold file, a merge, a thaw and a restore
+{
+  const { cleanSummary } = await import(`${dir}/store.js`);
+  const DAYS = 86400e3;
+  // 1. cleanSummary: the contract's rules (bin/lib/ledgr_asks.py applies them first; the store again)
+  A.equal(CFG.LIMITS.summary, 1000);
+  A.equal(cleanSummary("  Do this.\r\n\r\n\r\n- a\r\n- b \n\n"), "Do this.\n\n- a\n- b", "CRLF to LF, a run of blank lines to one, the outer whitespace gone");
+  A.equal(cleanSummary("one\n\n\n\ntwo"), "one\n\ntwo"); A.equal(cleanSummary("one\n  \n\t\n \ntwo"), "one\n\ntwo", "whitespace-only lines are blank lines");
+  A.equal(cleanSummary("one\ntwo"), "one\ntwo", "a line break kept"); A.equal(cleanSummary("one\n\ntwo"), "one\n\ntwo", "one blank line kept");
+  A.equal(cleanSummary("x\ry"), "x\ny", "a lone CR is a line break");
+  A.equal(cleanSummary("**bold**, `code`  \nhard break\n  - indented"), "**bold**, `code`  \nhard break\n  - indented", "markdown kept, and a line's own spaces");
+  for (const none of ["", "   ", "\n\n\t \r\n", null, undefined, 7, true, {}, ["a"]]) A.equal(cleanSummary(none), null, `no summary: ${JSON.stringify(none) ?? "undefined"}`);
+  A.equal(cleanSummary("x".repeat(1000)), "x".repeat(1000), "exactly the limit: kept");
+  A.equal(cleanSummary("x".repeat(1500)), "x".repeat(1000), "over it: cut, never refused");
+  A.equal(cleanSummary(`${" ".repeat(10)}${"y".repeat(1000)} `), "y".repeat(1000), "the outer whitespace goes before the cut");
+  A.equal(cleanSummary(`${"z".repeat(999)} ${"w".repeat(50)}`), "z".repeat(999), "a cut that ends in whitespace is trimmed");
+  A.equal(cleanSummary("😀".repeat(1001)), "😀".repeat(1000), "cut at 1,000 code points (as Python counts), never half a surrogate pair");
+  A.equal(cleanSummary("😀".repeat(600)), "😀".repeat(600), "600 code points (1,200 UTF-16 units): under the limit");
+
+  // 2. on_asks: a new item keeps it, cleaned; none, empty, whitespace or not a string: no key, never null
+  st = Store.fromText(null);
+  const MS = "5a5a5a5a-0000-4000-8000-000000000001", MT = "t70";
+  let mn = 0;
+  const mev = (type, p) => ({ v: 1, id: `sm${++mn}`, type, at: (at += 1000), terminal: MT, session_id: MS, ...p });
+  st.apply(mev("session_start", { agent: "claude-code", source: "startup", cwd: "/s", session_name: "summary", turn: 0 }));
+  st.apply(mev("prompt", { turn: 1, prompt_id: "s1", local: false, prompt_head: "go", refs: [] }));
+  const mAsk = (text, extra = {}) => ({ text, kind: "confirm", level: "blocking", options: [], recommended: null, blocking: true, quote: null,
+    repeat_of: null, repeat_of_handle: null, hash: passageHash(text), ...extra });
+  const TABLE = "Confirm the pipeline changes in the table";
+  st.apply(mev("asks", { turn: 1, prompt_id: "s1", source: "block", asks: [
+    mAsk(TABLE, { summary: "  Approve the five changes below with a yes.\r\n\r\n\r\n- rename the pipeline\n- drop the old branch policy  \n" }),
+    mAsk("Send the staging token"), mAsk("Pick the release name", { summary: " \n\t " }), mAsk("Choose a region", { summary: 42 }), mAsk("Say which night", { summary: null })] }));
+  const sv = (h) => st.byHandle(MS, h);
+  A.equal(sv("A1").summary, "Approve the five changes below with a yes.\n\n- rename the pipeline\n- drop the old branch policy", "a new item: the summary, cleaned");
+  const k1 = Object.keys(sv("A1"));
+  A.equal(k1.indexOf("summary"), k1.indexOf("blocking") + 1, "(beside the ask's other fields)");
+  for (const h of ["A2", "A3", "A4", "A5"]) A.equal(Object.hasOwn(sv(h), "summary"), false, `${h}: no usable summary, no key`);
+  A.equal(st.toText().includes('"summary":null'), false, "never a null summary in store.json");
+  st.apply(mev("capture", { turn: 1, agent: "claude-code", request: { ...req("rq_sumq", "why five changes?", null, {}, MS, 1), summary: "a parked question's summary" } }));
+  A.ok(st.item("rq_sumq") && !("summary" in st.item("rq_sumq")), "a parked question has no summary, whatever its Request carries");
+
+  // 3. a later event for the same item (a re-run of the turn: same text and passage): a usable summary replaces, none keeps
+  const rerun = (asks, turn = 1, src = "block") => st.apply(mev("asks", { turn, prompt_id: `s${turn}`, source: src, asks }));
+  rerun([mAsk(TABLE, { summary: "Approve the changes, or name the ones to leave out." })]);
+  A.equal(sv("A1").summary, "Approve the changes, or name the ones to leave out.", "a re-run: the new summary replaces the old");
+  rerun([mAsk(TABLE)]);
+  A.equal(sv("A1").summary, "Approve the changes, or name the ones to leave out.", "a re-run with none keeps it");
+  rerun([mAsk(TABLE, { summary: "  \n " })]); rerun([{ ...mAsk(TABLE), summary: undefined }]); rerun([mAsk(TABLE, { summary: ["x"] })]);
+  A.equal(sv("A1").summary, "Approve the changes, or name the ones to leave out.", "...and so does an empty, absent or broken one");
+  rerun([mAsk("Send the staging token", { summary: "Paste the staging token (the one named ci-staging)." })]);
+  A.equal(sv("A2").summary, "Paste the staging token (the one named ci-staging).", "an item without one gains it");
+  rerun([mAsk(TABLE, { summary: "y".repeat(1200) })]);
+  A.equal(sv("A1").summary, "y".repeat(1000), "a replacement is cleaned and cut too");
+  rerun([mAsk(TABLE, { summary: "Approve the changes, or name the ones to leave out." })]);
+  A.equal(st.itemsOf(MS).filter((it) => it.direction === "agent_to_human").length, 5, "(no duplicates)");
+
+  // 4. declared by tool: a mid-turn call, the same turn's replaces_turn call, the Stop settle without the key
+  st.apply(mev("prompt", { turn: 2, prompt_id: "s2", local: false, prompt_head: "next", refs: [] }));
+  const tAsk = (text, extra = {}) => ({ ...mAsk(text), origin: "tool", quote_verified: null, ...extra });
+  const PLAN = "Approve the migration plan";
+  st.apply(mev("asks", { turn: 2, prompt_id: "s2", source: "tool", provider: "mcp", replaces_turn: false, tool_call: 1,
+    asks: [tAsk(PLAN, { summary: "Say yes to run all four steps tonight." }), tAsk("Name the owner", { summary: "Who owns the job after the cutover?" })] }));
+  A.equal(sv("A6").summary, "Say yes to run all four steps tonight.", "a mid-turn declaration");
+  st.apply(mev("asks", { turn: 2, prompt_id: "s2", source: "tool", provider: "mcp", replaces_turn: true, tool_call: 2,
+    asks: [tAsk(PLAN, { summary: "Say yes to run steps 1 and 2 tonight; 3 and 4 wait for Thursday." }), tAsk("Name the new owner", { summary: "Name who owns the job." })] }));
+  A.equal(sv("A6").summary, "Say yes to run steps 1 and 2 tonight; 3 and 4 wait for Thursday.", "the same turn's replaces_turn call: its summary replaces (the handle kept)");
+  A.equal(sv("A7"), null, "(the withdrawn untouched ask went)");
+  A.equal(sv("A8").text, "Name the new owner"); A.equal(sv("A8").summary, "Name who owns the job.", "a changed text: a new item with its own summary");
+  const settle = { turn: 2, prompt_id: "s2", message_uuid: "u-s2", source: "tool", provider: "mcp", replaces_turn: true, quotes: "verified",
+    asks: [tAsk(PLAN, { quote_verified: true }), tAsk("Name the new owner", { summary: "Name who owns the job." })] };
+  for (const a of settle.asks) { delete a.options; delete a.recommended; }
+  delete settle.asks[0].summary;
+  st.apply(mev("asks", settle));
+  A.equal(sv("A6").summary, "Say yes to run steps 1 and 2 tonight; 3 and 4 wait for Thursday.", "the Stop settle without a summary keeps the declared one");
+  A.equal(sv("A6").anchor.uuid, "u-s2", "(settled: the message uuid)"); A.equal(sv("A8").summary, "Name who owns the job.", "...one carried through is the same");
+  st.apply(mev("asks", { ...settle, asks: [tAsk(PLAN, { quote_verified: true, summary: "Say yes to run steps 1 and 2 tonight." }), settle.asks[1]] }));
+  A.equal(sv("A6").summary, "Say yes to run steps 1 and 2 tonight.", "a settle that carries one: it replaces");
+
+  // 5. a re-raise follows the text: an open ask named again (repeat_of, or the same text at a later turn) takes
+  // the text and a usable summary; an answered one reopens as it was; a resolved or dismissed one gets a new
+  // item with the event's summary only
+  st.apply(mev("prompt", { turn: 3, prompt_id: "s3", local: false, prompt_head: "more", refs: [] }));
+  rerun([mAsk("Approve steps 1 and 2 of the migration plan", { repeat_of: sv("A6").id, summary: "Approve steps 1 and 2 only." })], 3, "model");
+  A.equal(sv("A6").text, "Approve steps 1 and 2 of the migration plan", "(repeat_of an open ask: the text replaced)");
+  A.equal(sv("A6").summary, "Approve steps 1 and 2 only.", "...and its summary"); A.equal(sv("A6").lastSeenTurn, 3);
+  st.apply(mev("prompt", { turn: 4, prompt_id: "s4", local: false, prompt_head: "on", refs: [] }));
+  rerun([mAsk("Approve steps 1 and 2 of the plan", { repeat_of_handle: "A6" }), mAsk("Send the staging token")], 4, "model");
+  A.equal(sv("A6").text, "Approve steps 1 and 2 of the plan"); A.equal(sv("A6").summary, "Approve steps 1 and 2 only.", "repeat_of with none: the text replaced, the summary kept");
+  A.equal(sv("A2").summary, "Paste the staging token (the one named ci-staging).", "the same text at a later turn with none: kept");
+  st.apply(mev("prompt", { turn: 5, prompt_id: "s5", local: false, prompt_head: "[A1] yes, all five", refs: ["A1"] }));
+  A.equal(sv("A1").status, "answered");
+  rerun([mAsk("Confirm the pipeline changes in the table!", { summary: "A different summary the reopen does not take." })], 5, "model");
+  A.equal(sv("A1").status, "open", "(answered, raised again: reopened)"); A.equal(sv("A1").text, TABLE, "...its text as it was");
+  A.equal(sv("A1").summary, "Approve the changes, or name the ones to leave out.", "...and its summary as it was");
+  st.apply(mev("act", { item: sv("A2").id, action: "resolve" })); st.apply(mev("act", { item: sv("A8").id, action: "dismiss" }));
+  st.apply(mev("prompt", { turn: 6, prompt_id: "s6", local: false, prompt_head: "again", refs: [] }));
+  rerun([mAsk("Send the staging token"), mAsk("Name the new owner", { summary: "Name the job's owner from Monday." })], 6, "model");
+  const again2 = st.itemsOf(MS).find((it) => it.repeatOf === sv("A2").id), again8 = st.itemsOf(MS).find((it) => it.repeatOf === sv("A8").id);
+  A.ok(again2 && again2.status === "open" && again2.parentId === sv("A2").id, "(resolved, raised again: a new item)");
+  A.equal(Object.hasOwn(again2, "summary"), false, "...without the event's summary it has none (nothing carried from the old item)");
+  A.equal(again8?.summary, "Name the job's owner from Monday.", "a dismissed one raised again: the new item has the event's summary");
+  A.equal(sv("A2").summary, "Paste the staging token (the one named ci-staging).", "(the closed ones keep theirs)");
+
+  // 6. snapshot.json carries none; the store keeps every one
+  const snap = st.snapshot(at);
+  A.ok(snap.items.some((it) => it.id === sv("A6").id), "(the open ask is in the snapshot)");
+  A.equal(snap.items.some((it) => "summary" in it), false, "snapshot.json carries no summary");
+  A.equal(st.itemsOf(MS).filter((it) => typeof it.summary === "string").length, 5, "...the store keeps them (A1, A2, A6, A8 and the owner ask raised again)");
+
+  // 7. the archive: the copy holds it; a summary changed between the plan and the removal keeps the item (as any
+  // field); the line restored is the item as it was, summary included
+  st.apply(mev("act", { item: sv("A6").id, action: "resolve" }));
+  const A6 = sv("A6").id, later = at + 10 * DAYS;
+  let plan = st.archivable(3, later).filter((x) => x.id === A6);
+  A.equal(plan.length, 1); A.equal(plan[0].summary, "Approve steps 1 and 2 only.", "the archive's copy holds the summary");
+  rerun([mAsk("Approve steps 1 and 2 of the plan", { summary: "Changed while the file was written." })], 4, "model");
+  A.equal(sv("A6").summary, "Changed while the file was written.", "(a re-run of its turn changed the closed item's summary)");
+  A.deepEqual(st.removeItems(plan), [], "removeItems: a summary changed since the plan keeps the item for the next run");
+  plan = st.archivable(3, later).filter((x) => x.id === A6);
+  const line = JSON.stringify(plan[0]);
+  A.equal(st.removeItems(plan).length, 1, "the next plan goes"); A.equal(st.item(A6), null);
+  const back = st.restoreItem(JSON.parse(line));
+  A.equal(JSON.stringify(back), line, "restoreItem: the item as archived, summary and handle included");
+  delete st.d.items[A6]; st.d.sessions[MS].archived = 1;
+  st.apply(mev("restore", { item: A6, file: "items-1795000000000-abc123.jsonl", reopen: true, record: JSON.parse(line) }));
+  A.equal(sv("A6").status, "open", "(the dialog's Reopen: back, open)"); A.equal(sv("A6").summary, "Changed while the file was written.", "...with its summary");
+
+  // 8. a cold file holds it; a reading copy's merge shows it and never saves it; a thaw brings each item back as
+  // it was; coldLacks proves an identical copy and not one whose summary differs or is gone
+  st.d.retention = { v: 1, at };
+  const FN = at + 30 * DAYS, fp = st.planFreeze(7, FN).filter((p) => p.sid === MS);
+  A.equal(fp.length, 1, "(the session is idle past a week)");
+  const was = JSON.stringify(st.itemsOf(MS)), ids = st.itemsOf(MS).filter((it) => typeof it.summary === "string").map((it) => it.id);
+  const file = CFG.coldName(MS, FN, "s0mm4r");
+  A.deepEqual(st.commitFreeze([{ ...fp[0], file }], FN), [MS], "(frozen)");
+  const rec = JSON.parse(JSON.stringify(fp[0].record));
+  A.deepEqual(rec.items.filter((x) => typeof x.summary === "string").map((x) => x.id), ids, "the cold file holds every summary");
+  A.equal(JSON.stringify(rec.items), was, "...each item whole");
+  A.equal(st.toText().includes("Changed while the file was written."), false, "(store.json holds none of them now)");
+  const rd = Store.fromText(st.toText());
+  A.equal(rd.mergeCold(MS, rec, file), true);
+  A.equal(rd.item(A6)?.summary, "Changed while the file was written.", "a reading copy's merge shows the summary");
+  A.equal(rd.toText().includes("Changed while the file was written."), false, "...and never saves it"); A.equal(rd.snapshot(FN).items.some((it) => it.id === A6), false);
+  const th = Store.fromText(st.toText());
+  A.equal(th.thaw(MS, rec, file, FN + 1).ok, true);
+  A.equal(JSON.stringify(th.itemsOf(MS)), was, "a thaw brings every item back as it was, summaries included");
+  A.deepEqual(th.coldLacks(MS, rec), { items: 0, turns: 0 }, "coldLacks: identical copies in the store prove the file");
+  const other = JSON.parse(JSON.stringify(rec)), gone = JSON.parse(JSON.stringify(rec));
+  other.items.find((x) => x.id === A6).summary = "A later wording.";
+  delete gone.items.find((x) => x.id === A6).summary;
+  A.equal(th.coldLacks(MS, other).items, 1, "...a file whose summary the store does not hold is not proven");
+  A.equal(th.coldLacks(MS, gone).items, 1, "...nor one whose item has no summary where the store's has one");
+  A.equal(th.coldLacks(MS, other, { copies: new Map([[A6, [other.items.find((x) => x.id === A6)]]]) }).items, 0, "...unless an identical copy is elsewhere (the named file, the archive)");
+}
+const summaryChecks = checks - phase1 - phase2 - phase3 - sev - prof - toolChecks - settleChecks - spaceChecks - pinChecks - retChecks - coldChecks;
+
+console.log(`OK: store, ${checks} checks (${phase1} phase 1, ${phase2} phase 2, ${phase3} phase 3, ${sev} severity and resume, ${prof} profiles, handoff and paste words, ${toolChecks} tool asks, ${settleChecks} blocking while working, closed by the agent, answered then settled, ${spaceChecks} spaces off and Clear all, ${pinChecks} pins, ${retChecks} retention${retSizes}, ${coldChecks} cold sessions${coldSizes}, ${summaryChecks} ask summary), 0 failure(s)`);

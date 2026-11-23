@@ -156,7 +156,13 @@ class Client:
         assert m.get("id") == self.nid, m
         return m
 
-    def call(self, name, args=None, meta=None):
+    def call(self, name, args=None, meta=None, raw=False):
+        """A tools/call. declare_asks requires a summary on every item (2026-11-23): unless `raw`, an item
+        (an object) without a `summary` key is sent with one made from its text, so the sections written
+        before the summary test what they tested; the summary's own section sends its items raw."""
+        if name == "declare_asks" and not raw and isinstance(args, dict) and isinstance(args.get("items"), list):
+            args = dict(args, items=[dict(it, summary=f"Summary: {it.get('text')}") if isinstance(it, dict) and "summary" not in it
+                                     else it for it in args["items"]])
         m = self.req("tools/call", {"name": name, "arguments": args if args is not None else {}}, meta)
         return m.get("result") or m
 
@@ -337,7 +343,7 @@ def cold_section():
         return it
 
     long_q, q200, emoji_q = "x" * 250, "y" * 200, "\U0001F600" * 150     # 150 emoji: 300 UTF-16 units
-    items = [raw("A1", "open", draft="half an answer", pins=["pn_1"]),
+    items = [raw("A1", "open", draft="half an answer", pins=["pn_1"], summary="Answer serif or sans.\n\n- serif: the print look"),
              raw("A2", "answered", answer="serif"),
              raw("A3", "resolved", resolvedAt=now - 8 * day),
              raw("A4", "dismissed", resolvedAt=now - 2 * day),
@@ -356,7 +362,7 @@ def cold_section():
     # What store.js snapshot() writes for each (written out case by case, not computed by the code under test):
     # open, answered, deferred, rejoin_pending, and dismissed within 7 days (resolvedAt, else updatedAt, as a
     # number: a numeric string counts, no time is 0); sessionId from the anchor; a quote over 200 UTF-16 units
-    # dropped; no draft, no pins.
+    # dropped; no draft, no pins, no summary (2026-11-23: the snapshot stays small).
     keep = {"A1", "A2", "A4", "A6", "Q1", "Q2", "A9", "A10", "A11", "A12"}
     expected = []
     for it in items:
@@ -366,6 +372,7 @@ def cold_section():
         c["sessionId"] = SC
         c.pop("draft", None)
         c.pop("pins", None)
+        c.pop("summary", None)
         if c["handle"] in ("A10", "A12"):
             del c["anchor"]["quote"]
         expected.append(c)
@@ -649,10 +656,26 @@ def main():
     check("instructions: answered or dropped asks go to resolve_asks, by handle, before declaring",
           "resolve_asks" in r.get("instructions", "") and "answers or drops" in r.get("instructions", "")
           and "before declaring anything new" in r.get("instructions", ""), r.get("instructions"))
-    check("instructions: only what the user personally must do; a wait on the agent's own subagents is not an ask",
-          "user personally must do, decide, provide or review" in r.get("instructions", "")
+    check("instructions: only what only the user can give; a wait on the agent's own subagents is not an ask",
+          "only the user can give (a decision that is theirs, something only they know or hold, an action or check you "
+          "cannot make yourself, a review they asked for, that go-ahead)" in r.get("instructions", "")
           and "your own subagents" in r.get("instructions", "") and "\"I need\"" in r.get("instructions", ""),
           r.get("instructions"))
+    ins = r.get("instructions", "")
+    check("instructions (2026-11-23, review 10.1): ledgr cuts the back and forth, never hands work to the user; do all the "
+          "task needs yourself, stop before a step the task needs that cannot be undone; a step beyond the task is an offer",
+          "cut the back and forth and to clear what blocks you; it is not a way to hand work to the user" in ins
+          and "do all the task needs that you can do yourself: look it up, run it, test it" in ins
+          and "make it and say what you chose. Stop before a step the task needs that cannot be undone, and ask for a "
+              "go-ahead." in ins
+          and "Never declare work you could do yourself, and never ask the user to look up, verify or summarise what you can. "
+              "A step beyond what you were asked is an offer: do not take it and do not declare it; a line of prose is enough." in ins
+          and "find, check or summarise" not in ins and "such a step" not in ins, ins)
+    check("instructions (2026-11-23): each item a summary that stands on its own, what it holds",
+          "Give each item a summary that stands on its own: exactly what you need and in what form, what you have already "
+          "done or ruled out, what you will do with each possible answer, the answer you recommend and why, and anything "
+          "that cannot be undone." in ins, ins)
+    check("instructions: under 2,048 characters (the cap a client may put on them)", len(ins) < 2048, len(ins))
     check("instructions: a writer that is not applying events, or a session's earlier items ledgr cannot read: say so "
           "and list the items in the reply",
           "When a ledgr tool says its writer is not applying events, or that ledgr cannot read this session's earlier "
@@ -669,15 +692,31 @@ def main():
     tool = {t["name"]: t for t in tl}
     d = tl[0]
     item = d["inputSchema"]["properties"]["items"]["items"]
-    check("declare_asks: items schema requires level, kind, text; level enum blocking|needed; loads upfront",
-          set(item["required"]) == {"level", "kind", "text"} and item["properties"]["level"]["enum"] == ["blocking", "needed"]
+    check("declare_asks: items schema requires level, kind, text, summary; level enum blocking|needed; loads upfront",
+          set(item["required"]) == {"level", "kind", "text", "summary"} and item["properties"]["level"]["enum"] == ["blocking", "needed"]
           and d.get("_meta", {}).get("anthropic/alwaysLoad") is True, d)
-    check("descriptions are short and carry the rules (blocking, needed, one line, verbatim, options, pointer, no prose list)",
-          all(len(t["description"]) < 700 for t in tl) and all(w in d["description"] for w in
-                                                                ("blocking", "needed", "one line", "verbatim", "only for a choice", "pointer line", "list nothing in prose")),
+    sp = item["properties"].get("summary") or {}
+    check("declare_asks: summary is a string with no maxLength (ledgr cuts a long one, a client must not refuse it), "
+          "its description says what it holds",
+          sp.get("type") == "string" and "maxLength" not in sp and sp.get("description", "").startswith("Required.")
+          and "without rereading your reply: exactly what you need from them and in what form, what you have already done "
+              "or ruled out, what you will do with each possible answer, the answer you recommend and why, and anything "
+              "that cannot be undone." in sp.get("description", "")
+          and "Markdown" in sp.get("description", "") and "1,000 characters" in sp.get("description", ""), sp)
+    check("descriptions are short and carry the rules (blocking, needed, one line, summary, verbatim, options, pointer, no prose list)",
+          len(d["description"]) < 1200 and all(len(t["description"]) < 700 for t in tl[1:]) and all(w in d["description"] for w in
+                                                                ("blocking", "needed", "one line", "summary: required on every item", "verbatim", "only for a choice", "pointer line", "list nothing in prose")),
           [len(t["description"]) for t in tl])
-    check("declare_asks: only what the user personally must do, never a wait on your own subagents",
-          "user personally must do, decide, provide or review" in d["description"]
+    check("declare_asks: only what only the user can give, the go-ahead for a step the task needs that cannot be undone "
+          "among it; a step beyond the task an offer; never work you could do yourself, a request to look up, verify or "
+          "summarise what you can, or a wait on your own subagents",
+          "what only the user can give" in d["description"] and "cut the back and forth" in d["description"]
+          and "never to hand the user work: first do all the task needs that you can do yourself and make the choices that "
+              "are yours; stop before a step the task needs that cannot be undone, and declare its go-ahead." in d["description"]
+          and "never suggestions or offers (a step beyond what you were asked is one: do not take it or declare it, a line of "
+              "prose at most)" in d["description"]
+          and "go-ahead for that" not in d["description"] and "such a step" not in d["description"]
+          and "never work you could do yourself, never a request to look up, verify or summarise what you can" in d["description"]
           and "your own subagents" in d["description"] and "\"I need\"" in d["description"], d["description"])
     check("open_asks and parked_questions take no parameters",
           all(tool[n]["inputSchema"] == {"type": "object", "additionalProperties": False} for n in ("open_asks", "parked_questions")))
@@ -817,6 +856,88 @@ def main():
     r = c.call("declare_asks", {"items": []})
     check("new turn, empty list: nothing written, no pointer", not r.get("isError") and not spool_files()
           and "nothing declared" in text(r), text(r))
+
+    print("== declare_asks: the summary (2026-11-23)")
+    import ledgr_extract as X
+    set_map("t99", SID, 40, prompt_id="p40")
+    st40 = os.path.join(DATA, "mcp", SID, "40.json")
+    logp = os.path.join(DATA, "log", "mcp.log")
+    log0 = os.path.getsize(logp) if os.path.exists(logp) else 0
+    r = c.call("declare_asks", {"items": [
+        {"level": "blocking", "kind": "decide", "text": "Pick A", "summary": "Answer A or B."},
+        {"level": "needed", "kind": "do", "text": "Do B"},
+        {"level": "needed", "kind": "do", "text": "Do C", "summary": "  \n\t\r\n "},
+        {"level": "needed", "kind": "do", "text": "Do D", "summary": 42},
+        "just a string"]}, raw=True)
+    sc, tx = r.get("structuredContent") or {}, text(r)
+    check("an item without a usable summary (missing, blank, not a string): the call is refused whole, isError",
+          r.get("isError") is True and sc.get("ok") is False and sc.get("missing_summary") == [2, 3, 4]
+          and sc.get("summary_not_string") == [4] and sc.get("earlier_items_stand") is False
+          and sc.get("error") == "every item needs a summary", sc)
+    check("...nothing written: no spool event, no state file, though item 1 was valid", not spool_files() and not os.path.exists(st40),
+          [spool_files(), os.path.exists(st40)])
+    check("...the text names the items (one whose summary is not a string said so, review 7.6) and says in two sentences "
+          "what a summary holds, then what to do",
+          tx == "ledgr recorded nothing: items 2 and 3 have no summary, and item 4's summary is not a string. Every item needs "
+                "one, as text. A summary says exactly what you need from the user and in what form, so they can act on it "
+                "without rereading your reply. It also says what you have already done or ruled out, what you will do with "
+                "each possible answer, the answer you recommend and why, and anything that cannot be undone. Call "
+                "declare_asks again with a summary on every item.", tx)
+    check("...one mcp.log line", "refused, no summary on item(s) [2, 3, 4] (not a string: [4]); nothing written"
+          in open(logp).read()[log0:])
+    r = c.call("declare_asks", {"items": [{"level": "needed", "kind": "do", "text": "Do B"}]}, raw=True)
+    check("one item without one: 'item 1 has no summary'", r.get("isError") is True
+          and text(r).startswith("ledgr recorded nothing: item 1 has no summary. Every item needs one, as text.") and not spool_files(), text(r))
+    r = c.call("declare_asks", {"items": [{"level": "needed", "kind": "do", "text": "Do B", "summary": None},
+                                          {"level": "needed", "kind": "do", "text": "Do C", "summary": ["a list"]},
+                                          {"level": "needed", "kind": "do", "text": "Do D", "summary": {"md": "x"}}]}, raw=True)
+    check("review 7.6: null is no summary; two that are not strings are said together",
+          r.get("isError") is True and text(r).startswith("ledgr recorded nothing: item 1 has no summary, and the summaries of "
+                                                          "items 2 and 3 are not strings. Every item needs one, as text.")
+          and (r.get("structuredContent") or {}).get("summary_not_string") == [2, 3] and not spool_files(), text(r))
+    r = c.call("declare_asks", {"items": [{"level": "needed", "kind": "do", "text": "Do B", "summary": "\ufeff"},
+                                          {"level": "needed", "kind": "do", "text": "Do C", "summary": "\ufeff\n \ufeff\n"}]}, raw=True)
+    check("review 7.4: a summary of only U+FEFF (and U+FEFF lines) is no summary: refused, as the store would keep none",
+          r.get("isError") is True and text(r).startswith("ledgr recorded nothing: items 1 and 2 have no summary.")
+          and not spool_files() and not os.path.exists(st40), text(r))
+    raw_md = "\r\n  Confirm these rows:\r\n\r\n\r\n- rename `Build-CI` to `ledgr-ci`\n  \n\t\n- delete `release/5.4` (cannot be undone)\r\n"
+    long_s = ("A long summary. " * 80).strip()                    # 1,279 characters
+    r = c.call("declare_asks", {"items": ["just a string",
+                                          {"level": "blocking", "kind": "confirm", "text": "Confirm the pipeline changes",
+                                           "summary": raw_md, "quote": "What I'll change, once you confirm."},
+                                          {"level": "needed", "kind": "do", "text": "Read the long one", "summary": long_s}]}, raw=True)
+    sc, tx = r.get("structuredContent") or {}, text(r)
+    evs = take_events()
+    ea = evs[0]["asks"] if len(evs) == 1 else [{}, {}]
+    want_md = "Confirm these rows:\n\n- rename `Build-CI` to `ledgr-ci`\n\n- delete `release/5.4` (cannot be undone)"
+    check("a string among the items is rejected as before, not named as missing a summary: the rest recorded",
+          not r.get("isError") and [x["item"] for x in sc.get("items", [])] == [2, 3]
+          and [x["reason"] for x in sc.get("rejected", [])] == ["not an object"], sc)
+    check("the event's asks carry the summary: line breaks kept, CR LF read as LF, blank-line runs made one, outer space dropped, markdown kept",
+          ea[0].get("summary") == want_md, ea[0])
+    check("a summary over 1,000 characters: cut at 1,000 and recorded, with a note",
+          ea[1].get("summary") == long_s[:1000].rstrip() and "Note: item 3: summary cut at 1,000 characters." in tx, [ea[1].get("summary"), tx])
+    st = rjson(st40, {})
+    check("the state file keeps each summary as the event sent it", st.get("asks") == ea and st["asks"][0].get("summary") == want_md, st.get("asks"))
+    out = X.tool_asks(st, SID, 40, "Here is the table.\n\nWhat I'll change, once you confirm.")
+    check("the Stop settle (ledgr_extract.tool_asks) carries each summary through unchanged",
+          [a.get("summary") for a in out] == [want_md, long_s[:1000].rstrip()] and out[0].get("quote_verified") is True, out)
+    older = [{k: v for k, v in a.items() if k != "summary"} for a in st["asks"][:1]]
+    out = X.tool_asks({"asks": older}, SID, 40, "")
+    check("...a declaration without one (an older server) settles with no summary key, so the writer keeps the item's own",
+          len(out) == 1 and "summary" not in out[0], out)
+    st_before = open(st40).read()
+    r = c.call("declare_asks", {"items": [{"level": "needed", "kind": "do", "text": "Do E", "summary": 7}]}, raw=True)
+    sc = r.get("structuredContent") or {}
+    check("review 7.6: a refused later call of the turn says the earlier call's items stand, and they do (state file unchanged)",
+          r.get("isError") is True and text(r).startswith("ledgr recorded nothing (earlier items of this turn stand): item 1's "
+                                                          "summary is not a string. Every item needs one, as text.")
+          and sc.get("earlier_items_stand") is True and not spool_files() and open(st40).read() == st_before, [text(r), sc])
+    set_map("t99", SID, 41, prompt_id="p41")
+    r = c.call("declare_asks", {"items": [{"level": "needed", "kind": "do", "text": "Do E"}]}, raw=True)
+    check("...in the next turn the earlier items are not this turn's: not said",
+          r.get("isError") is True and text(r).startswith("ledgr recorded nothing: item 1 has no summary.")
+          and (r.get("structuredContent") or {}).get("earlier_items_stand") is False, text(r))
 
     print("== repeats against snapshot.json")
     now = int(time.time() * 1000)
@@ -1206,12 +1327,13 @@ def main():
     def off_round(c, why, sid, turn, space, by):
         """All four tools in a session where ledgr is off: ok, off, empty, nothing written, four log lines."""
         n0 = len(off_lines())
-        rd = c.call("declare_asks", {"items": [{"level": "blocking", "kind": "decide", "text": "Pick the region"}]})
+        # Sent raw, with no summary: off is answered before the summary is asked for (nothing is recorded either way).
+        rd = c.call("declare_asks", {"items": [{"level": "blocking", "kind": "decide", "text": "Pick the region"}]}, raw=True)
         rr = c.call("resolve_asks", {"handles": ["A5"]})      # A5 is an open ask of SID
         ro = c.call("open_asks")
         rp = c.call("parked_questions")
         sd, sr, so, sp = (x.get("structuredContent") or {} for x in (rd, rr, ro, rp))
-        check(f"off ({why}): declare_asks is ok and off, declares nothing, no pointer, the note, its other fields empty",
+        check(f"off ({why}): declare_asks (an item without a summary) is ok and off, not refused, declares nothing, no pointer, the note, its other fields empty",
               not rd.get("isError") and sd.get("ok") is True and sd.get("off") is True and sd.get("pointer") is None
               and sd.get("items") == [] and sd.get("handles") == [] and sd.get("repeats") == [] and sd.get("rejected") == []
               and sd.get("event_id") is None and sd.get("call") == 0 and sd.get("session_id") == sid and sd.get("space") == space
@@ -1267,6 +1389,10 @@ def main():
     os.chmod(fake_hc, 0o755)
     c = Client(terminal="t61", extra={"LEDGR_HC": fake_hc})
     c.init()
+    # The live lookup has 300 ms (ledgr_map.HC_TIMEOUT_S); the server's first spawn of the fake hc can miss it
+    # under load (seen once in ten runs, 2026-11-23: that call then reads the space as unknown, on). One call
+    # first warms the path; off_round counts its log lines from after it.
+    c.call("parked_questions")
     off_round(c, "a synthetic session, its space from a live hc get", "herdr:t61", 0, "spOFF", "spaces.disabled")
     wjson(cfgp, {"spaces": {"disabled": []}})
     rd = c.call("declare_asks", {"items": [{"level": "needed", "kind": "do", "text": "Anything"}]})

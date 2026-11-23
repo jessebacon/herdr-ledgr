@@ -31,6 +31,8 @@ call from terminals/<t>.json, because the hooks may map it after the server star
   No terminal id, or LEDGR_INNER set (a process a ledgr hook started): tools/list is empty.
 
 Tools: declare_asks(items), resolve_asks(handles, note?), open_asks(), parked_questions().
+Every declare_asks item needs a summary (2026-11-23: what the user must do, readable without the reply;
+ledgr_asks.summary_of): a call with an item that has none is refused whole, with nothing written.
 declare_asks writes ledgr-data/mcp/<session>/<turn>.json (the turn's declaration: call count, event
 ids, asks, handles); a second call in the same turn sets `replaces_turn: true` on its event. After
 emitting it waits up to LEDGR_MCP_WAIT_MS (default 2500) for the writer to ingest the event and reads
@@ -108,12 +110,22 @@ def _version():
 SERVER_INFO = {"name": "ledgr", "title": "ledgr", "version": _version()}
 
 INSTRUCTIONS = (
-    "ledgr keeps the list of what the user must decide or do beside this conversation. When a reply leaves "
-    "something blocking or needed for the user, call declare_asks once, when the work of the reply is done, "
-    "and end the reply with the pointer line it returns, instead of a closing list or a ledgr-asks block. "
-    "Declare only what the user personally must do, decide, provide or review. Something you are waiting on "
-    "from your own subagents, tools, builds, tests or processes is not an ask of the user, even when you "
-    "write \"I need\": say it in prose and declare nothing. open_asks shows what is already recorded, with "
+    "ledgr keeps the list of what the user must decide or do beside this conversation. It exists to cut the "
+    "back and forth and to clear what blocks you; it is not a way to hand work to the user. Before you "
+    "declare anything, do all the task needs that you can do yourself: look it up, run it, test it, and "
+    "where a choice is yours to make, make it and say what you chose. Stop before a step the task "
+    "needs that cannot be undone, and ask for a go-ahead. When a reply leaves something blocking or needed "
+    "that only the user can give (a decision that is theirs, something only they know or hold, an action "
+    "or check you cannot make yourself, a review they asked for, that go-ahead), call declare_asks once, "
+    "when the work of the reply is done, and end the reply with the pointer line it returns, instead of a "
+    "closing list or a ledgr-asks block. Never declare work you could do yourself, and never ask the user "
+    "to look up, verify or summarise what you can. A step beyond what you were asked is an offer: do not "
+    "take it and do not declare it; a line of prose is enough. Something "
+    "you are waiting on from your own subagents, tools, builds, tests or processes is not an ask of the user, "
+    "even when you write \"I need\": say it in prose and declare nothing. Give each item a summary that "
+    "stands on its own: exactly what you need and in what form, what you have already done or ruled out, "
+    "what you will do with each possible answer, the answer you recommend and why, and anything that cannot "
+    "be undone. open_asks shows what is already recorded, with "
     "handles such as A7; when the user's message answers or drops one of them, call resolve_asks with its "
     "handle before declaring anything new. When a ledgr tool answers off: true, ledgr is off in this space: "
     "list what you need from the user in your reply instead. When a ledgr tool says its writer is not "
@@ -145,28 +157,46 @@ ITEM_SCHEMA = {
                                  "but the work is unfinished until the user acts."},
         "kind": {"type": "string", "enum": sorted(A.KINDS)},
         "text": {"type": "string", "description": "One line: what the user must do or decide."},
+        # No maxLength: a client that checks the schema would refuse a long summary, which ledgr cuts instead.
+        "summary": {"type": "string",
+                    "description": "Required. The item standing on its own, so the user can act on it without "
+                                   "rereading your reply: exactly what you need from them and in what form, what "
+                                   "you have already done or ruled out, what you will do with each possible "
+                                   "answer, the answer you recommend and why, and anything that cannot be undone. "
+                                   f"Markdown; line breaks are kept; cut at {A.MAX_SUMMARY:,} characters."},
         "quote": {"type": "string", "description": "The sentence of your reply it comes from, verbatim."},
         "options": {"type": "array", "items": {"type": "string"}, "maxItems": A.MAX_OPTIONS,
                     "description": "Only when there is a choice."},
         "recommended": {"type": "string", "description": "The option you recommend, if any."},
         "repeat_of": {"type": "string", "description": "The handle (A7) of an ask from open_asks that this raises again."},
     },
-    "required": ["level", "kind", "text"],
+    "required": ["level", "kind", "text", "summary"],
     "additionalProperties": False,
 }
+
+# Said when a declare_asks call is refused for an item with no summary (2026-11-23): what a summary holds.
+SUMMARY_WORDS = ("A summary says exactly what you need from the user and in what form, so they can act on it "
+                 "without rereading your reply. It also says what you have already done or ruled out, what you "
+                 "will do with each possible answer, the answer you recommend and why, and anything that cannot "
+                 "be undone.")
 
 TOOLS = [
     {
         "name": "declare_asks",
         "title": "Declare asks for the user",
         "description": (
-            "Hand what you need from the user to ledgr instead of listing it in your reply. Declare only "
-            "blocking items (you stopped or cannot finish without it) and needed items (you went on, but the "
-            "work is unfinished until the user acts); never suggestions or offers. Only what the user "
-            "personally must do, decide, provide or review: never a wait on your own subagents, tools, builds "
-            "or tests, even when you write \"I need\". text: one line. quote: the sentence of your reply it "
-            "comes from, verbatim. options: only for a choice. Call it once, when the work of the reply is "
-            "done; a second call in the same turn replaces the first. Then end your reply with the pointer "
+            "Hand ledgr what only the user can give, instead of listing it in your reply. ledgr is there to cut "
+            "the back and forth and to clear what blocks you, never to hand the user work: first do all the "
+            "task needs that you can do yourself and make the choices that are yours; stop before a step "
+            "the task needs that cannot be undone, and declare its go-ahead. Declare only blocking items (you "
+            "stopped or cannot finish without it) and needed items (you went on, but the work is unfinished "
+            "until the user acts); never suggestions or offers (a step beyond what you were asked is one: do "
+            "not take it or declare it, a line of prose at most), never work you could do yourself, never a "
+            "request to look up, verify or summarise what you can, and never a wait on your own subagents, "
+            "tools, builds or tests, even when you write \"I need\". text: one line. summary: required on every item, so it "
+            "stands on its own (a call missing one records nothing). quote: the sentence of your "
+            "reply it comes from, verbatim. options: only for a choice. Call it once, when the reply's work is "
+            "done; a second call in the turn replaces the first. Then end your reply with the pointer "
             "line it returns, and list nothing in prose."),
         "inputSchema": {"type": "object", "properties": {"items": {"type": "array", "items": ITEM_SCHEMA,
                                                                     "maxItems": A.MAX_ASKS}},
@@ -461,6 +491,13 @@ def pointer_line(n, b):
     return f"ledgr: {n} item{'' if n == 1 else 's'} for you" + (f", {b} blocking" if b else "")
 
 
+def items_words(ns, verb=True):
+    """"item 2 has", "items 1 and 3 have", "items 1, 2 and 4 have" (verb=False: without has or have)."""
+    if len(ns) == 1:
+        return f"item {ns[0]}" + (" has" if verb else "")
+    return "items " + ", ".join(str(n) for n in ns[:-1]) + f" and {ns[-1]}" + (" have" if verb else "")
+
+
 def safe(name):
     return re.sub(r"[^A-Za-z0-9._-]", "_", name)
 
@@ -697,12 +734,36 @@ class Server:
             except Exception:
                 pass
         if not isinstance(items, list):
-            return text_result("ledgr: items must be an array of {level, kind, text, quote?, options?}. Nothing recorded.",
-                               {"ok": False, "error": "items must be an array"}, error=True)
+            return text_result("ledgr: items must be an array of {level, kind, text, summary, quote?, options?}. "
+                               "Nothing recorded.", {"ok": False, "error": "items must be an array"}, error=True)
         ctx = ctx or self.who.resolve()
         if ctx.get("error"):
             return text_result("ledgr: " + ctx["error"], {"ok": False, "error": ctx["error"]}, error=True)
         sid, turn, t = ctx["session_id"], ctx["turn"], ctx["terminal"]
+        # 2026-11-23: every item carries a summary, or the call is refused whole (unlike an unknown level, which
+        # drops that item alone): nothing written, nothing spooled. Not an object, or past the limit: rejected
+        # below as before, so not named here.
+        missing = [i + 1 for i, it in enumerate(items[:A.MAX_ASKS]) if isinstance(it, dict) and A.summary_of(it) is None]
+        if missing:
+            # Review 7.6: a summary that is not a string is said as such (null counts as none), and a refused
+            # later call of the turn says the earlier call's items stand, as "recorded nothing" says below.
+            not_str = [n for n in missing if items[n - 1].get("summary") is not None
+                       and not isinstance(items[n - 1].get("summary"), str)]
+            none_ = [n for n in missing if n not in not_str]
+            why = ([f"{items_words(none_)} no summary"] if none_ else []) + (
+                [f"item {not_str[0]}'s summary is not a string"] if len(not_str) == 1 else
+                [f"the summaries of {items_words(not_str, verb=False)} are not strings"] if not_str else [])
+            prev = C.read_json(C.path("mcp", safe(sid), f"{turn}.json"))
+            stand = isinstance(prev, dict) and prev.get("turn") == turn and prev.get("session_id") == sid \
+                and bool(prev.get("asks"))
+            log(f"declare {sid} turn={turn}: refused, no summary on item(s) {missing} (not a string: {not_str}); "
+                f"nothing written{'; the earlier call of the turn stands' if stand else ''}")
+            return text_result("ledgr recorded nothing" + (" (earlier items of this turn stand)" if stand else "")
+                               + f": {', and '.join(why)}. Every item needs one, as text. {SUMMARY_WORDS} "
+                               "Call declare_asks again with a summary on every item.",
+                               {"ok": False, "error": "every item needs a summary", "missing_summary": missing,
+                                "summary_not_string": not_str, "earlier_items_stand": stand},
+                               error=True)
         mine, cold = session_items(sid)
         _, _, known = X.recorded_asks(sid, items=mine)
         by_handle = {it.get("handle"): it for it in mine if it.get("direction") == "agent_to_human"}
@@ -743,6 +804,8 @@ class Server:
             if "\n" in it["text"].strip() or len(C.squash(it["text"])) > A.MAX_TEXT:
                 notes.append(f"item {n}: text joined into one line" + (f" and cut at {A.MAX_TEXT} characters"
                                                                      if len(C.squash(it["text"])) > A.MAX_TEXT else ""))
+            if len(A.summary_text(it["summary"])) > A.MAX_SUMMARY:
+                notes.append(f"item {n}: summary cut at {A.MAX_SUMMARY:,} characters")
             if it.get("kind") is not None and it.get("kind") not in A.KINDS:
                 notes.append(f"item {n}: unknown kind {it.get('kind')!r}, recorded as do")
             if isinstance(it.get("recommended"), str) and it["recommended"].strip() and a["recommended"] is None:

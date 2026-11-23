@@ -242,6 +242,39 @@ export const LINK_WORDS = {
   demo: (p, tried, how) => `(demo) Would open ${p} with ${how}${tried?.length ? `, looking for ${tried.join(", ")}` : ""}; nothing is opened in the demo.`,
 };
 
+// ── an image in an answer (2026-11-23: attach.js; detail.js dropOnAnswer, pasteImage, attachWritten) ──
+// The status line's words for each outcome. base: the dropped file's name; name: the copy's name in
+// ledgr-data/attachments/; handle: the ask's handle in words; size: sizeWords.
+export const ATTACH_WORDS = {
+  attached: (name, handle, how = "") => `${name}${how ? ` (${how})` : ""} attached to ${handle}: the answer names the file, and the agent reads it once the answer is pasted.`,
+  notImage: (base) => `${base} not attached: ledgr takes png, jpg, gif and webp images (by the file's name).`,
+  tooMany: (base, n) => `${base} not attached: an answer takes at most ${n} images.`,
+  tooLarge: (base, size, max) => `${base} not attached: it is ${size}, over the ${max} an image may be.`,
+  empty: (base) => `${base} not attached: the file is empty.`,
+  unreadable: (base, why) => `${base} not attached: it could not be read (${why}).`,
+  copyFailed: (base, why) => `${base} not attached: it could not be copied into ledgr-data/attachments/ (${why}).`,
+  backShort: (base) => `${base} not attached: its copy in ledgr-data/attachments/ did not read back whole (the copy is left there).`,
+  tooLong: (base, max) => `${base} not attached: the answer would pass ${max} characters.`,
+  notOurs: (p) => `Not attached: ${p} is not a file ledgr saved in ledgr-data/attachments/.`,
+  closed: (base) => `${base} not attached: this ask is no longer open.`,
+  noFolder: (base) => `${base} not attached: Herdr's app folder is not known, so there is no ledgr-data/attachments/ to keep it in.`,
+  // An image's path that arrived in the box as text (detail.js pathsIn): what is said when it is not taken in.
+  stays: (words) => `${String(words).replace(/\.$/, "")}; its path stays in the answer as text, which the agent can read.`,
+  pathGone: (name) => `${name} was copied into ledgr-data/attachments/, but its path was changed in the answer meanwhile, so it is not named (the copy stays).`,
+  pathEdited: (base) => `${base}: its path was changed before it could be taken in; it stays in the answer as text.`,
+  demoPath: (names) => `(demo) ${names} would be copied into ledgr-data/attachments/ and its path become an attachment; nothing is saved in the demo, and the path stays as text.`,
+  partial: (name) => `A partial file may be left at ledgr-data/attachments/${name}; it is not named in the answer.`,
+  busy: "An image is still being attached; try again when it is done.",
+  copying: (n) => `Copying ${n === 1 ? "the image" : `${n} images`} into ledgr-data/attachments/…`,
+  reading: "Reading the image on the clipboard…",
+  noImage: "No image on the clipboard: copy one (a screenshot with ⌃⇧⌘4, or Copy Image in a browser), then ⌘V in the answer or Paste image.",
+  clipLarge: (size, max) => `The image on the clipboard is ${size} as a PNG, over the ${max} an image may be: nothing attached.`,
+  clipFailed: (why) => `The image on the clipboard was not attached: ${why}.`,
+  removed: (name) => `${name} taken out of the answer; the file stays in ledgr-data/attachments/.`,
+  revealGone: (name) => `${name} is no longer in ledgr-data/attachments/.`,
+  demo: (what) => `(demo) ${what} would be saved in ledgr-data/attachments/ and named in the answer; nothing is saved in the demo.`,
+};
+
 // ── the archive (retention, 2026-11-19) ─────────────────────────────────
 // Closed items past retention_days leave store.json for ledgr-data/archive/<sid>/; the Closed fold ends with
 // one line for them, and each opens read-only in the dialog, with Reopen.
@@ -352,7 +385,7 @@ export const BRANCH_NO_TURN = "The branch has not finished a turn yet: its last 
 export function detailHints({ answer = false, note = false, conclude = false, paste = true } = {}) {
   const out = [["Esc", "close"]];
   if (answer || note || conclude) out.push(["Tab", "next field"]);
-  if (answer) out.push(["⌘Enter", paste ? "paste the turn's answers" : "copy the turn's answers"], ["Enter", "newline"]);
+  if (answer) out.push(["⌘Enter", paste ? "paste the turn's answers" : "copy the turn's answers"], ["Enter", "newline"], ["⌘V", "attach an image"]);
   if (note) out.push(["Enter", "save the note"]);
   return out;
 }

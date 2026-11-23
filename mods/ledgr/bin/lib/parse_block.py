@@ -10,14 +10,18 @@ Prints {"found", "valid", "asks", "prose", "error", "rejected", "form", "pointer
 - The last complete block wins. An unterminated block is ignored, as is anything after it.
 - Body, one of two forms (`form`), never both (a block that mixes them is rejected whole):
   - "bullets", the readable form the instruction asks for: one line per item,
-      - blocking · decide · Choose the default template · "the sentence it comes from" · options: compact | detailed
+      - blocking · decide · Choose the default template · "the sentence it comes from" · options: compact | detailed · summary: Both are built ...
     fields separated by " · ": level (blocking | needed | optional, required), kind (decide | confirm
     | do | provide | review, required), text (required), then optionally the quote in straight or
-    curly double quotes and `options:` with choices separated by " | ", in either order. A bullet
-    that breaks the shape is rejected with a reason ("ask 2: missing level ..."); a non-bullet line
-    is reported and skipped.
+    curly double quotes and `options:` with choices separated by " | ", in either order, and last,
+    optionally, `summary:` (2026-11-23), which takes the rest of the line: a " · " after it is part of
+    the summary, never a field of its own. Only a field after the text can be the summary: a text that
+    begins "Summary:" is the text, so every bullet that parsed before the field parses the same. A
+    summary is one line (a line under it is a stray line, reported). A bullet without a summary is
+    accepted. A bullet that breaks the shape is rejected with a reason ("ask 2: missing level ..."); a
+    non-bullet line is reported and skipped.
   - "json": a JSON array, or an object with an `asks` array. An item without `level` is needed; an
-    unknown level rejects that item.
+    unknown level rejects that item. A `summary` key is read; an item without one is accepted.
   Both go through the one validator, ledgr_asks.validate (levels, kinds, quote check, limits).
 - Valid: at least one item survived, or the JSON array was empty ("no asks").
 - `prose` is the message with the block removed. `pointer`: the last line of the prose of the form
@@ -40,6 +44,7 @@ BULLET = re.compile(r"^\s*[-*\u2022]\s+(.*?)\s*$")
 SEP = re.compile(r"\s+\u00b7\s+")                                   # " · "
 QUOTED = re.compile(r'^["\u201c](.*)["\u201d]$', re.S)                # "..." or \u201c...\u201d
 OPTIONS = re.compile(r"^options\s*:\s*(.*)$", re.I)
+SUMMARY = re.compile(r"^summary\s*:\s*(.*)$", re.I | re.S)
 JSONISH = re.compile(r"^\s*[\[\]{}]")
 POINTER = re.compile(r"^[\s*_`>]*ledgr:\s*(\d+)\s+items?\s+for\s+you(?:\s*,\s*(\d+)\s+blocking)?[\s.*_`]*$", re.I)
 
@@ -65,7 +70,13 @@ def bullet_items(body, rejected):
             rejected.append(f"line {ln}: not a bullet (- level \u00b7 kind \u00b7 text)")
             continue
         n += 1
-        parts = [x.strip() for x in SEP.split(m.group(1))]
+        body_line, summary = m.group(1), None
+        for k, sep in enumerate(SEP.finditer(body_line)):
+            s = SUMMARY.match(body_line[sep.end():]) if k >= 2 else None    # a field after level, kind and text
+            if s:
+                body_line, summary = body_line[:sep.start()], s.group(1)
+                break
+        parts = [x.strip() for x in SEP.split(body_line)]
         why = None
         lv, kind = (parts + ["", ""])[0].lower(), (parts + ["", ""])[1].lower()
         if lv not in ledgr_asks.LEVELS:
@@ -74,8 +85,12 @@ def bullet_items(body, rejected):
         elif len(parts) < 2 or kind not in ledgr_asks.KINDS:
             why = f"unknown kind {parts[1]!r} (decide, confirm, do, provide or review)" if len(parts) > 1 else "missing kind and text"
         elif len(parts) < 3 or not parts[2] or QUOTED.match(parts[2]) or OPTIONS.match(parts[2]):
+            # A text that begins "Summary:" is the text, as before the field existed (review 7.2): the summary
+            # is only ever a field after the text, so every block that parsed before parses the same.
             why = "missing text (level \u00b7 kind \u00b7 text)"
         it = {"level": lv, "kind": kind, "text": parts[2] if len(parts) > 2 else ""}
+        if summary is not None:
+            it["summary"] = summary                     # ledgr_asks.summary_of normalises it (empty: none)
         for f in parts[3:] if not why else []:
             q, o = QUOTED.match(f), OPTIONS.match(f)
             if q and "quote" not in it:
@@ -83,7 +98,7 @@ def bullet_items(body, rejected):
             elif o and "options" not in it:
                 it["options"] = [x.strip() for x in o.group(1).split("|") if x.strip()]
             else:
-                why = f"field {f[:40]!r} is neither a quoted passage nor options, or repeats one"
+                why = f"field {f[:40]!r} is neither a quoted passage nor options, or repeats one"   # as at HEAD (7.2)
                 break
         if why:
             rejected.append(f"ask {n}: {why}")

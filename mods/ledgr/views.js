@@ -5,21 +5,22 @@
 //            closeAsk, gitOk, brMsg, preOpen, pinDel, dd, ddShut, ddFocus
 //   actions: act, setDraft, copyAnswer, copyAnswers, launch, openConclude, sendToTrunk, copyConfluence,
 //            askForConclusion, closeBranch, focusBranch, trunkWord, trunkLine, branchLive, pasteOn,
-//            confirmManifest, canConclude, retarget (and answerOf, forgetConclude)
+//            confirmManifest, canConclude, retarget (and answerOf, forgetConclude); the answer's images
+//            (2026-11-23, attachRow): pasteImage, removeAttach, revealAttach
 // The meanings a row and a sub-row share (the glyph, the state word, the pill) come from listing.js; the
 // list keeps its own atoms (btn, pill, menuButton exist twice this round, Detail.md 7). Reading text is a
 // selectable TextView (readable): markdown as written, or the person's and pinned text escaped so it
 // shows exactly as stored (detailing.js mdVerbatim). Markdown takes link clicks (2026-11-10): a web link
 // opens in the browser; given the dialog's handler (o.onLink), file paths become links too (links.js
 // linkify) and every click goes to it (detail.js openLink). Not an engine file.
-import { div, svg } from "gpui-kit";
+import { div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Input, Textarea, TextView, Popup } from "gpui-base";
 import { isClosed } from "./store.js";
 import { manifestLines } from "./branch.js";
 import { confluenceMessage, extractConclusion, forkTurnOf, wrapperWords } from "./confluence.js";
 import { itemWords as H, paneWords as P, trunkWords, branchWords, stageLabels } from "./words.js";
 import { glyphOf, rowModel, BR_WORD } from "./listing.js";
-import { passageParts, mdVerbatim, hardBreaks } from "./detailing.js";
+import { passageParts, mdVerbatim, hardBreaks, ANSWER_BOX } from "./detailing.js";
 import { linkify, parseLink } from "./links.js";
 
 export const ICON = (n) => `mods/workspace-chrome/${n}.svg`;
@@ -194,19 +195,62 @@ export function optionChips(host, t, it) {
   }));
 }
 
-// The answer: the Answer… box (host.answer, a TextareaState since 2026-11-11: two lines growing to ten,
-// then it scrolls; Enter is a new line, ⌘Enter stages the turn's answer sheet), Paste answer (this ask's
-// answer alone) and how it reaches the agent.
-export function answerBox(host, t, st, s, it) {
+// The answer (2026-11-23: the ask's main region): the Answer… box (host.answer, a TextareaState: Enter is
+// a new line, ⌘Enter stages the turn's answer sheet) the column's full width, then the row under it: how
+// the answer reaches the agent, and Paste answer (this ask's answer alone) at its right. o.frame: the
+// frame's height in px (detail.js fitAnswer: the column's free height, at least eight rows; the textarea
+// is given the frame's height less its padding and border, detailing.js ANSWER_BOX.frame); without it the
+// textarea's own rows size it. A click on the frame outside the textarea puts the keyboard in it
+// (o.onFrame); files dropped on it go to o.onDrop (on_drop: absolute paths; detail.js dropOnAnswer). o.below:
+// rows drawn between the box and the hint row (the attachments row, attachRow; fitAnswer measures the
+// section, so the box makes room for them).
+export function answerBox(host, t, st, s, it, o = {}) {
   const paste = host.pasteOn(), L = stageLabels(paste), ans = host.answerOf(it);
-  return v_flex().id(`dt-answer-${it.id}`).gap(4)
-    .child(h_flex().gap(6).items_start()
-      .child(v_flex().flex_1().min_w(0).px(8).py(5).rounded(7).border_1().border_color(t.input).bg(t.background)
-        .when(Boolean(host.answer), (el) => el.child(Textarea.new(host.answer).w_full().text_size(t.ts(12.5)).text_color(t.foreground))))
+  const frame = Number.isFinite(o.frame) && o.frame > ANSWER_BOX.frame ? Math.round(o.frame) : 0;
+  return v_flex().id(`dt-answer-${it.id}`).w_full().gap(6)
+    .child(v_flex().id(`dt-answer-frame-${it.id}`).w_full().min_w(0).px(8).py(5).rounded(7).border_1().border_color(t.input).bg(t.background)
+      .when(frame > 0, (el) => el.h(frame).overflow_hidden())
+      .when(typeof o.onFrame === "function", (el) => el.on_click((e, cx) => o.onFrame(e, cx)))
+      .when(typeof o.onDrop === "function", (el) => el.on_drop((ev, cx) => o.onDrop(ev, cx)))
+      .when(Boolean(host.answer), (el) => el.child(Textarea.new(host.answer).w_full()
+        .when(frame > 0, (x) => x.h(frame - ANSWER_BOX.frame))
+        .text_size(t.ts(12.5)).text_color(t.foreground))))
+    .children((Array.isArray(o.below) ? o.below : []).filter(Boolean))
+    .child(h_flex().id(`dt-answer-row-${it.id}`).w_full().gap(8).items_start()
+      .child(div().flex_1().min_w(0).pt(2).text_size(t.ts(10.5)).text_color(t.dim)
+        .child(`⌘Enter ${paste ? "pastes" : "copies"} the answers for turn ${it.anchor?.turn ?? "?"} (Enter starts a new line); pasting or dropping an image attaches it, as a picture or as its file's path; drafts reach the agent only that way, and Done only records it here.`))
       .child(btn(t, `dt-copy1-${it.id}`, L.one, (_e, cx) => host.copyAnswer(it, s, cx),
-        { primary: Boolean(ans), disabled: !ans, tip: ans ? `${H(it)}'s answer alone: ${paste ? `pasted into the prompt in ${P(s?.terminal, "the pane")}, never sent` : `clipboard + focus ${P(s?.terminal, "the pane")}`}` : "Type an answer or pick an option first" })))
-    .child(div().text_size(t.ts(10.5)).text_color(t.dim)
-      .child(`⌘Enter ${paste ? "pastes" : "copies"} the answers for turn ${it.anchor?.turn ?? "?"} (Enter starts a new line); drafts reach the agent only that way, and Done only records it here.`));
+        { primary: Boolean(ans), disabled: !ans, tip: ans ? `${H(it)}'s answer alone: ${paste ? `pasted into the prompt in ${P(s?.terminal, "the pane")}, never sent` : `clipboard + focus ${P(s?.terminal, "the pane")}`}` : "Type an answer or pick an option first" })));
+}
+
+// A thumbnail (2026-11-23): image() of a path relative to the app's folder (gpui-kit.d.ts: the application
+// root), w × h px, both set (review 9.7: a height alone lets the host widen it by its aspect ratio); null when
+// image() throws, so the chip shows without it and nothing else is lost.
+export function thumb(rel, w, h) {
+  if (!rel || !(w > 0) || !(h > 0)) return null;
+  try { return image(rel).w(w).h(h); } catch { return null; }
+}
+
+// The row under the answer box (2026-11-23): one chip per image the answer names (detail.js attachRowFor: path,
+// name, rel, tw, th, sizeText, gone), with its thumbnail when rel is given (tw × th, fitted in detail.js), its
+// name, Reveal in Finder and Remove (its line out of the answer; the file stays); then Paste image (the
+// clipboard's image, as ⌘V in the box does when the clipboard holds no text; "Attaching…" while one is).
+export function attachRow(host, t, it, atts, o = {}) {
+  const id = it.id;
+  return h_flex().id(`dt-att-row-${id}`).w_full().flex_wrap().gap(6).items_center()
+    .children((atts ?? []).map((a, i) => {
+      const th = a.rel ? thumb(a.rel, a.tw, a.th) : null;
+      return h_flex().id(`dt-att-${id}-${i}`).flex_none().max_w(360).gap(6).items_center().px(5).py(3).rounded(6).border_1().border_color(t.border).bg(t.background)
+        .when(Boolean(th), (el) => el.child(div().id(`dt-att-th-${id}-${i}`).flex_none().w(a.tw).h(a.th).rounded(4).overflow_hidden().child(th)))
+        .child(v_flex().min_w(0).gap(3)
+          .child(div().id(`dt-att-name-${id}-${i}`).min_w(0).truncate().text_size(t.ts(11)).text_color(a.gone ? t.blocked : t.foreground).tooltip(a.path).child(a.name))
+          .when(Boolean(a.gone || a.sizeText), (el) => el.child(div().text_size(t.ts(10)).text_color(a.gone ? t.blocked : t.dim).child(a.gone ? "missing from ledgr-data/attachments/" : a.sizeText)))
+          .child(h_flex().gap(4)
+            .child(chip(t, `dt-att-rev-${id}-${i}`, "Reveal", (_e, cx) => host.revealAttach(a.path, cx), { tip: "Show the file in Finder (open -R); nothing is launched" }))
+            .child(chip(t, `dt-att-rm-${id}-${i}`, "Remove", (_e, cx) => host.removeAttach(id, a.path, cx), { tip: "Take its line out of the answer; the file stays in ledgr-data/attachments/" }))));
+    }))
+    .child(chip(t, `dt-att-paste-${id}`, o.busy ? "Attaching…" : "Paste image", (_e, cx) => host.pasteImage(id, cx),
+      { tip: "The image on the clipboard, saved as a PNG in ledgr-data/attachments/ and named in the answer (⌘V in the box does the same when the clipboard holds no text)" }));
 }
 
 // The Branch confirmation: the manifest BEFORE launch, the placement, the worktree toggle.

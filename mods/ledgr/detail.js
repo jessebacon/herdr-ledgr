@@ -22,6 +22,14 @@
 // header's next → / ← prev show the next or previous record of its lane in the panel's order, in place
 // (step; "3 of 19" beside them), the keyboard left on the dialog itself. ⌘S
 // (ledgr.pin) is the capture box's and is ignored here.
+// An ask's left column (2026-11-23): TEXT, WHAT TO DO (its `summary`, the agent's words, when it has one),
+// OPTIONS, the answer box as the column's main region (its height the column's free height, measured with
+// on_size_change: noteFit, fitAnswer; at least eight rows; in one column its least, never filling), RESULT,
+// QUOTE (dim) and the foot line. An image in the answer (2026-11-23, attach.js): a file dropped on the box
+// (dropOnAnswer: copied into ledgr-data/attachments/ by fs) or the clipboard's image on ⌘V with no text, or
+// the row's Paste image (pasteImage: opener.js clipboardImage, the owner's pinned exception), named by one line
+// of the draft (attachWritten, the one seam both end in); the row under the box shows each, with Reveal and
+// Remove (the line out; the file stays).
 // Commands (every shown copy gets them; this copy takes only these): detail:close, detail:done,
 // detail:whole, detail:pick:<n>, detail:answer:<text>, detail-next and detail-prev (detail:next,
 // detail:prev for scripts), btw; launch-branch, branch-split, branch-agent,
@@ -54,7 +62,7 @@ import { v_flex, h_flex, InputState, TextareaState, ScrollHandle } from "gpui-ba
 import { theme, props, shared, setShared, closeOverlay, openOverlay, run, panes, readTextFile, home } from "herdr";
 import { randomUUID } from "crypto";
 import { Reader, ARCHIVE_RETRY_MS } from "./reader.js";
-import { ARCHIVE_ITEMS, ARCHIVE_LEGACY, archiveDir } from "./spool.js";
+import { ARCHIVE_ITEMS, ARCHIVE_LEGACY, archiveDir, within } from "./spool.js";
 import { FORCE_DEMO, LIMITS, agentLabel, dataDir, turnPath, textScaleOf, withScale } from "./config.js";
 import { Store, isAgentAsk, isHuman, isClosed, isSuggestion, levelOf, thresholdOf } from "./store.js";
 import { goToAnchor, stageText, promptText, busy, btwText, isLive } from "./nav.js";
@@ -64,15 +72,17 @@ import { confluenceMessage, conclusionRequest, extractConclusion, leadIn, pinsMe
   pinsChars, pinsOverCap } from "./confluence.js";
 import { itemWords as H, paneWords as P, trunkWords, originWords, branchWords, sessionWords, resolvedByWords, dismissedByWords, stageLabels,
   handleWords, pinsWords, pinSourceWords, pinAnchorWords, pinNameWords, pinLabel, pinUseLines, DETAIL_GONE, messageGone, PIN_MESSAGE_GONE,
-  copiedWords, detailHints, pasteCutWords, BRANCH_NO_TURN, LINK_WORDS, ARCHIVE_READING, archivedWords, archiveFileWords, reopeningWords, reopenedWords,
+  copiedWords, detailHints, pasteCutWords, ATTACH_WORDS, BRANCH_NO_TURN, LINK_WORDS, ARCHIVE_READING, archivedWords, archiveFileWords, reopeningWords, reopenedWords,
   restoreFailedWords, archiveGoneWords, ARCHIVED_READONLY, reopenSlowWords, archiveFailedWords, coldLoadingWords, coldErrorWords, coldFaultWords, COLD_RETRY } from "./words.js";
-import { rowModel, stateOf, laneOf, neighbors, archivedCount } from "./listing.js";
+import { rowModel, stateOf, laneOf, neighbors, archivedCount, summaryOf } from "./listing.js";
 import { detailProps, kindOf, closesAfterStage, focusAfter, mergeClosed, keptConclude, keepConclude, KEEP_KEY, twoColumns, leftWidth,
-  ACTION_STATES, strayBreak, RESTORE_WAIT_MS } from "./detailing.js";
+  ACTION_STATES, strayBreak, RESTORE_WAIT_MS, answerFrame, answerMinFrame, answerRows } from "./detailing.js";
 import { ICON, btn, pill, badge, glyph, tone, chip, menuButton, readable, section, messageBlocks, optionChips, answerBox, confirmBox,
-  branchBody, branchActions, pinNoteBox, subRow, keyHints, rowCtx } from "./views.js";
+  branchBody, branchActions, pinNoteBox, subRow, keyHints, rowCtx, attachRow } from "./views.js";
 import { parseLink, resolvePath, isRelative, shownPath, editorOf, openerArgv } from "./links.js";
-import { openPath, revealPath, gitToplevel, statAt } from "./opener.js";
+import { openPath, revealPath, gitToplevel, statAt, clipboardImage } from "./opener.js";
+import { ATTACH, attachDir, attachName, attachLines, withAttach, withoutAttach, isOurs, baseName, extOf, appRelative, sizeWords, copyIn, prepareSlot,
+  fileInfo, thumbSize, cutDraft, pastedPaths, withAttachAt, withoutRaw } from "./attach.js";
 
 const DAY = 86400e3;
 const squash = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
@@ -82,8 +92,21 @@ const NOT_NEEDED_TIP = "Not needed: close it; the agent may raise it again";
 const ARM_MS = 4000;
 // The answer box's cap (LIMITS.answer, the store's cut of a draft) on the status line.
 const ANSWER_CUT = `Answer cut at ${String(LIMITS.answer).replace(/\B(?=(\d{3})+(?!\d))/g, ",")} characters.`;
+// The cut reached an image's line (attach.js cutDraft): that line went whole, never a part of its path.
+const ANSWER_CUT_IMAGE = `${ANSWER_CUT.slice(0, -1)}; the image line it reached was taken out whole (the file stays in ledgr-data/attachments/).`;
 // How close to a ⌘Enter a one-line-break change counts as that keypress's own (unbreak).
 const STRAY_MS = 300;
+// How long a source taken in by one route (a drop on the frame, its path pasted or dropped into the text) is not
+// taken again by the other: one file, one attachment, whichever way Herdr delivers it, or both.
+const SAME_SOURCE_MS = 2000;
+// A number as the status line writes it (4,000).
+const thousands = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+// A size over the image limit, in words that differ from the limit's own ("8,388,609 bytes", not "8 MiB").
+const overWords = (n) => (sizeWords(n) === sizeWords(ATTACH.maxBytes) ? `${thousands(n)} bytes` : sizeWords(n));
+// The left column's vertical padding and the gap between its parts (fitAnswer counts both).
+const LEFT_PY = 12, LEFT_GAP = 12;
+// How many items' answer-box measures the dialog keeps (fitOf: a step back finds its own).
+const FIT_KEEP = 32;
 
 export class Detail extends Reader {
   constructor(view, cx) {
@@ -110,6 +133,22 @@ export class Detail extends Reader {
     this.width = 900;              // from on_size_change; two columns from 760 px
     this.answer = null;            // the ask's answer TextareaState (made in start or retarget, never in render)
     this.answerFor = null;
+    // The answer box's height (2026-11-23, fitAnswer): the frame last fitted, any item's (null: none yet; the
+    // first guess for an item not measured), and what each item's is fitted from, as on_size_change reported it:
+    // the left column's height (col), the item drawn (id), and per item id (fitOf, review fix 7.9: a step back
+    // to an item finds its own measures) the groups above and below its ANSWER section (null: not reported
+    // yet; 0: none drawn), the section less its frame (chrome), the gaps between the groups, the frame drawn
+    // last and the frame fitted (frame). rowsTold: the rows the textarea was last told.
+    this.frameH = null;
+    this.fit = { col: 0, id: null, by: new Map() };
+    this.rowsTold = null;
+    // An image in an answer (2026-11-23, attach.js): the drop or paste being attached ({id, at}: one at a time),
+    // and each attachment's size and presence as read (path -> {size, gone} | {loading}).
+    this.attaching = null;
+    this.attachInfo = new Map();
+    // A source taken in lately: path -> {at, route: "drop" | "text", path (its copy, once done), raw (the text
+    // route's line, when it arrived while the drop was still copying)} (SAME_SOURCE_MS).
+    this.recentSrc = new Map();
     this.sheetAt = 0;              // the last ⌘Enter paste of a turn's answers (one per keypress: pasteSheet)
     this.typed = null;             // the answer box's latest change: {id, before, at} (unbreak)
     this.note = null;              // the pin note editor: {pinId, input}
@@ -270,28 +309,34 @@ export class Detail extends Reader {
     return true;
   }
 
-  // The ask's answer box (2026-11-11: several lines): a TextareaState, 2 rows growing to 10, then it
-  // scrolls. Each change is the draft (Reader typeDraft: posted 800 ms after the last one; flushPending on
+  // The ask's answer box (2026-11-11: several lines; 2026-11-23: the column's main region): a TextareaState
+  // of fixed rows, as many as the frame fitAnswer sizes holds (eight at first), past which it scrolls; no
+  // auto-grow, since the frame gives it its height (views.js answerBox). Each change is the draft (Reader
+  // typeDraft: posted 800 ms after the last one; flushPending on
   // close, sendDraft on a move), cut at LIMITS.answer with a word on the status line (the store keeps no
   // more). Enter is a new line; ⌘Enter pastes the turn's answers: the mod:ledgr `btw` command (command),
   // or the textarea's own submit when it carries ⌘ (secondary). pasteSheet takes the first of the two, so
   // one keypress is one paste. `typed` keeps the draft before the latest change and when it came, for
   // unbreak (a line break ⌘Enter itself may have put in).
   makeAnswer(it) {
-    const id = it.id;
-    const inp = TextareaState.new({ placeholder: "Answer… (Enter: new line · ⌘Enter: paste the turn's answers)", value: it.draft ?? "", rows: 2 });
-    try { inp.set_auto_grow(2, 10); } catch { /* fixed rows */ }
+    const id = it.id, scale = textScaleOf(this.cfg);
+    const rows = answerRows(this.frameFor(id, scale), scale);
+    this.rowsTold = rows;
+    const inp = TextareaState.new({ placeholder: "Answer… (Enter: new line · ⌘Enter: paste the turn's answers)", value: it.draft ?? "", rows });
     inp.on("change", (_e, cx) => {
       let v = inp.value();
-      if (v.length > LIMITS.answer) { v = v.slice(0, LIMITS.answer); inp.set_value(v); this.flash = ANSWER_CUT; cx.notify(); }
+      if (v.length > LIMITS.answer) { const c = cutDraft(v, LIMITS.answer); v = c.text; inp.set_value(v); this.flash = c.dropped ? ANSWER_CUT_IMAGE : ANSWER_CUT; cx.notify(); }
       const before = String(this.viewStore().item(id)?.draft ?? "");
       if (v === before) return;                       // nothing new (a set_value of ours echoing back)
       // ⌘Enter's line break arriving after its paste (the command came first): the text goes back.
       if (Date.now() - this.sheetAt < STRAY_MS && strayBreak(before, v)) { inp.set_value(before); return; }
       this.typed = { id, before, at: Date.now() };
       this.typeDraft(id, v, cx);
+      this.pathsIn(id, before, v, cx);
     });
     inp.on("submit", (e, cx) => { if (e?.secondary) this.pasteSheet(id, cx); });
+    // ⌘V with no text on the clipboard (gpui-kit.d.ts: a paste that found no text): its image, if it holds one.
+    inp.on("paste_other", (_e, cx) => this.pasteImage(id, cx));
     this.track(inp);
     this.answer = inp;
     this.answerFor = id;
@@ -326,6 +371,366 @@ export class Detail extends Reader {
     this.unbreak(id, cx);
     this.copyAnswers(s, it.anchor?.turn, cx, id);
     return true;
+  }
+
+  // The answer box's height (2026-11-23): what on_size_change reported (after a layout, from a handler, never
+  // in render): "col" the left column's height, "above" / "below" the groups around an item's ANSWER section,
+  // "ans" the section (its frame drawn at that item's `drawn` px: the rest is its chrome, the title and the
+  // rows under the box). Kept per item id (fitOf); a report for an id with no record is dropped. Then
+  // fitAnswer, when it is the item drawn (or the column).
+  noteFit(key, id, h, cx) {
+    const v = Number(h), f = this.fit;
+    if (!Number.isFinite(v) || v < 0 || this.released) return;
+    if (key === "col") { if (Math.abs(f.col - v) < 1) return; f.col = v; }
+    else {
+      const m = f.by.get(id);
+      if (!m) return;
+      if (key === "ans") m.chrome = Math.max(0, v - m.drawn);
+      else if (key === "above" || key === "below") m[key] = v;
+      else return;
+      if (id !== f.id) return;
+    }
+    this.fitAnswer(cx);
+  }
+
+  // The dialog's width (the root's on_size_change): two columns from 760 px. When that flips, the answer box
+  // is fitted again (one column: its least; two: the column's free height).
+  noteWidth(size, cx) {
+    const w = Number(size?.width) || 0;
+    if (!w || Math.abs(w - this.width) <= 4) return;
+    const was = twoColumns(this.width);
+    this.width = w;
+    if (was !== twoColumns(w)) this.fitAnswer(cx);
+    cx.notify();
+  }
+
+  // An item's measures (made on its first draw; the newest FIT_KEEP kept).
+  fitOf(id) {
+    const by = this.fit.by;
+    let m = by.get(id);
+    if (!m) {
+      m = { above: null, below: null, chrome: null, gaps: 0, drawn: 0, frame: null };
+      by.set(id, m);
+      while (by.size > FIT_KEEP) by.delete(by.keys().next().value);
+    }
+    return m;
+  }
+
+  // The frame an item is drawn at: in one column (review fix 7.7: the message and its marked passage follow in
+  // the same scrolling column) its least, never filling; in two, its own fitted frame, else the last one fitted
+  // (a guess until its measures are in), never under its least.
+  frameFor(id, scale) {
+    if (!twoColumns(this.width)) return answerMinFrame(scale);
+    const m = this.fit.by.get(id);
+    return Math.max(m?.frame ?? this.frameH ?? 0, answerMinFrame(scale, this.fit.col));
+  }
+
+  // The frame takes the left column's free height (two columns only): the column less its padding (LEFT_PY),
+  // the groups above and below, the section's chrome and the gaps (detailing.js answerFrame: at least eight
+  // rows; the frame drawn kept while it fits and is under 4 px short). The textarea is told the rows that fill
+  // it too (set_rows: here, a handler, never in render), in case Herdr sizes it by its rows rather than by the
+  // height views.js gives it. A redraw only when the frame to draw differs from the one drawn. Nothing until
+  // every measure of the drawn item is in.
+  fitAnswer(cx) {
+    const f = this.fit, m = f.by.get(f.id);
+    if (!m || !this.answer || this.answerFor !== f.id || this.released) return;
+    const scale = textScaleOf(this.cfg);
+    let F;
+    if (!twoColumns(this.width)) F = answerMinFrame(scale);
+    else {
+      if (!(f.col > 0) || m.above === null || m.below === null || m.chrome === null) return;
+      F = answerFrame({ col: f.col, used: 2 * LEFT_PY + m.above + m.below + m.chrome + m.gaps, scale, current: m.frame ?? m.drawn });
+      m.frame = F;
+      this.frameH = F;
+    }
+    const rows = answerRows(F, scale);
+    if (rows !== this.rowsTold) { this.rowsTold = rows; try { this.answer.set_rows(rows); } catch { /* sized by the height alone */ } }
+    if (F !== m.drawn) cx.notify();
+  }
+
+  // A click on the answer frame outside the textarea (its padding; or the frame's room should Herdr size the
+  // textarea by its rows): the keyboard into the textarea, unless it has it already (a click in the text
+  // keeps its caret).
+  focusAnswer(id) {
+    if (this.answerFor !== id || !this.answer || this.fieldOn === this.answer || this.released) return;
+    try { this.answer.focus(); } catch { /* typing still needs a click in the text */ }
+  }
+
+  // ── an image in an answer (2026-11-23: attach.js; the file under ledgr-data/attachments/, one line of the
+  // draft naming it) ──
+  // An open agent ask of this dialog's store that can take an image now (not closed, not archived), else null.
+  attachTarget(id) {
+    const it = this.viewStore().item(id);
+    return it && isAgentAsk(it) && !isClosed(it) && !it.archiveFile ? it : null;
+  }
+
+  // The checks made before any file is written, so none is written for an image that would be refused: an open
+  // ask, under ATTACH.perAnswer images, and room in LIMITS.answer for the line (its length is known before the
+  // name is drawn: attachName's shape). null: it may be attached; else the status words. base: what is attached.
+  attachRoom(id, base, ext) {
+    const it = this.attachTarget(id);
+    if (!it) return ATTACH_WORDS.closed(base);
+    if (!attachDir()) return ATTACH_WORDS.noFolder(base);
+    const draft = String(it.draft ?? "");
+    if (attachLines(draft).length >= ATTACH.perAnswer) return ATTACH_WORDS.tooMany(base, ATTACH.perAnswer);
+    if (withAttach(draft, `${attachDir()}/${attachName(ext)}`).length > LIMITS.answer) return ATTACH_WORDS.tooLong(base, thousands(LIMITS.answer));
+    return null;
+  }
+
+  // Another image still being attached (one at a time), unless it began over ATTACH.staleMs ago: a run that never
+  // came back (a host call left pending) does not lock the row until the dialog closes (review 9.5).
+  attachBusy() {
+    return Boolean(this.attaching) && Date.now() - (this.attaching.at ?? 0) < ATTACH.staleMs;
+  }
+
+  // The seam both routes end in (and any later one): a file already written directly in ledgr-data/attachments/
+  // named in ask id's answer. Its line goes at the end of the draft (setDraft: the draft, the box, the Paste
+  // buttons), checked again first (an open ask, the fifth image, the answer's room: the draft may have changed
+  // while the file was written; refused, the file stays). o.size: its bytes (the thumbnail rule); o.how: words
+  // after its name ("converted to PNG"). Sets the status line; returns its words.
+  attachWritten(id, path, cx, o = {}) {
+    const name = baseName(path), it = this.attachTarget(id);
+    let words;
+    if (!isOurs(path)) words = ATTACH_WORDS.notOurs(path);
+    else if (!it) words = ATTACH_WORDS.closed(name);
+    else {
+      // o.replace: the image's path that arrived in the box as text (attach.js pastedPaths: {raw, text, at}), whose
+      // place the attachment line takes;
+      // when that line is no longer there, o.orAppend (a drop) names it at the end, else it is not named.
+      const draft = String(it.draft ?? "");
+      let next = o.replace ? withAttachAt(draft, o.replace, path) : withAttach(draft, path);
+      if (next === null && o.orAppend) next = withAttach(draft, path);
+      if (next === null) words = ATTACH_WORDS.pathGone(name);
+      else if (attachLines(draft).length >= ATTACH.perAnswer) words = ATTACH_WORDS.tooMany(name, ATTACH.perAnswer);
+      else if (next.length > LIMITS.answer) words = ATTACH_WORDS.tooLong(name, thousands(LIMITS.answer));
+      else {
+        this.setDraft(it, next, cx);
+        if (Number(o.size) > 0 && o.dims) this.attachInfo.set(path, { size: Number(o.size), dims: o.dims, gone: false });
+        words = ATTACH_WORDS.attached(name, H(it), o.how ?? "");
+      }
+    }
+    this.flash = words;
+    cx.notify();
+    return words;
+  }
+
+  // Files dropped on the answer's frame (views.js answerBox, on_drop: absolute paths): each one in turn checked,
+  // copied in (attach.js copyIn: fs only, bounded) and named in the answer (attachWritten); the status line then
+  // says what became of each. One attaching at a time. The demo copies nothing.
+  dropOnAnswer(id, ev, cx) {
+    // A file the text route took in lately (Herdr's textarea put its path into the box too): not again.
+    const paths = (Array.isArray(ev?.paths) ? ev.paths : []).filter((p) => typeof p === "string" && p && !this.tookLately(p, "text"));
+    if (!paths.length || this.released) return;
+    if (this.demo) { this.flash = ATTACH_WORDS.demo(paths.map((p) => baseName(p) || p).join(", ")); cx.notify(); return; }
+    if (this.attachBusy()) { this.flash = ATTACH_WORDS.busy; cx.notify(); return; }
+    const mine = this.attaching = { id, at: Date.now() };
+    // Known at once, so its path arriving in the text in the same moment is not taken a second time.
+    for (const p of paths) this.recentSrc.set(p, { at: Date.now(), route: "drop", path: null, raw: null });
+    this.flash = ATTACH_WORDS.copying(paths.length);
+    cx.notify();
+    cx.spawn(async (cx) => {
+      const words = [];
+      try { for (const p of paths) { try { words.push(await this.attachDropped(id, p, cx)); } finally { this.settledSrc(p); } } }
+      catch (e) { words.push(ATTACH_WORDS.copyFailed(baseName(paths[words.length]) || "The file", String(e?.message ?? e).slice(0, 160))); }
+      finally {
+        if (this.attaching === mine) this.attaching = null;
+        if (!this.released) { this.flash = words.join(" "); cx.notify(); }
+      }
+    });
+  }
+
+  // One dropped file: what needs no file first (an image by its name, attachRoom), then the copy, then
+  // attachWritten. Its status words.
+  async attachDropped(id, src, cx) {
+    const base = baseName(src) || String(src), ext = extOf(src);
+    if (!ext) return ATTACH_WORDS.notImage(base);
+    const pre = this.attachRoom(id, base, ext);
+    if (pre) return pre;
+    const seen = this.recentSrc.get(src) ?? { at: Date.now(), route: "drop", path: null, raw: null };
+    this.recentSrc.set(src, seen);
+    const r = await copyIn(src, cx);
+    if (!r.ok) {
+      if (r.kind === "type") return ATTACH_WORDS.notImage(base);
+      if (r.kind === "large") return ATTACH_WORDS.tooLarge(base, overWords(r.size), sizeWords(ATTACH.maxBytes));
+      if (r.kind === "empty") return ATTACH_WORDS.empty(base);
+      if (r.kind === "read") return ATTACH_WORDS.unreadable(base, r.why);
+      if (r.kind === "back") return ATTACH_WORDS.backShort(base);
+      return ATTACH_WORDS.copyFailed(base, r.why ?? "unknown error");
+    }
+    seen.path = r.path;
+    // Its path reached the text meanwhile (the textarea's own insert): the attachment line takes that line's place
+    // (or, that line gone, goes at the end as for any drop).
+    return this.attachWritten(id, r.path, cx, { size: r.size, dims: r.dims, replace: seen.raw ?? undefined, orAppend: true });
+  }
+
+  // Is src being taken in by route, or was it within SAME_SOURCE_MS?
+  tookLately(src, route) {
+    const r = this.recentSrc.get(src);
+    return Boolean(r) && r.route === route && (!r.done || Date.now() - r.at < SAME_SOURCE_MS);
+  }
+
+  // A source's attach finished (taken in or refused): its window runs from now; entries a minute old go.
+  settledSrc(src) {
+    const r = this.recentSrc.get(src);
+    if (r) { r.done = true; r.at = Date.now(); }
+    for (const [k, v] of this.recentSrc) if (v.done && Date.now() - v.at > 60000) this.recentSrc.delete(k);
+  }
+
+  // An image's path that arrived in the answer box in one change (a capture tool's clipboard or a file copied in
+  // Finder, pasted; a file dropped on the text: Herdr's textarea inserts its path; attach.js pastedPaths): each
+  // copied in as a drop is (copyIn: fs only, the same limits, one at a time) and its line replaced by the
+  // attachment line; on any refusal the path stays as text (the agent can read it) and the status line says why.
+  // A path typed by hand is never taken. The same file just dropped on the frame is one attachment: its raw line
+  // goes, or the drop's line takes its place. Never the clipboard's reader, never a process.
+  pathsIn(id, before, now, cx) {
+    const found = pastedPaths(before, now);
+    if (!found.length || this.released) return;
+    const todo = [];
+    for (const f of found) {
+      const d = this.recentSrc.get(f.src);
+      if (d && this.tookLately(f.src, "drop")) {
+        if (d.path) { const it = this.attachTarget(id), next = it ? withoutRaw(String(it.draft ?? ""), f) : null; if (next !== null) this.setDraft(it, next, cx); }
+        else d.raw = f;
+        continue;
+      }
+      todo.push(f);
+    }
+    if (!todo.length) return;
+    const names = todo.map((f) => baseName(f.src)).join(", ");
+    if (this.demo) { this.flash = ATTACH_WORDS.demoPath(names); cx.notify(); return; }
+    if (this.attachBusy()) { this.flash = ATTACH_WORDS.stays(`${names}: ${ATTACH_WORDS.busy}`); cx.notify(); return; }
+    const mine = this.attaching = { id, at: Date.now() };
+    for (const f of todo) this.recentSrc.set(f.src, { at: Date.now(), route: "text", path: null, raw: f });
+    this.flash = ATTACH_WORDS.copying(todo.length);
+    cx.notify();
+    cx.spawn(async (cx) => {
+      const words = [];
+      try { for (const f of todo) { try { words.push(await this.attachPathLine(id, f, cx)); } finally { this.settledSrc(f.src); } } }
+      catch (e) { words.push(ATTACH_WORDS.stays(ATTACH_WORDS.copyFailed(baseName(todo[words.length]?.src) || "The file", String(e?.message ?? e).slice(0, 160)))); }
+      finally {
+        if (this.attaching === mine) this.attaching = null;
+        if (!this.released) { this.flash = words.join(" "); cx.notify(); }
+      }
+    });
+  }
+
+  // One path line (pathsIn): checked (an image ledgr takes, an open ask, the fifth, the answer's room with the
+  // attachment line in its place), copied in, then named in place of the line (attachWritten's replace). Its
+  // words; every refusal says the path stays as text.
+  async attachPathLine(id, f, cx) {
+    const base = baseName(f.src) || f.src;
+    if (!f.ext) return ATTACH_WORDS.stays(ATTACH_WORDS.notImage(base));
+    const it = this.attachTarget(id);
+    if (!it) return ATTACH_WORDS.stays(ATTACH_WORDS.closed(base));
+    if (!attachDir()) return ATTACH_WORDS.stays(ATTACH_WORDS.noFolder(base));
+    const draft = String(it.draft ?? "");
+    if (attachLines(draft).length >= ATTACH.perAnswer) return ATTACH_WORDS.stays(ATTACH_WORDS.tooMany(base, ATTACH.perAnswer));
+    const probe = withAttachAt(draft, f, `${attachDir()}/${attachName(f.ext)}`);
+    if (probe === null) return ATTACH_WORDS.pathEdited(base);
+    if (probe.length > LIMITS.answer) return ATTACH_WORDS.stays(ATTACH_WORDS.tooLong(base, thousands(LIMITS.answer)));
+    const r = await copyIn(f.src, cx);
+    if (!r.ok) {
+      if (r.kind === "type") return ATTACH_WORDS.stays(ATTACH_WORDS.notImage(base));
+      if (r.kind === "large") return ATTACH_WORDS.stays(ATTACH_WORDS.tooLarge(base, overWords(r.size), sizeWords(ATTACH.maxBytes)));
+      if (r.kind === "empty") return ATTACH_WORDS.stays(ATTACH_WORDS.empty(base));
+      if (r.kind === "read") return ATTACH_WORDS.stays(ATTACH_WORDS.unreadable(base, r.why));
+      if (r.kind === "back") return ATTACH_WORDS.stays(ATTACH_WORDS.backShort(base));
+      return ATTACH_WORDS.stays(ATTACH_WORDS.copyFailed(base, r.why ?? "unknown error"));
+    }
+    const seen = this.recentSrc.get(f.src);
+    if (seen) seen.path = r.path;
+    const words = this.attachWritten(id, r.path, cx, { size: r.size, dims: r.dims, replace: f, how: "from its path" });
+    return / not attached: /.test(words) ? ATTACH_WORDS.stays(words) : words;
+  }
+
+  // ⌘V in the answer box with no text on the clipboard (the textarea's paste_other), or the row's Paste image:
+  // the clipboard's image written as a PNG in ledgr-data/attachments/ (opener.js clipboardImage, the one process
+  // this starts, on the person's paste or click) and named in the answer (attachWritten). One at a time; the
+  // fifth image and the answer's room are checked before anything runs, so no file is written for an image that
+  // would be refused; the demo runs nothing.
+  pasteImage(id, cx) {
+    if (this.released) return;
+    const what = "The image on the clipboard";
+    if (this.demo) { this.flash = ATTACH_WORDS.demo(what); cx.notify(); return; }
+    if (this.attachBusy()) { this.flash = ATTACH_WORDS.busy; cx.notify(); return; }
+    const pre = this.attachRoom(id, what, "png");
+    if (pre) { this.flash = pre; cx.notify(); return; }
+    const mine = this.attaching = { id, at: Date.now() };
+    this.flash = ATTACH_WORDS.reading;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      let words = null, slot = null;
+      try {
+        slot = await prepareSlot("png", cx);
+        if (!slot.ok) words = ATTACH_WORDS.clipFailed(`ledgr-data/attachments/ could not be made ready (${slot.why})`);
+        else {
+          // Bounded here too (review 9.5): exec has Herdr's own limit, but a host call can be left pending.
+          const r = await within(cx, ATTACH.clipMs, clipboardImage(slot.path), "the clipboard reader")
+            .catch((e) => ({ ok: false, why: e?.timedOut ? `it did not finish within ${ATTACH.clipMs / 1000} s` : String(e?.message ?? e).slice(0, 160) }));
+          if (r.ok) { if (this.attaching === mine) this.attaching = null; if (!this.released) this.attachWritten(id, slot.path, cx, { size: r.bytes, how: r.converted ? "converted to PNG" : "" }); }
+          else if (r.none) words = ATTACH_WORDS.noImage;
+          else if (r.large) words = ATTACH_WORDS.clipLarge(overWords(r.bytes), sizeWords(ATTACH.maxBytes));
+          else {
+            words = ATTACH_WORDS.clipFailed(r.why ?? "unknown error");
+            // A write that failed part way may have left a file under that name (the script never writes over
+            // one, and nothing here deletes): say so.
+            const at = r.refused ? null : await statAt(slot.path).catch(() => null);
+            if (at?.exists) words = `${words} ${ATTACH_WORDS.partial(baseName(slot.path))}`;
+          }
+        }
+      } catch (e) { words = ATTACH_WORDS.clipFailed(String(e?.message ?? e).slice(0, 160)); }
+      finally {
+        if (this.attaching === mine) this.attaching = null;
+        if (words && !this.released) { this.flash = words; cx.notify(); }
+      }
+    });
+  }
+
+  // Remove on an attachment's chip: its line out of the draft (the rest as typed). The file stays.
+  removeAttach(id, path, cx) {
+    const it = this.viewStore().item(id);
+    if (!it) return;
+    this.setDraft(it, withoutAttach(String(it.draft ?? ""), path), cx);
+    this.flash = ATTACH_WORDS.removed(baseName(path));
+    cx.notify();
+  }
+
+  // Reveal in Finder on an attachment's chip: through the status line's own reveal (revealLink, open -R).
+  revealAttach(path, cx) {
+    if (this.attachInfo.get(path)?.gone) { this.flash = ATTACH_WORDS.revealGone(baseName(path)); cx.notify(); return; }
+    this.linkHit = { path, shown: baseName(path), flash: null };
+    this.revealLink(cx);
+  }
+
+  // The images the answer names, for the row under the box: [{path, name, rel, tw, th, sizeText, gone}]. rel
+  // (image()'s path, relative to the app's folder) and its size tw × th only when thumbnails are on
+  // (ui.attachmentThumbs, default on), the file is at most ATTACH.thumbBytes and its header gives a PNG's or a
+  // JPEG's size of at most ATTACH.thumbPx a side.
+  attachRowFor(it) {
+    const thumbs = this.cfg?.ui?.attachmentThumbs !== false;
+    return attachLines(it?.draft).map((a) => {
+      const info = this.attachInfoOf(a.path);
+      const small = Boolean(info) && !info.gone && info.size > 0 && info.size <= ATTACH.thumbBytes;
+      // A thumbnail only for a PNG or JPEG whose header gives its size, at most thumbPx a side, both sides set.
+      const tz = thumbs && small ? thumbSize(info.dims) : null, rel = tz ? appRelative(a.path) : null;
+      return { ...a, rel, tw: rel ? tz.w : 0, th: rel ? tz.h : 0, gone: Boolean(info?.gone), sizeText: info?.size > 0 ? sizeWords(info.size) : "" };
+    });
+  }
+
+  // An attachment's size, pixel size and presence (attach.js fileInfo), read once from a timer (from render: never awaited
+  // there); null until then. The demo reads nothing.
+  attachInfoOf(path) {
+    const got = this.attachInfo.get(path);
+    if (got) return got.loading ? null : got;
+    this.attachInfo.set(path, { loading: true });
+    const cx = this.rcx;
+    if (this.demo || !cx) return null;
+    cx.timer.after(0, (cx) => cx.spawn(async (cx) => {
+      const r = await fileInfo(path, cx).catch(() => ({ size: null, dims: null, gone: false }));
+      this.attachInfo.set(path, r);
+      if (!this.released) cx.notify();
+    }));
+    return null;
   }
 
   // Which of the dialog's fields has the keyboard (Tab moves from it).
@@ -1189,7 +1594,7 @@ export class Detail extends Reader {
         this.close();
         cx.stop_propagation();
       })
-      .on_size_change((size, cx) => { const w = Number(size?.width) || 0; if (w && Math.abs(w - this.width) > 4) { this.width = w; cx.notify(); } })
+      .on_size_change((size, cx) => this.noteWidth(size, cx))
       .size_full().min_h(0).bg(t.popover).text_color(t.foreground).text_size(t.ts(12.5));
     if (!this.p.ok) return root.child(this.nothing(t, `Nothing to show (${this.p.error}).`));
     const st = this.viewStore();
@@ -1232,7 +1637,9 @@ export class Detail extends Reader {
     const hitIdx = msg.hitAt < 0 ? -1 : two ? msg.hitAt : left.length + msg.hitAt;
     const view = `${r.x.id}:${this.whole}:${two}:${msg.size}`;
     if (hitIdx >= 0 && msg.size && this.scrolledTo !== view) { this.scrolledTo = view; try { (two ? this.msgScroll : this.leftScroll).scroll_to_item(hitIdx); } catch { /* stays at the top */ } }
-    const leftCol = v_flex().id("dt-left").min_h(0).h_full().overflow_y_scrollbar().track_scroll(this.leftScroll).px(16).py(12).gap(12)
+    // Its height fits an open ask's answer box (noteFit, fitAnswer).
+    const leftCol = v_flex().id("dt-left").min_h(0).h_full().overflow_y_scrollbar().track_scroll(this.leftScroll).px(16).py(LEFT_PY).gap(LEFT_GAP)
+      .on_size_change((size, cx) => this.noteFit("col", null, size?.height, cx))
       .when(two, (el) => el.flex_none().w(leftWidth(this.width)))
       .when(!two, (el) => el.flex_1().min_w(0))
       .children(two ? left : [...left, ...msg.parts]);
@@ -1364,56 +1771,93 @@ export class Detail extends Reader {
     return chip(t, id, "Copy", (_e, cx) => this.copyText(text, what, cx), { tip: `${what} as stored, to the clipboard; nothing is pasted` });
   }
 
+  // The left column of an ask or a question (2.4). An ask (2026-11-23), top to bottom: ARCHIVED (an archived
+  // record), TEXT, WHAT TO DO (its summary, the agent's words: markdown, linkified as the text is; none, no
+  // section), OPTIONS, ANSWER (open, live, its session known: the column's main region), RESULT, QUESTIONS
+  // ABOUT IT, then QUOTE (dim: the message beside it marks the passage) and the foot line (who raised it, its
+  // level and turn). With an answer box the parts above and below it are drawn as two groups, each reporting
+  // its height, and the section reports its own (noteFit): the box takes what the column leaves free
+  // (fitAnswer). A question keeps its order: TEXT, QUOTE, ABOUT, PINS, BRANCHES, the confirmation, RESULT.
   itemParts(t, st, kind, it) {
-    const out = [], closed = isClosed(it), here = this.target.session ?? it.anchor?.sessionId, ctx = rowCtx(this, st, here);
+    const closed = isClosed(it), here = this.target.session ?? it.anchor?.sessionId, ctx = rowCtx(this, st, here);
     const s = st.d.sessions[it.anchor?.sessionId] ?? null;
     const ask = kind === "ask";
     const quote = it.anchor?.quote ? String(it.anchor.quote).trim() : "";
     const mode = ask ? "markdown" : "verbatim";
-    const onLink = ask ? this.linkFn : null;   // an ask's text and quote are markdown: their links open (openLink)
+    const onLink = ask ? this.linkFn : null;   // an ask's text, summary and quote are markdown: their links open (openLink)
+    const above = [], below = [];
     // An archived record (retention, 2026-11-19): marked first, with when and how it was closed (its state word
     // as it was in the list) and where it is kept; read-only below (closed: no answer box, no options to click).
     const archived = Boolean(it.archiveFile);
     if (archived) {
       const how = stateOf(kind, { ...it, archiveFile: null }, ctx).word;
-      out.push(section(t, `dt-sec-arch-${it.id}`, "ARCHIVED", [
+      above.push(section(t, `dt-sec-arch-${it.id}`, "ARCHIVED", [
         div().id(`dt-arch-when-${it.id}`).text_size(t.ts(12)).text_color(t.foreground).child(archivedWords(it, how)),
         div().id(`dt-arch-file-${it.id}`).text_size(t.ts(11)).text_color(t.dim).child(archiveFileWords(archiveDir(it.anchor?.sessionId), it.archiveFile)),
       ], { extra: badge(t, "archived", t.dim) }));
     }
-    if (it.text) out.push(section(t, `dt-sec-text-${it.id}`, "TEXT",
+    if (it.text) above.push(section(t, `dt-sec-text-${it.id}`, "TEXT",
       readable(t, `dt-text-${it.id}`, it.text, { mode, size: 13, onLink }), { extra: this.copyChip(t, `dt-cp-text-${it.id}`, it.text, "The text") }));
-    if (quote) out.push(section(t, `dt-sec-quote-${it.id}`, it.kind === "bookmark" ? "BOOKMARKED PASSAGE" : "QUOTE",
-      readable(t, `dt-quote-${it.id}`, quote, { mode, italic: true, muted: true, onLink }), { extra: this.copyChip(t, `dt-cp-quote-${it.id}`, quote, "The quote") }));
-    if (!ask) {
+    const quoteSec = quote ? section(t, `dt-sec-quote-${it.id}`, it.kind === "bookmark" ? "BOOKMARKED PASSAGE" : "QUOTE",
+      readable(t, `dt-quote-${it.id}`, quote, ask ? { mode, italic: true, dim: true, size: 12, onLink } : { mode, italic: true, muted: true, onLink }),
+      { extra: this.copyChip(t, `dt-cp-quote-${it.id}`, quote, "The quote") }) : null;
+    let box = null;
+    if (ask) {
+      const todo = summaryOf(it);
+      if (todo) above.push(section(t, `dt-sec-todo-${it.id}`, "WHAT TO DO",
+        div().id(`dt-todo-edge-${it.id}`).w_full().min_w(0).pl(8).border_l(2).border_color(t.accent)
+          .child(readable(t, `dt-todo-${it.id}`, todo, { mode, size: 12.5, onLink })),
+        { tone: t.accent, extra: this.copyChip(t, `dt-cp-todo-${it.id}`, todo, "What to do") }));
+      if (it.kind === "decide" && (it.options ?? []).length) above.push(section(t, `dt-sec-opts-${it.id}`, "OPTIONS", optionChips(this, t, it)));
+      // Never on an archived record, whatever status its line holds (it is read-only until Reopen).
+      if (!closed && !archived && s) box = this.answerSection(t, st, s, it);
+    } else {
+      if (quoteSec) above.push(quoteSec);
       const about = this.aboutLines(t, st, it);
-      if (about.length) out.push(section(t, `dt-sec-about-${it.id}`, "ABOUT", about));
-    }
-    if (ask && it.kind === "decide" && (it.options ?? []).length) out.push(section(t, `dt-sec-opts-${it.id}`, "OPTIONS", optionChips(this, t, it)));
-    // Never on an archived record, whatever status its line holds (it is read-only until Reopen).
-    if (ask && !closed && !archived && s) out.push(section(t, `dt-sec-ans-${it.id}`, "ANSWER", answerBox(this, t, st, s, it)));
-    if (!ask) {
+      if (about.length) above.push(section(t, `dt-sec-about-${it.id}`, "ABOUT", about));
       const pins = st.pinsOf(it);
-      if (pins.length) out.push(section(t, `dt-sec-pins-${it.id}`, `PINS (${pins.length})`,
+      if (pins.length) above.push(section(t, `dt-sec-pins-${it.id}`, `PINS (${pins.length})`,
         pins.map((p) => subRow(t, rowModel("pin", p, ctx), (cx) => this.retarget("pin", p.id, here, cx)))));
       const brs = st.branchesFor(it.id);
-      if (brs.length) out.push(section(t, `dt-sec-brs-${it.id}`, "BRANCHES",
+      if (brs.length) above.push(section(t, `dt-sec-brs-${it.id}`, "BRANCHES",
         brs.map((b) => subRow(t, rowModel("branch", b, ctx), (cx) => this.retarget("branch", b.id, here, cx)))));
-      if (this.confirm?.itemId === it.id && !closed && s) out.push(confirmBox(this, t, st, s, it));
+      if (this.confirm?.itemId === it.id && !closed && s) above.push(confirmBox(this, t, st, s, it));
     }
     const res = this.resultLines(t, st, s, it, ctx);
-    if (res.length) out.push(section(t, `dt-sec-res-${it.id}`, "RESULT", res));
+    if (res.length) below.push(section(t, `dt-sec-res-${it.id}`, "RESULT", res));
     if (ask) {
       const kids = st.itemsOf(it.anchor?.sessionId).filter((c) => c.parentId === it.id && isHuman(c));
-      if (kids.length) out.push(section(t, `dt-sec-kids-${it.id}`, "QUESTIONS ABOUT IT",
+      if (kids.length) below.push(section(t, `dt-sec-kids-${it.id}`, "QUESTIONS ABOUT IT",
         kids.map((c) => subRow(t, rowModel("question", c, ctx), (cx) => this.retarget("question", c.id, here, cx)))));
+      if (quoteSec) below.push(quoteSec);
     }
     const gone = !archived && s && this.terminalGone(st, s), rs = s?.resume;
-    if (gone && rs?.state === "failed") out.push(div().text_size(t.ts(10.5)).text_color(t.blocked).child(`Resume did not start: ${rs.error ?? "unknown error"}`));
-    if (gone && rs?.state === "launched" && rs.note) out.push(div().text_size(t.ts(10.5)).text_color(t.dim).child(`Resumed in ${P(rs.terminal)}: ${rs.note}`));
-    out.push(div().id(`foot-${it.id}`).text_size(t.ts(10)).text_color(t.dim)
+    if (gone && rs?.state === "failed") below.push(div().id(`dt-resume-failed-${it.id}`).text_size(t.ts(10.5)).text_color(t.blocked).child(`Resume did not start: ${rs.error ?? "unknown error"}`));
+    if (gone && rs?.state === "launched" && rs.note) below.push(div().id(`dt-resume-note-${it.id}`).text_size(t.ts(10.5)).text_color(t.dim).child(`Resumed in ${P(rs.terminal)}: ${rs.note}`));
+    below.push(div().id(`foot-${it.id}`).text_size(t.ts(10)).text_color(t.dim)
       .child([H(it), originWords(it.origin), ask ? levelOf(it) : null, `turn ${it.anchor?.turn ?? "?"}`, it.anchor?.hash ? `#${it.anchor.hash}` : null].filter(Boolean).join(" · ")));
-    return out;
+    if (!box) return [...above, ...below];
+    // The answer box between two measured groups (the column's direct children: [above,] ANSWER, below).
+    const id = it.id, m = this.fitOf(id);
+    this.fit.id = id;
+    if (!above.length) m.above = 0;
+    m.gaps = LEFT_GAP * (above.length ? 2 : 1);
+    const group = (key, parts) => v_flex().id(`dt-${key}-${id}`).w_full().flex_none().gap(LEFT_GAP).children(parts)
+      .on_size_change((size, cx) => this.noteFit(key, id, size?.height, cx));
+    return [above.length ? group("above", above) : null, box, group("below", below)].filter(Boolean);
+  }
+
+  // The ANSWER section of an open ask: the box at the frame's height (frameFor: fitAnswer's; its least until
+  // the first measures, and always in one column), the section reporting its own height (noteFit "ans").
+  // Records the frame drawn (its `drawn`), so the section's report less it is its chrome.
+  answerSection(t, st, s, it) {
+    const scale = textScaleOf(this.cfg), id = it.id;
+    const frame = this.frameFor(id, scale);
+    this.fitOf(id).drawn = frame;
+    const below = [attachRow(this, t, it, this.attachRowFor(it), { busy: this.attachBusy() })];
+    return section(t, `dt-sec-ans-${id}`, "ANSWER", answerBox(this, t, st, s, it, { frame, below, onFrame: () => this.focusAnswer(id),
+      onDrop: (ev, cx) => this.dropOnAnswer(id, ev, cx) }))
+      .on_size_change((size, cx) => this.noteFit("ans", id, size?.height, cx));
   }
 
   // A question's about lines: when it was parked and anchors, what it is about, its turn's fate.

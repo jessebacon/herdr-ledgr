@@ -27,6 +27,8 @@
 // records are FIXTURE_COLD[DEMO_COLD_FILE], the cold file reader.js wantCold reads in the demo instead of
 // ledgr-data/cold/. So the session menu ends with "OLDER SESSIONS (1)", and the session opens: its file read,
 // its lanes as usual (a blocking ask, a decide with options, a suggestion, a parked question, one closed).
+// An ask's summary (2026-11-23): A15 (a short markdown list) and A8 (a paragraph with a file path) carry one
+// (DEMO_SUMMARY_A15, DEMO_SUMMARY_A8), so the dialog shows WHAT TO DO; every other ask has none.
 // Drawn when props().demo, FORCE_DEMO (config.js) or `herdr-app do ledgr.demo`. Never saved,
 // never published to shared(), never written to ledgr-data.
 import { passageHash } from "./store.js";
@@ -89,6 +91,16 @@ Choose the backfill window: this weekend, or next weekend after the quarter clos
 
 You may also want to archive the old nightly CSVs in \`reports/out/\` at some point.`;
 
+// The two demo asks with a summary (2026-11-23: the dialog's WHAT TO DO), as store.js cleanSummary keeps them:
+// A15 with a short markdown list, A8 a paragraph naming a file. Every other demo ask has none (the fallback).
+export const DEMO_SUMMARY_A15 = `Pick the night I switch production to the new pool, so I can schedule it. Reply with one of the two options.
+
+- **Thursday night** (I recommend it): I re-run the load test against the new pool on Wednesday first, and switch only if it passes.
+- **Tonight, after the deploy:** I switch at 23:00 with no test run against the new pool before.
+
+Either way the old pool config stays in place, disabled, so the switch can be rolled back in a few minutes.`;
+export const DEMO_SUMMARY_A8 = "Open `reports/pool-settings.md` (one row per service: its pool mode and connection limit) and tell me which services, if any, are missing from it. I built it from the services that connect to `orders` today; one that connects only for the nightly jobs may not be in it. \"None missing\" is a full answer.";
+
 export const FIXTURE_TURNS = { [`${SID}:17`]: T17, [`${SID}:12`]: T12, [`${SID}:14`]: T14, [`${SIDB}:1`]: TB1, [`${SID2}:4`]: T4_CODEX, [`${SID}:6`]: T6, [`${SIDC}:6`]: TC6 };
 
 export function demoData(now = Date.now()) {
@@ -118,12 +130,12 @@ export function demoData(now = Date.now()) {
   ask({ handle: "A6", turn: 17, kind: "do", text: "Run the load test after tonight's deploy", level: "blocking", blocking: true, seq: 1,
     quote: "Run the load test after tonight's deploy. I am waiting on that result", ago: 3 });
   ask({ handle: "A15", turn: 17, kind: "decide", text: "Choose the cutover night for the pool change", level: "blocking", blocking: true, seq: 1.5,
-    options: ["Tonight, after the deploy", "Thursday night"], recommended: "Thursday night",
+    options: ["Tonight, after the deploy", "Thursday night"], recommended: "Thursday night", summary: DEMO_SUMMARY_A15,
     quote: "Choose the cutover night for the pool change: tonight after the deploy, or Thursday. I cannot schedule it until you pick one.", ago: 3 });
   ask({ handle: "A7", turn: 17, kind: "confirm", text: "OK to drop the orders_legacy view?", status: "answered", answer: "Yes, drop it.", seq: 2,
     quote: "OK to drop the `orders_legacy` view?", ago: 3 });
   ask({ handle: "A8", turn: 17, kind: "review", text: "Review the pool settings export in reports/pool-settings.md for missing services", origin: "extract_model", seq: 3,
-    quote: "Review the pool settings export I wrote to `reports/pool-settings.md`", ago: 3 });
+    summary: DEMO_SUMMARY_A8, quote: "Review the pool settings export I wrote to `reports/pool-settings.md`", ago: 3 });
   ask({ handle: "A10", turn: 17, kind: "decide", seq: 5, ago: 3,
     text: "Decide whether to run the whole cutover tonight (schema change and the 8443 gateway repointing together) or split it across two nights so the nightly reports can be checked in between",
     options: ["Tonight, all at once", "Split it across two nights so the nightly reports can be re-run and checked between the schema change and the gateway repointing"],

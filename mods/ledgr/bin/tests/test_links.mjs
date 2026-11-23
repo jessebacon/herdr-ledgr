@@ -11,7 +11,10 @@
 //   openerArgv per preset (open's guards: an app revealed, a script as text, a folder in Finder) and for a
 //     command of your own ({path}, {line}, {col}; a shell, a terminal, the file as the program refused);
 //   opener.js: statAt on a file, a folder and nothing; openPath runs one exec with the preset's argv and the
-//     5 s limit, and none for a path that is not there; revealPath is open -R; gitToplevel reads git's answer.
+//     5 s limit, and none for a path that is not there; revealPath is open -R; gitToplevel reads git's answer;
+//     clipboardImage (2026-11-23): the pinned call's exact argv and limit, each refusal of its path (nothing
+//     run), and each answer mapped (written, converted, no image, too large, another error, a timeout, a
+//     runner that did not start).
 //   node tests/test_links.mjs
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -25,13 +28,14 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ledgr-links."));
 let checks = 0;
 const A = new Proxy(assert, { get: (t, k) => (...a) => { checks++; return t[k](...a); } });
 
-for (const f of ["links.js", "opener.js"]) fs.copyFileSync(path.join(MOD, f), path.join(dir, f));
+for (const f of ["links.js", "opener.js", "detailing.js"]) fs.copyFileSync(path.join(MOD, f), path.join(dir, f));
 fs.writeFileSync(path.join(dir, "package.json"), '{"type":"module"}');
 fs.mkdirSync(path.join(dir, "node_modules/herdr"), { recursive: true });
 fs.writeFileSync(path.join(dir, "node_modules/herdr/package.json"), '{"name":"herdr","type":"module","main":"index.js"}');
 fs.writeFileSync(path.join(dir, "node_modules/herdr/index.js"), `
 const H = () => (globalThis.__herdr ??= { execs: [], execFn: null });
 export const exec = async (cmd, args, o) => { H().execs.push([cmd, args ?? [], o ?? null]); return H().execFn ? H().execFn(cmd, args ?? [], o) : { code: 0, stdout: "", stderr: "" }; };
+export const appHome = () => globalThis.__appHome ?? "/Users/u/.config/herdr-app";
 `);
 const H = () => globalThis.__herdr;
 
@@ -283,13 +287,59 @@ try {
   H().execFn = () => { throw new Error("timed out"); }; A.equal(await O.gitToplevel(W), null);
   A.equal(await O.gitToplevel("rel"), null);
 
+  // ── clipboardImage (2026-11-23): the owner's pinned exception ───────────────────────────────────────
+  const AT = "/Users/u/.config/herdr-app/ledgr-data/attachments", OUT = `${AT}/20261123-150102-a1b2c3.png`;
+  A.equal(O.clipDir(), AT, "clipDir: ledgr-data/attachments in the app's folder");
+  A.equal(O.CLIP_MAX, 8 * 1024 * 1024, "8 MiB, a drop's limit");
+  H().execs = []; H().execFn = () => ({ code: 0, stdout: '{"how":"png","bytes":352}\n', stderr: "" });
+  A.deepEqual(await O.clipboardImage(OUT), { ok: true, bytes: 352, converted: false }, "written: its bytes, not converted");
+  A.deepEqual(H().execs, [["/usr/bin/osascript", ["-l", "JavaScript", "-e", O.CLIP_SCRIPT, OUT, String(8 * 1024 * 1024)], { timeout: 5000 }]],
+    "one exec: the absolute runner, JavaScript, the fixed script, the path and the limit, nothing more (no pasteboard name), the 5 s limit");
+  H().execFn = () => ({ code: 0, stdout: '{"how":"converted","bytes":191}', stderr: "" });
+  A.deepEqual(await O.clipboardImage(OUT), { ok: true, bytes: 191, converted: true }, "a TIFF made a PNG: converted");
+  H().execFn = () => ({ code: 1, stdout: "", stderr: "execution error: Error: Error: no image on the clipboard (-2700)\n" });
+  A.deepEqual(await O.clipboardImage(OUT), { ok: false, none: true }, "exit 1, (-2700): no image on the clipboard");
+  H().execFn = () => ({ code: 1, stdout: "", stderr: "execution error: Error: Error: too large: 9437184 bytes (-2700)\n" });
+  A.deepEqual(await O.clipboardImage(OUT), { ok: false, large: true, bytes: 9437184 }, "the script's too-large refusal");
+  H().execFn = () => ({ code: 1, stdout: "", stderr: "execution error: Error: Error: the file could not be written (it is there already, or its folder is not) (-2700)\n" });
+  A.deepEqual(await O.clipboardImage(OUT), { ok: false, why: "the file could not be written (it is there already, or its folder is not)" }, "another error: its words");
+  H().execFn = () => ({ code: 1, stdout: "", stderr: "" });
+  A.deepEqual(await O.clipboardImage(OUT), { ok: false, why: "the clipboard reader exited with 1" }, "no words: the exit code");
+  H().execFn = () => ({ code: 0, stdout: "not json", stderr: "" });
+  A.deepEqual(await O.clipboardImage(OUT), { ok: false, why: "the clipboard reader's answer could not be read" }, "exit 0 without its JSON: not written as far as anyone knows");
+  H().execFn = () => { throw new Error("command timed out after 5000 ms"); };
+  A.deepEqual(await O.clipboardImage(OUT), { ok: false, why: "the clipboard reader did not finish within 5 s" }, "a timeout");
+  H().execFn = () => { throw new Error("No such file or directory (os error 2)"); };
+  A.deepEqual(await O.clipboardImage(OUT), { ok: false, why: "macOS's script runner did not start" }, "the runner missing");
+  H().execFn = null; H().execs = [];
+  const NOT = "not an attachment's name directly in ledgr-data/attachments/";
+  for (const [p, why] of [["rel/x.png", "not an absolute path"], [`${AT}/a\nb.png`, "a line break or NUL in the path"], [`${AT}/a\0.png`, "a line break or NUL in the path"],
+    [`${AT}/20261123-150102-a1b2c3.jpg`, "not a .png file"], [`${AT}/sub/20261123-150102-a1b2c3.png`, NOT], [`${AT}/../20261123-150102-a1b2c3.png`, NOT],
+    ["/tmp/20261123-150102-a1b2c3.png", NOT], [`${AT}/X Y.png`, NOT], [`${AT}/.png`, NOT], [`${AT}/x.png`, NOT, "any lower-case name is no attachment's (review 9.3)"],
+    [`${AT}/20261123-150102-a1b2c3-x.png`, NOT], [`${AT}/20261123-150102-A1B2C3.png`, NOT], [`${AT}//20261123-150102-a1b2c3.png`, NOT],
+    [null, "not an absolute path"]]) {
+    A.deepEqual(await O.clipboardImage(p), { ok: false, refused: true, why }, `refused: ${JSON.stringify(p)}`);
+  }
+  A.deepEqual(H().execs, [], "a refused path runs nothing");
+  // Herdr's app folder, normalised one way (detailing.js appRoot, review 9.4): a trailing slash or a doubled one
+  // changes nothing; "/", "" or a relative one makes no folder known, so every path is refused.
+  globalThis.__appHome = "/Users/u/.config/herdr-app/"; A.equal(O.clipDir(), AT, "a trailing slash: the same folder");
+  A.equal(O.clipRefusal(OUT), null, "...and the same paths taken");
+  globalThis.__appHome = "/Users//u/.config/herdr-app//"; A.equal(O.clipDir(), AT, "doubled slashes: the same folder");
+  for (const h of ["/", "", "rel/app", "/a/../b"]) {
+    globalThis.__appHome = h; A.equal(O.clipDir(), null, `app folder ${JSON.stringify(h)}: none known`);
+    A.equal(O.clipRefusal("/ledgr-data/attachments/20261123-150102-a1b2c3.png"), "Herdr's app folder is not known", `...every path refused (${JSON.stringify(h)})`);
+  }
+  H().execs = []; globalThis.__appHome = "/"; A.equal((await O.clipboardImage("/ledgr-data/attachments/20261123-150102-a1b2c3.png")).refused, true); A.deepEqual(H().execs, [], "nothing run");
+  delete globalThis.__appHome;
+
   // As text: links.js imports nothing; opener.js imports exec from herdr and links.js only.
   const ls = fs.readFileSync(path.join(MOD, "links.js"), "utf8"), os_ = fs.readFileSync(path.join(MOD, "opener.js"), "utf8");
   A.ok(!/^import /m.test(ls), "links.js imports nothing (it loads in Node as in Herdr)");
-  A.deepEqual([...os_.matchAll(/^import .* from "([^"]+)";$/gm)].map((m) => m[1]), ["herdr", "fs/promises", "./links.js"], "opener.js imports herdr, fs/promises, links.js");
+  A.deepEqual([...os_.matchAll(/^import .* from "([^"]+)";$/gm)].map((m) => m[1]), ["herdr", "fs/promises", "./links.js", "./detailing.js"], "opener.js imports herdr, fs/promises, links.js, detailing.js (appRoot)");
   A.match(os_, /exec\("realpath", \[path\], \{ timeout: OPEN_TIMEOUT \}\)/, "opener.js: realpath(1) where fs has no realpath (Herdr), with the 5 s limit");
 
-  console.log(`OK: links, ${checks} checks (findPaths on ${YES.length} paths and ${NO.length} false positives, fences, indented code, code spans, links and URLs; linkify round trips; parseLink; resolvePath; links.editor; openerArgv per preset and custom, the open guards; opener.js with a recording exec), 0 failure(s)`);
+  console.log(`OK: links, ${checks} checks (findPaths on ${YES.length} paths and ${NO.length} false positives, fences, indented code, code spans, links and URLs; linkify round trips; parseLink; resolvePath; links.editor; openerArgv per preset and custom, the open guards; opener.js with a recording exec, clipboardImage's pinned call, its refusals and answers), 0 failure(s)`);
 } catch (e) {
   console.log(String(e?.stack ?? e).split("\n").slice(0, 8).join("\n"));
   console.log(`FAIL: links, after ${checks} checks`);

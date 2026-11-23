@@ -61,6 +61,15 @@ For each ask:
   exactly. Never the whole message, and never the summary of work around the ask.
 - level: blocking, needed or optional, as above.
 - options and recommended: only for decide; recommended is null unless the message recommends one.
+- summary: what the user must do, precisely, so they can act on it without the message, written from
+  the message alone. Begin with the request itself, addressed to the user, and the form of the answer
+  (a yes or no, one of the options, a value, a step to take); then what the agent says it has already
+  done, what it says it will do with the answer, its recommendation and reason if it gives them, and
+  anything it says cannot be undone. When the ask points at a list or a table in the message
+  ("confirm the changes in the table"), name each thing a yes approves. Never add a fact the message
+  does not state; where the message leaves unclear what exactly is wanted, say what is unclear instead
+  of guessing. Plain sentences, or a short markdown list for several things, at most 800 characters.
+  One sentence is enough for an optional ask.
 - repeat_of: when the ask is the same request as an item listed under OPEN ASKS or RECENTLY
   DISMISSED ASKS (even if worded differently), that item's id, for example "A5"; else null.
   Use only ids from those lists. A dismissed item that the message raises again is still listed,

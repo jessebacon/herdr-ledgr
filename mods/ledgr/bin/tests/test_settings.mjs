@@ -137,6 +137,7 @@ export class View {}
 export const div = () => el("div");
 export const svg = (src) => el("svg", { _src: src });
 export const img = (src) => el("img", { _src: src });
+export const image = (src) => el("image", { _src: src });
 `);
 nm("gpui-base", `${UI_SRC}
 export const v_flex = () => el("v_flex");

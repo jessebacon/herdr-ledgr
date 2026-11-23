@@ -773,6 +773,10 @@ three requests. Line numbers as of this build.
 | The landing parser: an indented line after an `A<n>:` line is that answer going on (joined with `\n`), never another `A<n>:`, a marker or a fence; an unindented one still joins with a space | `mods/ledgr/bin/lib/ledgr_landing.py:90` (`_parse`), `:119` `_indented`, `:132` (`_end`) |
 | A draft is cut at `LIMITS.answer` (4,000), not `LIMITS.text` (400): a long answer kept in `store.json` survives a restart | `mods/ledgr/config.js:58`, `mods/ledgr/store.js:1118` |
 
+Since 2026-11-23 the box is no longer 2 rows growing to 10 with Paste answer beside it: it has fixed rows
+fitted to the left column's free height (at least eight, no `set_auto_grow`), and Paste answer sits under it
+(section 19).
+
 Why indent rather than keep blank lines: `_end` closes a sheet at a blank line no `A<n>:` line
 follows (Jesse's prompt of 2026-11-07, where typed text ran into an answer), and that rule stays. The
 recorded `answer` is squashed by the store (`on_answers_landed`), so line breaks live in the pasted
@@ -1139,3 +1143,252 @@ Python and JavaScript agreeing) are the writer's side (`BUILD-NOTES-mod.md` 20).
    for …", then the dialog on that item.
 7. The fault view, in a throwaway session (`Retention.md` 10.12 step 6): its words, the kept events, the three
    buttons; with a copy of another file of that session in `cold/`, its name in the words.
+
+## 19. An ask's summary and the answer box as the main region (2026-11-23)
+
+Jesse, on Ask 42 in the dialog: the answer box was two rows high and about 630 px wide with Paste answer
+beside it and most of the left column empty below, and nothing said precisely what he was asked to do (a
+five-row table in the message). Built by the dialog's builder of a three-builder change (contract: a new
+optional `summary` on an agent ask, at most 1,000 characters, markdown, line breaks kept; the store keeps it
+through `store.js` `cleanSummary`, `BUILD-NOTES-mod.md`; the producers write it, `BUILD-NOTES-hooks.md`).
+This half only reads `item.summary`. Line numbers are left out.
+
+**The left column of an ask**, top to bottom (`detail.js` `itemParts`):
+
+| Part | What | Notes |
+|---|---|---|
+| ARCHIVED | as before | an archived record only |
+| TEXT | as before | |
+| WHAT TO DO | the summary (`listing.js` `summaryOf`: an agent ask's `summary`, trimmed, else ""), `readable` in markdown mode with the dialog's link handler (paths and web links as in the text: it is the agent's text), behind a 2 px accent edge (`dt-todo-edge-<id>`), the title in accent, a Copy chip (`dt-cp-todo-<id>`, "What to do copied (N characters); nothing was pasted.") | none: no section, no placeholder; shown on a closed and an archived ask too; never on a question (`summaryOf` reads agent asks only) |
+| OPTIONS | as before | a decide with options |
+| ANSWER | `answerSection` → `views.js` `answerBox(host, t, st, s, it, o)`: the frame (`dt-answer-frame-<id>`, the column's full width, `.h(o.frame)`, `overflow_hidden`, a click on it focuses the textarea unless it has the keyboard: `focusAnswer`), the `Textarea` inside at `.h(frame − 12)`, then `o.below` (empty: the second round's attachments row goes here), then the row `dt-answer-row-<id>`: the ⌘Enter hint (`flex_1`) and Paste answer at its right | open, not archived, its session known (as before) |
+| RESULT, QUESTIONS ABOUT IT | as before, now after the answer | |
+| QUOTE | after them, dim, italic, 12 px (was muted, above OPTIONS); its Copy chip kept | a question keeps its quote where it was (TEXT, QUOTE, ABOUT, PINS, BRANCHES, the confirmation, RESULT) |
+| resume lines, foot | as before (the foot is the provenance line: handle, origin, level, turn, hash); the two resume lines got ids (`dt-resume-failed-<id>`, `dt-resume-note-<id>`) | |
+
+With an answer box the column's direct children are three: `dt-above-<id>` (ARCHIVED to OPTIONS; left out
+when empty), `dt-sec-ans-<id>`, `dt-below-<id>` (RESULT to the foot), each a `v_flex` with the column's gap
+(`LEFT_GAP` 12) that reports its height. Without one (closed, archived, no session) the parts stay flat, in
+the same order. In one column the message's blocks follow the three, and `scroll_to_item` still finds the
+passage (its index counts the three).
+
+**Sizing the box** (the pixel route: Herdr's typings say a Textarea is sized by `rows`, `set_auto_grow` or
+`.h(...)`, and the app's own feedback form uses `rows` with `.h(130)`; `.h_full()` or `.flex_1()` on a
+Textarea is shown nowhere, so it is not used):
+
+| What | Where |
+|---|---|
+| `ANSWER_BOX` `{minRows 8, floorRows 3, shortShare 0.6, size 12.5, rowEm 1.7, frame 12, inner 8, margin 2, hysteresis 4}`; a row is 12.5 px × the text scale × 1.7 (generous, so the rows the textarea is told never overflow the height it is given) | `detailing.js` |
+| `answerMinFrame(scale, col)`: eight rows plus the frame's 12 and the textarea's own 8 (190 px at scale 1, 292 at 1.6, 156 at 0.8); in a column where that is over 0.6 of its height, 0.6 of it, never under three rows | `detailing.js` |
+| `answerFrame({col, used, scale, current})`: the column's free height less the margin, at least the minimum; the height drawn now kept when the change is under 4 px; nothing measured, the minimum | `detailing.js` |
+| `answerRows(frame, scale)`: the rows that fill a frame, at least three (the TextareaState is made with them and told them again on every fit) | `detailing.js` |
+| What is measured: `dt-left`'s height (`on_size_change`, `noteFit("col")`), the two groups (`"above"`, `"below"`) and the ANSWER section (`"ans"`: its height less the frame drawn, `fit.drawn`, is its chrome: title, gaps, the hint row and whatever round 2 puts under the box) | `detail.js` `noteFit`, `this.fit` `{col, id, above, below, chrome, gaps, drawn}` |
+| The fit: once all four are in for the item drawn, `used` = 2 × `LEFT_PY` + above + below + chrome + the gaps between the groups; `frameH` set, `set_rows` told, a render; a report for an item no longer drawn is dropped; a new item's measures start again (its frame keeps the last height meanwhile) | `detail.js` `fitAnswer` (a handler, never render) |
+| The TextareaState: `rows` from the frame drawn (eight at first), no `set_auto_grow` (it would fight the given height); everything else as 16 (drafts, the cut, Enter, ⌘Enter, `unbreak`, `pasteSheet`) | `detail.js` `makeAnswer` |
+
+Why measured groups rather than a flex-grown box: a box that grows by flex inside a scrolling column sizes
+by its content, so it would never shrink when the window does or the text above grows; the groups' heights do
+not depend on the box, so the fit converges in one more frame and stays (the margin leaves the column 2 px
+short of its viewport, so filling it never shows a scrollbar, whatever the scrollbar's width does to wrapping).
+
+**The list.** `listing.js` `tipOf` gains the summary's first 300 characters, line breaks kept, after "What to
+do:", after the text and the quote and before "Your answer, not sent yet: …"; on archived rows too. The panel
+draws `m.tip` as before (no change in `panel.js`).
+
+**Tests.** `test_detail.mjs` (1,416, was 1,345): the TextareaState at eight rows and no auto-grow; the three
+parts and the order in each group; WHAT TO DO's markdown, its path linkified, selectable, a link handler, Copy;
+the frame at 190 and the textarea at 178 before any measure; Paste answer in the row under the box, not beside
+it; the frame's click focusing the box once; the fit (nothing on three measures of four; 280 px from a 700 px
+column; the same chrome after the redraw, no notify; under the hysteresis; taller, shorter, the minimum; a
+report for another item; a 160 px column; scale 1.6 at 1,000, 500 and 420 px); a step keeping the frame and
+making the next box with its rows; one column; an ask without a summary; a closed ask (its summary, no
+groups, RESULT before QUOTE); a question's order and no summary; an archived ask's summary. The mock records
+`.h(...)` (`_hpx`) and `set_rows` (`_rows`). `test_list.mjs` (518, was 506): the tooltip's line, its cut,
+its place before the answer, blank and question cases, an archived row, `summaryOf`.
+
+**Not tried live** (nobody opened UI during this build):
+
+1. That the Textarea honours `.h(px)` given after `rows` (the feedback form suggests so) and fills the frame;
+   if it is sized by its rows instead, `set_rows` from `fitAnswer` should bring it close, and the frame's click
+   focuses it from the space left.
+2. That `on_size_change` reports on `dt-left`, the two groups and the section (the typings say div, h_flex and
+   v_flex with a stable id), that it fires once per changed size, and that the handlers of one layout all run
+   before the render they cause (a wrong order would cost one more frame, not a wrong size).
+3. That `set_rows` from a size handler takes effect without a flicker, and that a click inside the text does
+   not move the caret when the frame's click then runs (it calls `focus()` only when the box has not reported
+   focus).
+4. The wheel over a tall box: whether it scrolls the column or only the box (Detail.md 2.2 kept scroll areas
+   out of the columns for this reason; the box only scrolls when the column is at its minimum or the answer is
+   long).
+5. How it reads: the accent edge and title of WHAT TO DO, the dim quote at the bottom, the hint wrapping beside
+   Paste answer at 0.8 and 1.6, and the dialog at its 420 × 320 floor.
+
+### 19.1 Review fixes (2026-11-23)
+
+1. 7.7, narrow dialog: under 760 px the message and its marked passage share the scrolling column, so the box
+   no longer fills it: in one column it is `answerMinFrame` (eight rows), always (`detail.js` `frameFor`,
+   `fitAnswer`); the root's width report refits when the column count flips (`noteWidth`). Test: one column,
+   every measure in, the frame stays 190; wider, it fills; narrow again, 190 at once.
+2. 7.8, hysteresis overshoot: `answerFrame` keeps the frame drawn only while it still fits (`cur <= want`) and is
+   under 4 px short; a column 1 px shorter shrinks it at once. Test: 701 keeps 280, 699 gives 279; the review's
+   600/200/398 then 597 gives 395.
+3. 7.9, measures by item id: `this.fit` is `{col, id, by: Map(id → {above, below, chrome, gaps, drawn, frame})}`
+   (`fitOf`, the newest 32 kept); a step back to an ask draws it at its own fitted frame at once and makes its
+   box with those rows, with no report from Herdr; `fitAnswer` redraws only when the frame to draw differs from
+   the one drawn (`drawn`), and tells `set_rows` only when the rows change (`rowsTold`).
+
+## 20. An image in an answer (2026-11-23)
+
+Jesse: the answer "needs to accept a photo attachment (from clipboard)". Then, on the clipboard route: "Yes,
+allow osascript on ⌘V in the answer box with the pinned exception."
+
+**The model.** No spool event, no store field, no writer change: an attached image is a file under
+`ledgr-data/attachments/` named `<yyyymmdd>-<hhmmss>-<rand6>.<ext>` (png, jpg, jpeg, gif, webp; lower case, no
+space or bracket for the hook's `[A3]` scan) and one line of the answer's draft, `attached image (read this file):
+<absolute path>`, which goes through `typeDraft`, the 4,000 cut, the sheet (`answerLines` indents it under the
+answer) and the landing parser unchanged. The agent reads the file from the path. At most 4 images to an answer,
+8 MiB each. Nothing under `attachments/` is ever deleted or written over by ledgr (a name is taken only when
+nothing is there).
+
+| What | Where |
+|---|---|
+| The name, the checks, the line, finding and removing lines, the app-relative path for `image()`, sizes in words; `prepareSlot` (the folder made, a free name), `copyIn` (a dropped file: stat where fs has it, else read and measured; `fs.writeFile` of the bytes; read back and compared by length; bounded 10 s by `spool.js` `within`), `fileInfo` (size and header), `imageDims`, `thumbSize`, `cutDraft` (20.1) | `mods/ledgr/attach.js` (new; not an engine file; only `detail.js` imports it) |
+| The drop: `on_drop` on the answer's frame → `dropOnAnswer`, each path in turn through `attachDropped` (by its name, then `attachRoom`, then `copyIn`) | `views.js` `answerBox` (`o.onDrop`), `detail.js` |
+| The clipboard: the textarea's `paste_other` (⌘V found no text) and the row's Paste image → `pasteImage`: the demo runs nothing; one at a time (`this.attaching`, shared with the drop); `attachRoom` (an open ask, under four, room in 4,000) before anything runs; `prepareSlot("png")`; `opener.js` `clipboardImage(path)` | `detail.js` `makeAnswer` (one handler, no logic), `pasteImage` |
+| The seam both routes end in: `attachWritten(id, path, cx, {size, how})`: a file already written directly in `attachments/` (`isOurs`), checked again (open, under four, room), its line at the end of the draft through `setDraft`, the status words | `detail.js` |
+| The row under the box (`o.below`): a chip per line the draft holds (thumbnail through `image("ledgr-data/attachments/<name>")`, both sides set, fitted in 112 × 72 from the PNG's or JPEG's header, when `ui.attachmentThumbs` is not false, the file is at most 2 MiB and its header gives at most 4,096 a side (20.1); its name, its size, Reveal (`revealLink`'s open -R), Remove (the line out; the file stays)), then Paste image ("Attaching…" while one runs). A thumbnail `image()` refuses to make is left out (`views.js` `thumb`, try/catch; `image` imported by name) | `views.js` `attachRow`, `thumb`; `detail.js` `attachRowFor`, `attachInfoOf` (size and header read once from a timer) |
+| The pinned call: `clipboardImage(outPath)` refuses (runs nothing) a path not absolute, with a line break or NUL, not `.png`, or not directly in `clipDir()` (`<appHome>/ledgr-data/attachments`); then `exec("/usr/bin/osascript", ["-l", "JavaScript", "-e", CLIP_SCRIPT, outPath, String(CLIP_MAX)], { timeout: OPEN_TIMEOUT })`; `clipResult` maps the answer: written (bytes, converted), no image, too large, or why; a timeout and a runner that did not start in words; never throws | `opener.js` |
+| `CLIP_SCRIPT` (JXA): the PNG flavour copied as is, else any image the pasteboard holds converted to PNG; no image, throws; over `argv[1]` bytes, throws before writing; its one write creates the file and never writes over one (`writeToFileOptionsError` with `NSDataWritingWithoutOverwriting`, 20.1); it makes no folder (`prepareSlot` does, from `attach.js`); `argv[2]`, a private pasteboard's name, only in `tests/test_clip.mjs` | `opener.js` |
+| Words: `ATTACH_WORDS` (each refusal names the file and why); the hint under the box; the footer's `⌘V attach an image` | `words.js`, `views.js` |
+| Rules: 1 (the literal once, as the pinned call), 13 (five shapes; the script's words; `clipRefusal` before the call; `clipboardImage` only in `pasteImage`; opener.js takes `exec` and `appHome`), 16 (only `attach.js` writes or makes under `attachments/`, nothing removes there, opener.js writes nothing, only `detail.js` imports `attach.js`, `pasteImage`'s order, `makeAnswer`'s one handler); `attach.js` in `NOT_ENGINE` | `bin/tests/test_no_keystrokes.py` |
+
+**Tests.** `test_detail.mjs` (1,546): `attach.js`'s pure parts; the sheet carrying the line; live (a scratch
+`ledgr-data`): a drop copied byte for byte, its line in the draft and the box, the chip and its thumbnail's
+app-relative path, thumbnails off and over 2 MiB, a size read once; not an image, over 8 MiB, empty, unreadable,
+three more in one drop, the fifth, no room (none writes a file); busy; Remove (the file stays); Reveal (open
+-R); the clipboard with a stubbed exec: the exact argv and limit, the PNG named, "converted to PNG", Paste image,
+no image, too large, a write error, a timeout, the fifth and no room (nothing run), the seam's refusals; the demo
+(nothing copied or run). `test_links.mjs` (459): `clipboardImage`'s argv, each answer mapped, each refused path
+(nothing run). `test_clip.mjs` (new, 32, in `test-detail.sh`): the shipped `CLIP_SCRIPT` run by
+`/usr/bin/osascript` on private named pasteboards it seeds and releases (a PNG byte for byte, a TIFF converted to
+a 16 × 16 PNG, nothing on it, over the limit, an odd path, no folder made, `clipResult` on each real answer), the
+general pasteboard's change count unchanged; skipped off macOS. `test_no_keystrokes.py` (1,160; each new rule
+checked against a mutation: a `clearContents`, an `Application(`, a `removeItem`, a fourth argument, the refusal
+taken out, a second runner literal, an unlink, a write from views.js, a direct call from `paste_other`, a second
+importer).
+
+**Not tried live.**
+
+1. Whether `paste_other` fires for a screenshot copied with ⌃⇧⌘4 (an image and no text), and what a browser's
+   Copy Image or a Finder copy (text and an image) gives: Paste image is the way in for those.
+2. Whether macOS asks for permission when a process Herdr started reads the pasteboard (a paste-permission
+   prompt), and whether the first run of the runner is slow.
+3. Whether ⌘V reaches the textarea while the dialog holds the keyboard (the box's own ⌘V, not a `mod:ledgr`
+   binding: there is none).
+4. Whether `on_drop` on the frame gets a drop made on the textarea inside it, and whether Herdr's `fs.readFile`
+   reads a dropped file outside the home folder (it says "could not be read" if not).
+5. Whether `image("ledgr-data/attachments/<name>")` draws (the path relative to the app's folder), at 72 px high
+   with its width following, and what the host does with a picture it cannot load.
+6. A paste or drop cut short by the dialog closing leaves its file unnamed in `attachments/` (nothing deletes it).
+
+### 20.1 The second review's fixes (2026-11-23)
+
+The review edited copies of the mod so the script ran a shell, cleared the clipboard and reached the network,
+and in another pressed a key through System Events behind a `'a//b'` string, and a third ran `pasteImage` on every
+resize: the suite said OK each time. Now it fails each (below).
+
+1. 9.1, the pin. `CLIP_SCRIPT` is pinned by identity: `test_no_keystrokes.py` keeps a full copy
+   (`CLIP_SCRIPT_PINNED`) and its sha256 (`CLIP_SHA256`, `9a709cc8f335…`), takes the script from `opener.js` as it
+   is on disk, and requires it equal character for character, a plain template (no `${`, no backslash); the word
+   checks stay as a second line (now also `setPropertyList`, `prepareForNewContents`, `releaseGlobally`, `NSURL`,
+   `ContentsOfURL`, `system(`, an `ObjC.import` other than AppKit). The pinned call and the count of the literal
+   `/usr/bin/osascript` (once in the whole mod, comments included) are checked on the raw text; opener.js's comment
+   no longer names the runner's path. `strip_comments` respects literals: JavaScript by a small lexer (strings,
+   templates with nested `${…}`, regex literals where one may start: after an operator, a bracket, a comma, a
+   keyword or the start; after an identifier, a number, `)` or `]` a `/` is a division; a regex never spans a
+   line), Python by `tokenize` (COMMENT tokens only), shell as before (a `#` after whitespace inside a quoted shell
+   string is still cut). Self-checks of the stripper run first. What it exposed: the old block-comment regex had
+   matched a `/*` inside a line comment (`turns/<sid>/*.md`, `terminals/*.json`, `adapters/*/adapter.json`) and run
+   to the next `*/`, hiding 56 lines of `capture.js` (its imports and code from line 8 to 104), 7 of `spool.js`
+   (381 to 389, `readMap`) and 10 of `adapters.js` (15 to 25) from every rule; no rule fails on them. An argument
+   names another copy of the mod to check (`python3 -I -B tests/test_no_keystrokes.py <mod folder>`).
+2. 9.2, who calls it. `pasteImage(` appears in detail.js twice (its definition, the `paste_other` handler) and in
+   views.js once (Paste image in `attachRow`), nowhere else; `attachRow(` is defined in views.js and called once,
+   from `answerSection`.
+3. 9.3, create-only. The script writes with `writeToFileOptionsError($(out), $.NSDataWritingWithoutOverwriting,
+   null)`: an existing file stays byte for byte and the run fails (`test_clip.mjs`, also when the clipboard holds
+   another image); no temporary or partial file is left. Should a write fail part way, the dialog looks
+   (`statAt`) and says a partial file may be left at its name, never names it, never deletes it.
+   `clipRefusal` requires an attachment's own name, `^\d{8}-\d{6}-[0-9a-z]{6}\.png$` (`CLIP_NAME`). A drop's copy
+   (`copyIn`) still writes with Herdr's `fs.writeFile`, which has no create-only flag: `prepareSlot` checks the
+   name is free just before (a window remains there).
+4. 9.4, one normalisation. `detailing.js` `appRoot(home)`: slashes made single, a trailing one dropped, null unless
+   absolute, not "/" and free of "." and ".." segments. `attach.js` `attachDir`, `appRelative` and `opener.js`
+   `clipDir` all use it; with no app folder every path is refused and nothing is attached. opener.js now imports
+   `appRoot` from detailing.js. (`config.js` `dataDir` still joins `appHome()` as given: a trailing slash there
+   gives `…//ledgr-data` for the store, not for attachments.)
+5. 9.5, never locked. `pasteImage` bounds the clipboard's run with `within` (`ATTACH.clipMs`, 8 s), and
+   `attachBusy()` treats a flag older than `ATTACH.staleMs` (60 s) as stale; each run clears the flag only if it
+   is still its own.
+6. 9.6, the line. `withAttach` adds the line and a line break after it; the line's pattern is built from the
+   folder and ends at the image's extension, so words after it on the same line keep it an attachment; the box's
+   cut at 4,000 (`cutDraft`) drops an image's line whole when the cut falls inside it and says so ("…the image
+   line it reached was taken out whole (the file stays in ledgr-data/attachments/).").
+7. 9.7, thumbnails. Both sides set (`thumbSize`: fitted in 112 × 72), and only for a PNG or JPEG whose header gives
+   at most 4,096 pixels a side (`imageDims`); a GIF or WebP shows its chip alone. `fileInfo` reads the file once
+   (size and header).
+8. 9.8: `views.js` imports `image` by name. `test_detail.mjs` and `test_settings.mjs` stubs export it;
+   `test_seams.mjs`'s stub does not (it loads `settings.js`, which imports views.js): it needs
+   `export const image = (src) => el("image", { _src: src });` beside its `img`.
+9. 9.9: `test_seams.mjs` line 596 writes its two no-break spaces as `\u00a0`.
+
+Run against the review's copies (`scratchpad/review2/modcopy*/ledgr`, older than these fixes), the guard fails
+each (11 to 16 failures, among them: the script not the pinned one; `pasteImage(` three times in detail.js; the
+System Events words); the same edits applied to a copy of this tree fail on exactly what they change (the script
+not the pinned one; `pasteImage(` counted three times in detail.js; the runner word, `Application(`, `System
+Events`, `keystroke`, `doShellScript` and the pin); the repo passes.
+
+### 20.2 The live check, and an image that arrives as its file's path (2026-11-23)
+
+The live check, on the installed build: the new answer layout was liked ("LOVE the new answer layout"), and ⌘V
+reaches the answer box while the dialog holds the keyboard. No macOS permission prompt appeared, which says
+nothing yet (below). The gap: the captures come from CleanShot, not ⌃⇧⌘4, and a capture pasted into the box and a
+file dropped on the text both arrived as one plain line of text, the file's absolute path (with spaces:
+`…/Application Support/CleanShot/media/media_x/CleanShot 2026-11-23 at 4.09.28 PM.png`), with no attachment line,
+so no chip and no thumbnail. The drop putting the file into the answer was liked ("SWEET"), and the agent could read
+the file from that path. So a clipboard carrying a file reference is pasted by Herdr's textarea as the path, as
+text (`paste_other` never fired and the clipboard script almost certainly never ran), and a file dropped on the
+textarea is inserted by the textarea itself (the frame's `on_drop` did not get it).
+
+**The fix: a path that arrived whole becomes an attachment** (`detail.js` `pathsIn`, `attachPathLine`; `attach.js`
+`insertedSpan`, `pathOf`, `pastedPaths`, `withAttachAt`, `withoutRaw`, `OTHER_IMAGE_EXTS`).
+
+- "Arrived whole in one change": the change handler hands `pathsIn` the draft before and the box's value after.
+  What the change inserted is the new value less the longest prefix, then the longest suffix, it shares with the
+  draft before (`insertedSpan`); it must be at least two characters. Each line of that inserted text, trimmed,
+  that is exactly an absolute path or a `file://` URL (`file:///…`, `file://localhost/…`, percent-decoded) naming a
+  file whose extension is an image's (png, jpg, jpeg, gif, webp in any case; heic, heif, tif, tiff, bmp, svg, avif,
+  ico are said and not taken), outside the attachments folder, is taken. A key typed inserts one character, so a
+  path typed by hand is never taken, nor one finished by a keystroke; a path pasted after words on a line is taken,
+  the words keeping their own line.
+- Taken: copied in as a drop is (`copyIn`, the same limits, the same one-at-a-time flag), then the attachment line
+  takes the path's place (with a line break after it) and the chip and thumbnail follow; every other line stays as
+  it is. Several paths in one paste are taken in order until a limit refuses the next.
+- Refused (cannot be read, over 8 MiB, empty, not a type ledgr takes, the fifth, no room under 4,000 characters,
+  another attach running, the copy failing): the path stays as text and the status line says why, ending "; its
+  path stays in the answer as text, which the agent can read." If the path's line was changed while the file was
+  copied, it is not named and the status line says so (the copy stays).
+- One file, one attachment: a drop registers its sources at once (`recentSrc`); the same path arriving in the text
+  while the drop copies, or within 2 s after, is not taken again: its raw text goes, or the drop's line takes its
+  place. The same file dropped within 2 s of its path arriving in the text is skipped by the drop.
+- Nothing here reaches the clipboard's reader or any process (rule 16: `makeAnswer` makes one call, `pathsIn`;
+  `pathsIn` and `attachPathLine` copy through `copyIn` alone); the callers of `pasteImage(` are unchanged.
+- The hint under the box: "pasting or dropping an image attaches it, as a picture or as its file's path".
+
+Assumed about Herdr's textarea, not seen: that a paste or a drop arrives as one `change` holding the whole path
+(were it delivered in pieces, no piece would be a whole path and the path would stay text, said by nothing); that a
+path is inserted plain, not quoted or with escaped spaces; that one file per line comes when several are pasted.
+
+**Still unseen live:** whether the clipboard script prompts when it does run (Paste image, or a clipboard holding an
+image and no file reference); whether a thumbnail draws now that an attachment line exists.
+

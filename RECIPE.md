@@ -92,16 +92,19 @@ beside it).
   "← prev  3 of 19  next →" (dimmed at either end) and Esc. From 760 px wide, two columns that
   scroll on their own: the item (46 %), and THE MESSAGE (the turn as markdown, the passage marked
   with a 2 px accent bar on an accent tint and scrolled into view; around or whole; Copy); narrower,
-  one column. Sections: an ask's TEXT, QUOTE, OPTIONS (chips, "(rec.)" on the recommended one),
-  ANSWER (a box two lines tall growing to ten, Paste answer beside it, "⌘Enter pastes the answers
-  for turn N (Enter starts a new line)"), RESULT, QUESTIONS ABOUT IT; a question's TEXT, QUOTE,
-  ABOUT, PINS (N), BRANCHES, the Branch confirmation; a pin's PASSAGE (badges unverified, clipped,
-  archived), NOTE, ANCHOR, USED IN, ITS MESSAGE (or "That message is no longer saved; the pin keeps
-  the passage."); a branch's QUESTION, MANIFEST, ASKED IN THIS BRANCH, CONCLUSION, Conclude editor,
-  PREAMBLE. Footer: the status line; the buttons (a primary where the kind has one, Done, Defer ▾,
-  the kind's own, ⋯ for the rest); the hints "Esc close · Tab next field · ⌘Enter paste the turn's
-  answers · Enter newline". Reading text is selectable, the person's and pinned text exactly as
-  stored, with Copy beside it; the dialog dims while a paste is pending.
+  one column. Sections: an ask's TEXT, WHAT TO DO (its summary behind a 2 px accent edge, Copy),
+  OPTIONS (chips, "(rec.)" on the recommended one), ANSWER (a box the column's width and free
+  height, at least eight lines, eight in one column; under it a chip per attached image, a PNG's or
+  JPEG's thumbnail in 112 × 72, its name, Reveal and Remove, and Paste image; then the hint and Paste
+  answer), RESULT,
+  QUESTIONS ABOUT IT, QUOTE (dim); a question's TEXT, QUOTE, ABOUT, PINS (N), BRANCHES, the Branch
+  confirmation; a pin's PASSAGE (badges unverified, clipped, archived), NOTE, ANCHOR, USED IN, ITS
+  MESSAGE (or "That message is no longer saved; the pin keeps the passage."); a branch's QUESTION,
+  MANIFEST, ASKED IN THIS BRANCH, CONCLUSION, Conclude editor, PREAMBLE. Footer: the status line; the
+  buttons (a primary where the kind has one, Done, Defer ▾, the kind's own, ⋯ for the rest); the
+  hints "Esc close · Tab next field · ⌘Enter paste the turn's answers · Enter newline · ⌘V attach an
+  image". Reading text is selectable, the person's and pinned text exactly as stored, with Copy
+  beside it; the dialog dims while a paste is pending.
 - **Settings dialog** (the gear). Centered, 50 % by 70 %, popover fill. Header, 44 px: the gear in
   accent, "ledgr settings" (13 px semibold), Esc. Rows of a semibold label, its control at the right
   and one dim line below: Text scale (− 120 % + and a 100 % reset), Threshold (blocking only,
@@ -149,10 +152,14 @@ beside it).
   settled at the turn's end), else in a fenced ledgr-asks block at the end of its reply. Either way
   no model is called. Extracted as the fallback: a reply that declared nothing goes to the provider
   (Claude Haiku by default); a blocking ask found that way puts the instruction into that session's
-  next prompt once more. Only what you must do, decide, provide or review is an ask: not status
-  (what is done, pending or uncommitted), and not what the agent waits on from its own subagents,
-  tools or builds, even when it writes "I need"; a closing offer to go on is optional; the quote is
-  the one or two sentences that make the ask. The threshold decides which levels are open rows that
+  next prompt once more. ledgr is there to cut the back and forth and clear what blocks the
+  agent, never to hand you work: told so, the agent does all the task needs that it can do itself,
+  stops for a go-ahead before a step the task needs that cannot be undone, and declares only what
+  only you can give; a step beyond the task is an offer, neither taken nor declared; not status
+  (what is done, pending or uncommitted), and not what it waits on from its own subagents, tools or
+  builds, even when it writes "I need"; a closing offer to go on is optional;
+  the quote is the one or two sentences that make the ask. Each ask carries a summary: exactly what
+  you are to do, readable without the reply. The threshold decides which levels are open rows that
   count; the rest fold as suggestions, and Promote lifts one. An agent ledgr has no adapter for gets
   the questions lane only.
 - **Who owns the closing list.** ledgr, the default: the agent keeps blocking and needed items out
@@ -181,6 +188,11 @@ beside it).
   is posted, the cursor returns to the row, the dialog's last words show in the status line, and the
   keyboard returns to the list after Esc or a closing act, stays in the pane after a paste or Go to
   anchor, and stays where you clicked otherwise. A Conclude text being edited is kept for a day.
+  An image joins an answer when its file's path is pasted or dropped into the box (a capture tool's
+  copy), when dropped on the frame, or by cmd-V with an image and no text on the clipboard, or Paste
+  image: saved under ledgr-data/attachments/, it puts the line "attached image (read this file):
+  <path>" in the answer, and the agent reads the file (4 an answer, 8 MiB each; Remove takes
+  the line out and keeps the file).
 - **Its actions.** Done; Defer ▾ (tomorrow, in a week, next session); the kind's own step (Promote,
   Branch…, Paste confluence again, Reopen); and ⋯ with Not needed, Ask about this, Copy for prompt
   ("[Q3] <question>"), Stage /btw, Call off and Go to anchor, which shows the message whole with the
@@ -294,6 +306,7 @@ beside it).
   pane stop). The rest: `reader.js` (the `Reader` the panel and both dialogs extend; `editConfig`,
   the only writer of `config.json`: compare-and-swap through `writeTextFile`, queued); `listing.js`
   (pure: rows, cursor, `laneOf`); `views.js`, `detailing.js` (the dialogs' renderers and specs);
+  `attach.js` (an answer's images: names, checks, the drop's copy with `fs`);
   `links.js` (pure) and `opener.js` (the reading copies' only process calls); `writer.js`
   (`ENGINE_FILES`); `store.js` (event application, chips, snapshot); `spool.js`; `nav.js`;
   `config.js` (defaults, paths, `liveHome`, `LIMITS`, `withScale`); `branch.js` (manifest, preamble,
@@ -322,10 +335,11 @@ beside it).
   finds the message uuid (at 0, 1, 2, 4 s, rewriting lagged files), spools `stop`, settles the turn
   from `mcp/<sid>/<turn>.json`, else a valid block, else the provider with forced JSON output, and
   spools `asks`. Stop prints nothing.
-- **The block**, one bullet per item: `- blocking · decide · Choose the default template · "the
-  sentence it comes from" · options: compact | detailed` (level and kind required; quote and options
-  optional); a JSON array is still read, never mixed with bullets; a bad item is dropped with a
-  reason.
+- **The block**, one bullet per item: `- blocking · decide · Choose how many approvals a release
+  needs · "the sentence it comes from" · options: one | two · summary: The gate is built and off; I
+  recommend one.` (level and kind required; quote, options and the summary optional, the summary
+  last, taking the rest of its line); a JSON array is still read, never mixed with bullets; a bad
+  item is dropped with a reason. The extractor's forced output requires a summary for every ask.
 - **Landing markers**, always the message's first line: `ledgr answers <session id>`,
   `ledgr confluence <branch id> <item id>`, `ledgr pins <session id> <item id>`. The hook finds one
   as the first line of a pasted block (Claude Code wraps a paste in `<pasted_content id="…">`
@@ -334,8 +348,9 @@ beside it).
   followed by an `A<n>:` line; an indented line continues an answer; quoted (`> `) lines give no
   refs.
 - **The MCP server** (`bin/mcp/ledgr_mcp.py`, stdio JSON-RPC; tools only when `HC_TERMINAL_ID` or
-  `LEDGR_TERMINAL` is set): `declare_asks` (items with level, kind, text, quote, options,
-  recommended, `repeat_of`; writes `mcp/<sid>/<turn>.json`, spools `asks` with `source: "tool"`,
+  `LEDGR_TERMINAL` is set): `declare_asks` (items with level, kind, text, summary, quote, options,
+  recommended, `repeat_of`; an item without a summary refuses the whole call, nothing recorded;
+  writes `mcp/<sid>/<turn>.json`, spools `asks` with `source: "tool"`,
   `replaces_turn` on a later call, and returns the pointer line), `resolve_asks` (handles and a
   note; one `act` event per ask, `actor: "agent"`, recorded as `resolvedBy: "agent"`), `open_asks`
   (this session's open asks with handles, from `snapshot.json`, a cold session's from its file),
@@ -368,9 +383,8 @@ beside it).
   text the writer last read or wrote, then deletes a cold file only when provably redundant: by name
   only one its record lists as thawed (an hour on) or a forgotten session's (a day on); any other only
   after a read finds an identical copy of every item and turn record in `store.json` on disk, the
-  session's named file or its archive (never a later one: a restored store touched once is stamped later
-  while holding less). Reading copies read a cold file and
-  merge it in memory, never into a store that is saved.
+  session's named file or its archive (never a later one: Watch out). Reading copies read a cold file
+  and merge it in memory, never into a store that is saved.
 - **Data**, `~/.config/herdr-app/ledgr-data/`: `store.json` (the source of truth: `items`,
   `sessions`, `branches`, `terminals`, and its own `pins` map, `pn_<uuid>` ids with per-session
   handles P1, P2, which nothing reading items ever sees; a cold session's record keeps `cold: {file,
@@ -383,10 +397,11 @@ beside it).
   newest 50 per session); `mcp/<sid>/`; `archive/<sid>/items-<ms>-<rand6>.jsonl` and
   `turns-<ms>-<rand6>.jsonl` (at most 512 KiB each; `<sid>` with every character outside
   `A-Za-z0-9._-` made `_`; an id the store holds wins over any line, else the newest file's last
-  line); `store.pre-retention-<ms>.json` (the store before the first run, kept); `log/`; `tmp/`;
-  `config.json`. Limits are code,
-  `config.js` `LIMITS`: pin 4,000 characters, note 200, 12 pins per question, 24,000 pinned
-  characters per branch, 200 search results; an answer 4,000, a sheet 24,000.
+  line); `store.pre-retention-<ms>.json` (the store before the first run, kept); `attachments/`
+  (answers' images, never deleted by ledgr); `log/`; `tmp/`; `config.json`. An ask's `summary` is
+  kept on its item, never in `snapshot.json`. Limits are code, `config.js` `LIMITS`: pin 4,000
+  characters, note 200, 12 pins per question, 24,000 pinned characters per branch, 200 search
+  results; an answer 4,000, a sheet 24,000, a summary 1,000.
 - **`config.json`**, read again on every change, no restart (settings dialog row in brackets):
 
 ```
@@ -406,6 +421,7 @@ ui.textScale          1                 0.8 to 1.6  [Text scale]
 ui.pasteIntoPrompt    true              [Paste into the prompt]
 ui.animations         true              [Animations]
 ui.foldAsksWhileWorking false           [Fold asks while the agent works]
+ui.attachmentThumbs   true              false: no thumbnails of attached images
 ui.panel              {"column": "panel", "stack": "panel-body", "child": "ledgr"}
 surface.openPanelOnAsks false           [Open the panel on new asks]
 branch.maxDepth       2                 0 turns Branch off  [Branch depth]
@@ -492,7 +508,7 @@ adding it):
 
 - **Claude Code hooks** in each Claude settings file the person chooses (the entries above). Outside
   a Herdr terminal (`HC_TERMINAL_ID` unset) they do nothing. Their only output into the model's
-  context is the instruction (about 260 words for `ledgr`, 200 for `both`, none for `prose`) at the
+  context is the instruction (about 596 words for `ledgr`, 534 for `both`, none for `prose`) at the
   moments listed under The hooks, and in an off space the three-line off text, once.
 - **One network endpoint.** At each turn's end that declared nothing, the extractor sends that
   turn's last assistant message (at most 60,000 characters) and the session's open asks to the
@@ -508,7 +524,8 @@ adding it):
   and runs nothing else.
 - **Files outside the mod folder**: `ledgr-data/` (its data and `config.json`), the session's
   transcript (`<config>/projects/…/<id>.jsonl`, the path Claude Code passes the hooks) for the
-  turn's text and uuid, and `<config>/sessions/<pid>.json` for a session name. The installer also
+  turn's text and uuid, `<config>/sessions/<pid>.json` for a session name, and an image file the
+  person drops on the dialog's answer box (copied in with `fs`). The installer also
   reads `~/.claude-*`, `~/.local/bin` wrappers and shell start-up files to find config folders.
 - **Programs.** Through `hc`: `hc read <terminal>` (the box checks a passage against the screen),
   `hc run … -- claude --resume <sid> --fork-session …` (Launch), `hc run … -- claude --resume <sid>`
@@ -517,15 +534,20 @@ adding it):
   Through `exec` in the dialogs, only in `opener.js`, 5 s each, only after a click: `realpath`, the
   chosen editor (`open <path>`, `open -R` for an app, `open -t` for a script; `zed`, `code -g`, or
   the person's command, never a shell, interpreter or terminal), `open -R` (Reveal in Finder),
-  `git -C <cwd> rev-parse --show-toplevel`. Web links go to `cx.open_url` (http and https only). The
-  hooks run `python3`, `/usr/bin/security find-generic-password`, `/usr/bin/curl`, and
+  `git -C <cwd> rev-parse --show-toplevel`; and one pinned call, only on the person's cmd-V into the
+  answer box (no text on the clipboard) or click on Paste image: `/usr/bin/osascript -l JavaScript
+  -e <a constant script> <png path> <8 MiB>`, which reads the clipboard's image and creates one new
+  PNG directly under `ledgr-data/attachments/`, never over a file, and nothing else (a test pins its
+  text, sha256 and callers). Web links go to `cx.open_url` (http and https only). The hooks run
+  `python3`, `/usr/bin/security find-generic-password`, `/usr/bin/curl`, and
   `hc get $HC_TERMINAL_ID --json` (read only, killed after 300 ms) at session start and each prompt.
 - **The terminal and the clipboard.** The box reads the clipboard when it opens; a paste reads it
-  back first. The only write into a terminal is Herdr's `terminal.paste` after a confirmed focus
-  (`ui.pasteIntoPrompt: false` turns it off). Never `hc send` (it presses Enter and would submit a
-  draft), never `hc keys` (Go to anchor once pressed `ctrl+o /`, which toggles Claude's transcript
-  viewer), never `terminal.search`, never Enter. `bin/tests/test_no_keystrokes.py` and
-  `test_nav.mjs` enforce it, and hold every `exec(` of the reading copies to `opener.js`.
+  back first; the dialog reads its image on cmd-V or Paste image. The only write into a terminal is
+  Herdr's `terminal.paste` after a confirmed focus (`ui.pasteIntoPrompt: false` turns it off).
+  Never `hc send` (it presses Enter and would submit a draft), never `hc keys` (Go to anchor once
+  pressed `ctrl+o /`, which toggles Claude's transcript viewer), never `terminal.search`, never
+  Enter. `bin/tests/test_no_keystrokes.py` and `test_nav.mjs` enforce it, and hold every `exec(` of
+  the reading copies to `opener.js`.
 - **What the installer writes**: the chosen Claude settings files (hook and allow entries, backup
   first), `.claude.json` through `claude mcp add`, the Keychain item, `keys.json`, one personal
   layout, and its own state in `~/.local/state/ledgr/` (`install-state.json`, `pristine/`,
@@ -563,10 +585,16 @@ What tripped the build up:
 - Never cap a text box with `max_h` plus `overflow_hidden`: at a line height of about 1.6, a 34 px
   cap cut a 12.5 px ask in its second line; short boxes scroll. A selection cannot run across the
   message's three blocks (before, the passage, after); its Copy takes the turn whole.
+- No mod API yields the clipboard's image (a paste with no text fires the textarea's `paste_other`,
+  with no data): hence the one `osascript` call; pin its script by full text, not banned words (a
+  stripper that cut at any `//`, even in a string, let an edited script pass). But a capture tool's
+  copy (a file reference) pastes as the file's path, as a drop on the text does: a path that arrives
+  whole in one change is taken in by `fs`, a typed one never. A Textarea takes `rows` or `.h(px)`; a
+  box grown by flex in a scrolling column sizes by its content, so measure the column and set both.
+  Seen live: `image()` of an app-relative path draws; a path arrived whole once (paste or drop).
 - cmd-Enter in the answer box: which of the textarea and the `mod:ledgr` section takes it first is
   not settled live; a line break it adds within 300 ms is put back (`detailing.js` `strayBreak`).
-  The same is open for cmd-Down and cmd-Up. The dialog's live check (`docs/design/Detail.md` 6.5)
-  has not been done.
+  The same is open for cmd-Down and cmd-Up (`docs/design/Detail.md` 6.5).
 - The pin key: the first choice clashed with Herdr's global picker; `cmd-s` is bound in no shipped
   Herdr section. A change touches `pinning.js` `PIN_KEY`, `keys.json`, the installer's `MOD_KEYS`
   (`test_compose.mjs` checks the three agree) and `words.js` `PINS_EMPTY`.
@@ -614,11 +642,12 @@ What tripped the build up:
   event and the row appears in YOUR QUESTIONS, the chip showing `? 1 · 0`.
 - `herdr-app do ledgr.demo` draws the three lanes with every status: Pin 1 and Pin 2, Question 9
   with "2 pins", turn 17 with Ask 6 first (◆, blocking) and "below threshold (2)" folded; every row
-  is one line at 280 and 360 px. `ledgr.demo-detail` opens Ask 15's dialog with the passage marked,
-  and `demo-detail:Q3`, `:P2`, `:br-q3-7c1e` draw their sections, in two columns and, narrow, in
-  one; Esc leaves the cursor on that row. `ledgr.demo-settings` shows two sample spaces and a stale
-  id, and saves nothing. After `ledgr.archived`, CLOSED ends with "archived (3) · hide" and three dim
-  rows; Enter on Ask 17 opens it read-only with the newer file's line, and Reopen restores it in the demo.
+  is one line at 280 and 360 px. `ledgr.demo-detail` opens Ask 15's dialog with WHAT TO DO and the
+  passage marked, and `demo-detail:Q3`, `:P2`, `:br-q3-7c1e` draw their sections, in two columns
+  and, narrow, in one; Esc leaves the cursor on that row. `ledgr.demo-settings` shows two sample
+  spaces and a stale id, and saves nothing. After `ledgr.archived`, CLOSED ends with "archived (3) ·
+  hide" and three dim rows; Enter on Ask 17 opens it read-only with the newer file's line, and
+  Reopen restores it in the demo.
 - With a store over 1 MiB, the first start after the install writes `store.pre-retention-<ms>.json`,
   files under `ledgr-data/archive/<sid>/` (none over 512 KiB) and a store under the cap; `writer.log`
   says what the run took, and the next save is one `writeTextFile`.

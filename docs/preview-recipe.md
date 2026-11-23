@@ -29,9 +29,12 @@ archived and deleted and the session forgotten afterwards through the panel's ow
   - No dialog, no capture box, no status line at the bottom.
 - The dialog frame: the same, with the dialog open on Ask 2 and the window dimmed behind it. Header
   (◆ Ask 2, `blocking`, `decide · turn 1 · declared by the agent (tool)`, `answer ready`, the
-  session, Esc); left: TEXT, QUOTE (each with Copy), OPTIONS (the picked one in accent), ANSWER (the
-  field with the pick, Paste answer, the hint), the foot line; right: THE MESSAGE with around / whole
-  / Copy; footer: Done, Defer ▾, ⋯ and the key hints.
+  session, Esc); left, since 2026-11-23: TEXT, WHAT TO DO (the declared summary), OPTIONS (the picked
+  one in accent), ANSWER (the box with the pick, filling the column; under it Paste image, then the
+  hint and Paste answer), QUOTE (dim), the foot line, each text with Copy; right: THE MESSAGE with
+  around / whole / Copy; footer: Done, Defer ▾, ⋯ and the key hints. The 2026-11-10 take shows the
+  column as it was (TEXT, QUOTE, OPTIONS, a two-row ANSWER with Paste answer beside it): a retake is
+  due, the build being installed since 2026-11-23.
 - Nothing personal in the frame: the pane header and Claude Code's banner both print the folder, so
   use a neutral one (`/private/tmp/claude-501/tally` since 2026-11-07; the 2026-11-06 take showed a
   scratchpad path with a user and employer name in it). The session gets a neutral generated name

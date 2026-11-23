@@ -12,21 +12,37 @@ zed, code or their own command), never a shell, never a terminal, never with a l
 writes under ledgr-data/archive/, each file new (spool.js writeNew), and the dialog's Reopen on an archived
 record posts one restore event and nothing else (2026-11-19, rule 14). Only the writer writes, unlinks,
 makes or removes anything under ledgr-data/cold/ (retention Phase 2, rule 15); the reading copies and the
-Python readers only read a cold file, and post only Try again and Use without its older items. A static check
-over the mod's own source (comments are stripped first, so the rule may be written down); the runtime
-half is tests/test_nav.mjs and tests/test_links.mjs.
+Python readers only read a cold file, and post only Try again and Use without its older items. An image in an
+answer (2026-11-23, rule 16): only attach.js writes or makes anything under ledgr-data/attachments/, nothing
+removes anything there, and only detail.js imports it; the clipboard's image is written by one pinned call,
+the owner's exception to rule 1's ban (rules 1 and 13): /usr/bin/osascript running opener.js CLIP_SCRIPT, a
+fixed script that reads the pasteboard and writes one PNG and can do nothing else, on the person's ⌘V in the
+answer box or click on Paste image. A static check over the mod's own source (comments are stripped first, so
+the rule may be written down); the runtime half is tests/test_nav.mjs, tests/test_links.mjs and
+tests/test_clip.mjs (the shipped script run on private named pasteboards).
 
 Every check runs and every failure is printed (a file not written yet is named once, with the rules
-that wait on it); the last line is the summary run-all.sh shows.
-    python3 -I -B tests/test_no_keystrokes.py
+that wait on it); the last line is the summary run-all.sh shows. An argument names another copy of the mod
+to check (its folder, holding opener.js), so an edited copy can be shown to fail.
+    python3 -I -B tests/test_no_keystrokes.py [mod folder]
+
+Comments are stripped with string literals respected (2026-11-23, the second review: the old regex cut a line
+at any // even inside a string, which hid the rest of that line from every rule): JavaScript by a small lexer
+that keeps '…', "…" and `…` (with ${…} nested), regex literals where a regex may start (after an operator,
+a bracket, a comma, a keyword or the start; never after an identifier, a number, ")" or "]", where / is a
+division), and block and line comments out; Python by the tokenize module (only COMMENT tokens removed);
+shell as before (a # after whitespace ends the line: a # inside a quoted shell string is still cut).
 """
+import hashlib
+import io
 import json
 import os
 import re
 import sys
+import tokenize
 
 BIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MOD = os.path.dirname(BIN)
+MOD = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.dirname(BIN)
 SKIP_DIRS = {"tests", "fixtures", "__pycache__", "node_modules"}
 checks = 0
 failures = []
@@ -41,10 +57,147 @@ def ok(cond, msg):
     return bool(cond)
 
 
+REGEX_AFTER_WORDS = {"return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw", "case", "do", "else", "yield", "await"}
+REGEX_AFTER_PUNCT = set("(,=:[!&|?{};+-*%<>~^")
+
+
+def _quoted(text, i, q):
+    """The end (exclusive) of a '…' or "…" literal starting at i; at a line break when it is not closed."""
+    j, n = i + 1, len(text)
+    while j < n:
+        ch = text[j]
+        if ch == "\\":
+            j += 2
+            continue
+        if ch == q:
+            return j + 1
+        if ch == "\n":
+            return j
+        j += 1
+    return n
+
+
+def _regex(text, i):
+    """The end (exclusive, flags included) of a regex literal starting at i, or -1 (a line break first: no regex)."""
+    j, n, cls = i + 1, len(text), False
+    while j < n:
+        ch = text[j]
+        if ch == "\n":
+            return -1
+        if ch == "\\":
+            j += 2
+            continue
+        if cls:
+            if ch == "]":
+                cls = False
+        elif ch == "[":
+            cls = True
+        elif ch == "/":
+            j += 1
+            while j < n and (text[j].isalnum() or text[j] == "_"):
+                j += 1
+            return j
+        j += 1
+    return -1
+
+
+def strip_js(text):
+    """JavaScript with its comments taken out and every string, template and regex literal kept whole."""
+    out, i, n = [], 0, len(text)
+    last = ""            # the last significant token: a word, a punctuation character, "lit" (a literal)
+    braces, holes = 0, []  # brace depth; the depths at which a template's ${ opened
+    tmpl = False
+    while i < n:
+        c = text[i]
+        if tmpl:
+            if c == "\\":
+                out.append(text[i:i + 2])
+                i += 2
+            elif c == "`":
+                out.append(c)
+                i += 1
+                tmpl, last = False, "lit"
+            elif c == "$" and text.startswith("${", i):
+                out.append("${")
+                i += 2
+                braces += 1
+                holes.append(braces)
+                tmpl, last = False, "{"
+            else:
+                out.append(c)
+                i += 1
+            continue
+        if c == "/" and text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if c == "/" and text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            end = n if j < 0 else j + 2
+            out.append("\n" * text.count("\n", i, end) or " ")
+            i = end
+            continue
+        if c in "'\"":
+            j = _quoted(text, i, c)
+            out.append(text[i:j])
+            i, last = j, "lit"
+            continue
+        if c == "`":
+            out.append(c)
+            i += 1
+            tmpl = True
+            continue
+        if c == "/" and (last == "" or last in REGEX_AFTER_PUNCT or last in REGEX_AFTER_WORDS):
+            j = _regex(text, i)
+            if j > 0:
+                out.append(text[i:j])
+                i, last = j, "lit"
+                continue
+        if c == "{":
+            braces += 1
+        elif c == "}":
+            if holes and holes[-1] == braces:
+                holes.pop()
+                braces -= 1
+                out.append(c)
+                i += 1
+                tmpl = True
+                continue
+            braces -= 1
+        if c.isalnum() or c in "_$":
+            m = re.match(r"[A-Za-z0-9_$]+", text[i:])
+            w = m.group(0) if m else c
+            out.append(w)
+            i += len(w)
+            last = w if not w[0].isdigit() else "num"
+            continue
+        out.append(c)
+        i += 1
+        if not c.isspace():
+            last = c
+    return "".join(out)
+
+
+def strip_py(text):
+    """Python with its COMMENT tokens taken out (strings, docstrings and f-strings kept)."""
+    lines = text.splitlines(keepends=True)
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except (tokenize.TokenError, SyntaxError):
+        return re.sub(r"(^|\s)#[^\n]*", r"\1", text)
+    for tok in reversed(toks):
+        if tok.type == tokenize.COMMENT:
+            (sr, sc), (er, ec) = tok.start, tok.end
+            ln = lines[sr - 1]
+            lines[sr - 1] = ln[:sc] + ln[ec:]
+    return "".join(lines)
+
+
 def strip_comments(path, text):
     if path.endswith(".js"):
-        text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-        return re.sub(r"(^|[^:\"'`\\])//[^\n]*", r"\1", text)
+        return strip_js(text)
+    if path.endswith(".py"):
+        return strip_py(text)
     return re.sub(r"(^|\s)#[^\n]*", r"\1", text)
 
 
@@ -55,7 +208,9 @@ def sources():
             if f.endswith((".js", ".py", ".sh")):
                 p = os.path.join(root, f)
                 with open(p, encoding="utf-8") as fh:
-                    yield os.path.relpath(p, MOD), strip_comments(p, fh.read())
+                    t = fh.read()
+                RAW[os.path.relpath(p, MOD)] = t
+                yield os.path.relpath(p, MOD), strip_comments(p, t)
 
 
 Q = r"[\"'`]"
@@ -76,11 +231,63 @@ BANNED_COMMANDS = {"terminal.search", "terminal.paste_image"}
 # A run(...) call on one line: the command and its argument text.
 RUN = re.compile(r"\brun\(\s*[\"'`]([^\"'`]+)[\"'`]\s*(?:,([^\n]*?))?\)")
 
+RAW = {}   # every file as it is on disk (the pinned script and call are checked on these)
 files = dict(sources())
 ok(len(files) > 10, f"found the mod's sources under {MOD}")
 
+# The stripper itself (2026-11-23): what the second review hid behind a // inside a string now shows, and a comment
+# still goes. Each sample: its source, text that must survive, text that must go.
+STRIP_CASES = [
+    ("var tag = 'a//b'; app.doShellScript('x');", ["doShellScript('x')"], []),
+    ('const u = "http://x"; run(1); // a comment', ['"http://x"', "run(1);"], ["a comment"]),
+    ("const q = /[\"'`]/g; exec('hc'); // c", ["exec('hc')"], ["// c"]),
+    ("const t = `a ${b + `c // d`} e`; f(); // g", ["`a ${b + `c // d`} e`", "f();"], ["// g"]),
+    ("x = a / b / c; y(); // z", ["x = a / b / c; y();"], ["// z"]),
+    ("// turns/<sid>/*.md\ncode(); /* gone */ more();", ["code();", "more();"], ["turns/", "gone"]),
+    ('s = "/*"; keep(); /* x */', ['"/*"', "keep();"], ["x */"]),
+    ("if (x) { y(); } /re/.test(z); w();", ["w();"], []),
+]
+for src_, keep, gone in STRIP_CASES:
+    got = strip_js(src_)
+    ok(all(k in got for k in keep) and not any(g in got for g in gone), f"stripper: {src_!r} -> {got!r}")
+ok(strip_py('s = "# not a comment"  # a comment\n') == 's = "# not a comment"  \n', "stripper: a Python # inside a string kept, the comment gone")
+
 # ── rule 1: the forbidden patterns everywhere; terminal.paste is nav.js's alone ──────────────────
+# The owner's pinned exception (2026-11-23: "Yes, allow osascript on ⌘V in the answer box with the pinned
+# exception"): the literal /usr/bin/osascript may appear exactly once in the mod, in opener.js, as this one call
+# (inside clipboardImage, rule 13); with that call taken out, opener.js meets the whole pattern like every other
+# file (System Events, keystroke, CGEventPost and osascript anywhere else, CLIP_SCRIPT included).
+PINNED_CALL = 'exec("/usr/bin/osascript", ["-l", "JavaScript", "-e", CLIP_SCRIPT, outPath, String(CLIP_MAX)], { timeout: OPEN_TIMEOUT })'
+# The script it runs, pinned whole (rule 13 compares opener.js CLIP_SCRIPT with this, character for character).
+CLIP_SHA256 = "9a709cc8f335930899de523f1fa59c46323dbfc70df6e84a9b6e2dded8983d2f"
+CLIP_SCRIPT_PINNED = r"""ObjC.import('AppKit');
+function run(argv) {
+  var out = argv[0], max = Number(argv[1]), name = argv[2];
+  if (!out || !(max > 0)) throw new Error('bad arguments');
+  var pb = name ? $.NSPasteboard.pasteboardWithName(name) : $.NSPasteboard.generalPasteboard;
+  var data = pb.dataForType($.NSPasteboardTypePNG), how = 'png';
+  if (!data || data.isNil()) {
+    var img = $.NSImage.alloc.initWithPasteboard(pb);
+    if (!img || img.isNil()) throw new Error('no image on the clipboard');
+    var rep = $.NSBitmapImageRep.imageRepWithData(img.TIFFRepresentation);
+    if (!rep || rep.isNil()) throw new Error('the image could not be read');
+    data = rep.representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $());
+    if (!data || data.isNil()) throw new Error('the image could not be made a PNG');
+    how = 'converted';
+  }
+  var n = Number(data.length);
+  if (n > max) throw new Error('too large: ' + n + ' bytes');
+  if (!data.writeToFileOptionsError($(out), $.NSDataWritingWithoutOverwriting, null)) throw new Error('the file could not be written (it is there already, or its folder is not)');
+  return JSON.stringify({ how: how, bytes: n });
+}"""
+# Counted on the files as they are on disk (comments included), so no comment or string can hide a second one.
+pinned_in = sorted(rel for rel, t in RAW.items() if "/usr/bin/osascript" in t)
+ok(pinned_in == ["opener.js"] and RAW["opener.js"].count("/usr/bin/osascript") == 1 and RAW["opener.js"].count(PINNED_CALL) == 1
+   and files["opener.js"].count(PINNED_CALL) == 1,
+   f"rule 1: /usr/bin/osascript appears once in the mod as it is on disk, in opener.js, as the pinned call (in code): {pinned_in}")
 for rel, text in files.items():
+    if rel == "opener.js":
+        text = text.replace(PINNED_CALL, "", 1)
     for rx, what in FORBIDDEN:
         m = rx.search(text)
         ok(m is None, f"rule 1: {rel}: {what}: {m.group(0) if m else ''}")
@@ -159,6 +366,17 @@ def body(rel, name, rules):
             ok(b is not None, f"rule {rules}: {rel} has the method {name} (a two-space-indented `{name}(args) {{` line)")
         bodies[key] = b
     return bodies[key]
+
+
+def order(text, *parts):
+    """Every part is in text, each after the one before (never raises: a missing part is a failed check)."""
+    at = -1
+    for p_ in parts:
+        i = (text or "").find(p_, at + 1)
+        if i < 0 or i <= at:
+            return False
+        at = i
+    return True
 
 
 def holds(b, cond, msg):
@@ -306,6 +524,17 @@ if panel is not None:
 # only reads: the open preset judges a link by where it leads), each with the 5 s limit. detail.js reaches them only through openPath (inside openLink, the link handler), revealPath
 # (inside revealLink, the status line's Reveal in Finder) and gitToplevel (inside gitRootOf); no other file
 # imports opener.js, and settings.js still runs nothing (rule 12).
+# Since 2026-11-23, five shapes: the fifth is the pinned call of rule 1, /usr/bin/osascript -l JavaScript -e
+# CLIP_SCRIPT <outPath> <CLIP_MAX> (clipboardImage), which runs only on the person's paste into the answer box
+# (its paste_other) or their click on Paste image, never on ledgr's own initiative: clipboardImage refuses an
+# outPath that is not absolute, holds a line break or NUL, is not a .png or is not directly in
+# ledgr-data/attachments/ (clipRefusal) before it runs anything; detail.js calls it once, inside pasteImage. CLIP_SCRIPT
+# is a constant (no interpolation) whose words cannot drive another application, press a key, run a shell,
+# launch anything, change a pasteboard or reach the network, and whose one write creates its file and never
+# writes over one. Since the second review (9.1) the script is pinned by identity: the copy below
+# (CLIP_SCRIPT_PINNED, with its sha256) must equal opener.js's character for character, taken from the file as it
+# is on disk; the word checks are the second line. opener.js takes exec and appHome from herdr and appRoot from
+# detailing.js (clipDir and attach.js attachDir normalise Herdr's app folder one way).
 EXEC = re.compile(r"(?<![.\w])exec\(")
 
 
@@ -324,8 +553,8 @@ if opener is not None:
     calls = sorted(opener[m.start():opener.find(")", opener.find("}", m.start())) + 1] for m in EXEC.finditer(opener))
     SHAPES = sorted(['exec(a.argv[0], a.argv.slice(1), { timeout: OPEN_TIMEOUT })', 'exec("open", ["-R", path], { timeout: OPEN_TIMEOUT })',
                      'exec("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { timeout: OPEN_TIMEOUT })',
-                     'exec("realpath", [path], { timeout: OPEN_TIMEOUT })'])
-    ok(calls == SHAPES, f"rule 13: opener.js runs openerArgv's argv, open -R, git rev-parse and realpath only, each with OPEN_TIMEOUT: {calls}")
+                     'exec("realpath", [path], { timeout: OPEN_TIMEOUT })', PINNED_CALL])
+    ok(calls == SHAPES, f"rule 13: opener.js runs openerArgv's argv, open -R, git rev-parse, realpath and the pinned clipboard call only, each with OPEN_TIMEOUT: {calls}")
     ok("export const OPEN_TIMEOUT = 5000;" in opener, "rule 13: the 5 s limit")
     op = fn(opener, "openPath") or ""
     ok("const a = openerArgv(setting, " in op and "if (a.error) return" in op and "exec(a.argv[0]" in op
@@ -338,9 +567,44 @@ if opener is not None:
     rv = fn(opener, "revealPath") or ""
     ok('exec("open", ["-R", path]' in rv and "isAbs(path)" in rv, "rule 13: revealPath is open -R on an absolute path")
     herdr_imp = re.search(r'^import \{([^}]*)\} from "herdr";', opener, flags=re.M)
-    ok(herdr_imp is not None and {n.strip() for n in herdr_imp.group(1).split(",")} == {"exec"}, "rule 13: opener.js takes exec alone from herdr")
+    ok(herdr_imp is not None and {n.strip() for n in herdr_imp.group(1).split(",")} == {"exec", "appHome"}, "rule 13: opener.js takes exec and appHome (clipDir) alone from herdr")
+    # The script is pinned by identity (the second review, 9.1): taken from opener.js as it is on disk, it must be
+    # CLIP_SCRIPT_PINNED below, character for character (sha256 CLIP_SHA256), and a plain template (no ${, no
+    # backslash: its source is its value). Changing the script means changing this copy in the same commit. The
+    # word checks after it are the second line. Its JavaScript (entry point `function run(argv)`) is taken out of
+    # opener.js before the rest is checked for the calls below.
+    cs = re.search(r"^export const CLIP_SCRIPT = `([^`]*)`;$", RAW.get("opener.js", ""), flags=re.M)
+    script = cs.group(1) if cs else ""
+    ok(cs is not None and RAW["opener.js"].count("export const CLIP_SCRIPT = `") == 1 and "${" not in script and "\\" not in script,
+       "rule 13: CLIP_SCRIPT is one plain constant template in opener.js (nothing interpolated, no escape)")
+    ok(hashlib.sha256(CLIP_SCRIPT_PINNED.encode("utf-8")).hexdigest() == CLIP_SHA256, "rule 13: the pinned copy is the one its sha256 names")
+    ok(script == CLIP_SCRIPT_PINNED and hashlib.sha256(script.encode("utf-8")).hexdigest() == CLIP_SHA256,
+       f"rule 13: CLIP_SCRIPT is the pinned script, character for character (sha256 {hashlib.sha256(script.encode('utf-8')).hexdigest()}, pinned {CLIP_SHA256})")
+    code = opener.replace(script, "", 1) if script and script in opener else opener
     for bad in ("hc(", "run(", "terminal.", "openOverlay(", "write_to_clipboard(", "open_url("):
-        ok(bad not in opener, f"rule 13: opener.js calls {bad}")
+        ok(bad not in code, f"rule 13: opener.js calls {bad}")
+    for bad in ("Application(", "System Events", "keystroke", "key code", "doShellScript", "do shell script", "NSTask", "NSAppleScript", "NSWorkspace",
+                "clearContents", "setString", "setData", "writeObjects", "declareTypes", "http",
+                "setPropertyList", "prepareForNewContents", "releaseGlobally", "NSURL", "ContentsOfURL", "NSUserDefaults", "NSProcessInfo"):
+        ok(bad not in script, f"rule 13: CLIP_SCRIPT holds {bad}")
+    ok(re.findall(r"write\w*", script, flags=re.I) == ["writeToFileOptionsError"] and "$.NSDataWritingWithoutOverwriting" in script and "Atomic" not in script
+       and not re.search(r"createDirectory|createFile|removeItem|moveItem|copyItem|linkItem|replaceItem|trashItem|setAttributes|NSFileManager|NSFileHandle|system\(|ObjC\.import\('(?!AppKit')", script),
+       "rule 13: CLIP_SCRIPT's one write creates its file and never writes over one (writeToFileOptionsError, NSDataWritingWithoutOverwriting); no folder made, nothing moved, removed or linked, AppKit alone imported")
+    ok("dataForType(" in script and "initWithPasteboard(" in script and "pasteboardWithName(name)" in script and "generalPasteboard" in script
+       and order(script, "if (n > max) throw", "writeToFileOptionsError"),
+       "rule 13: CLIP_SCRIPT reads the pasteboard and refuses an image over the limit before it writes")
+    ci = fn(opener, "clipboardImage") or ""
+    ok(order(ci, "clipRefusal(outPath)", "if (refused) return", PINNED_CALL),
+       "rule 13: clipboardImage refuses a bad outPath (clipRefusal) before it runs the pinned call")
+    cr = fn(opener, "clipRefusal") or ""
+    ok("isAbs(p)" in cr and "[\\r\\n\\0]" in cr and "\\.png$" in cr and "at = clipDir()" in cr and "if (!at) return" in cr and "dir !== at || !CLIP_NAME.test(name)" in cr,
+       "rule 13: clipRefusal: absolute, no line break or NUL, a .png, an attachment's name, directly in clipDir() (none known: refused)")
+    ok("const CLIP_NAME = /^\\d{8}-\\d{6}-[0-9a-z]{6}\\.png$/;" in opener, "rule 13: CLIP_NAME is an attachment's PNG name, <yyyymmdd>-<hhmmss>-<rand6>.png")
+    ok("export const clipDir = () => { const r = appRoot(appHome()); return r ? `${r}/ledgr-data/attachments` : null; };" in opener,
+       "rule 13: clipDir is ledgr-data/attachments/ in the app's folder, normalised by detailing.js appRoot (as attach.js attachDir), none without one")
+    imps = [m.group(1) for m in re.finditer(r'^import [^;]* from "([^"]+)";$', opener, flags=re.M)]
+    ok(imps == ["herdr", "fs/promises", "./links.js", "./detailing.js"] and 'import { appRoot } from "./detailing.js";' in opener,
+       f"rule 13: opener.js imports herdr, fs/promises, links.js and appRoot from detailing.js only: {imps}")
 links = files.get("links.js")
 ok(links is not None, "rule 13: links.js present")
 if links is not None:
@@ -362,8 +626,9 @@ if detail is not None:
     dh = re.search(r'^import \{([^}]*)\} from "herdr";', detail, flags=re.M)
     ok(dh is not None and "exec" not in {n.strip() for n in dh.group(1).split(",")}, "rule 13: detail.js does not import exec")
     do = re.search(r'^import \{([^}]*)\} from "\./opener\.js";', detail, flags=re.M)
-    ok(do is not None and {n.strip() for n in do.group(1).split(",")} == {"openPath", "revealPath", "gitToplevel", "statAt"}, "rule 13: detail.js takes openPath, revealPath, gitToplevel and statAt from opener.js")
-    for name, host in (("openPath(", "openLink"), ("revealPath(", "revealLink"), ("gitToplevel(", "gitRootOf")):
+    ok(do is not None and {n.strip() for n in do.group(1).split(",")} == {"openPath", "revealPath", "gitToplevel", "statAt", "clipboardImage"},
+       "rule 13: detail.js takes openPath, revealPath, gitToplevel, statAt and clipboardImage from opener.js")
+    for name, host in (("openPath(", "openLink"), ("revealPath(", "revealLink"), ("gitToplevel(", "gitRootOf"), ("clipboardImage(", "pasteImage")):
         b = body("detail.js", host, "13") or ""
         ok(detail.count(name) == 1 and name in b, f"rule 13: detail.js calls {name} once, inside {host}")
     ol = body("detail.js", "openLink", "13") or ""
@@ -495,11 +760,74 @@ for rel, t in files.items():
             ok(not re.search(r"\bos\.(remove|unlink|makedirs|mkdir|rmdir|replace|rename)\(|shutil\.|\bopen\(.*,\s*(mode\s*=\s*)?[\"'][rbt]*[wax+][rwxab+t]*[\"']", ln),
                f"rule 15: {rel}:{i + 1} changes something under cold/: {ln.strip()[:100]}")
 
+# ── rule 16: an image in an answer (2026-11-23) ───────────────────────────────────────────────────
+# Only attach.js writes or makes anything under ledgr-data/attachments/: its two writes are the folder's mkdir
+# (prepareSlot) and copyIn's fs.writeFile of a dropped file's bytes to the name prepareSlot found free (it looks
+# before it takes a name: nothing is written over); no other file hands a write a path naming the folder. The
+# clipboard's PNG is written by opener.js CLIP_SCRIPT (rule 13): opener.js passes it a path and writes nothing
+# itself. Nothing anywhere unlinks, removes, renames or overwrites there: attach.js has no unlink, rm, rmdir,
+# rename or copy call at all. attach.js starts no process and touches no terminal or clipboard (no exec(, hc(,
+# run(, terminal., write_to_clipboard( or read_from_clipboard(), only detail.js imports it, and it is no
+# engine file (below).
+attach = files.get("attach.js")
+ok(attach is not None, "rule 16: attach.js present")
+attach = attach or ""
+names_att = lambda a: bool(re.search(r"attachDir\(|attachments|ATTACH|slot\.path", a))
+for rel, t in js.items():
+    if rel == "attach.js":
+        continue
+    hits = [m.group(0)[:80] for m in COLDW.finditer(t) if names_att(m.group(2))]
+    ok(hits == [], f"rule 16: {rel} writes, unlinks, makes or removes under attachments/: {hits}")
+ok(sorted(m.group(1) for m in COLDW.finditer(attach)) == ["mkdir", "writeFile"], f"rule 16: attach.js's only writes are one mkdir and one writeFile: {[m.group(0)[:60] for m in COLDW.finditer(attach)]}")
+ok("fs.mkdir(attachDir(), { recursive: true })" in attach and "fs.writeFile(slot.path, bytes)" in attach, "rule 16: attach.js makes ledgr-data/attachments/ and writes the copy to the slot prepareSlot found")
+ps = fn(attach, "prepareSlot") or ""
+ok(order(ps, "`${attachDir()}/${attachName(", "existsAt(path)", "return { ok: true, path }"),
+   "rule 16: prepareSlot takes a name in ledgr-data/attachments/ only when nothing is there")
+ci_ = fn(attach, "copyIn") or ""
+ok(order(ci_, "const slot = await prepareSlot(", "fs.writeFile(slot.path, bytes)", "fs.readFile(slot.path)"),
+   "rule 16: copyIn writes only to prepareSlot's path, then reads the copy back")
+ok(not EXEC.search(attach), "rule 16: attach.js calls exec( (a RegExp's .exec is not a process)")
+for bad in ("hc(", "run(", "terminal.", "write_to_clipboard(", "read_from_clipboard(", "unlink(", "rmdir(", "rename(", "copyFile(", "openOverlay(", "this.post("):
+    ok(bad not in attach, f"rule 16: attach.js calls {bad}")
+ok(not COLDW.search(opener or ""), "rule 16: opener.js writes nothing itself (CLIP_SCRIPT writes the clipboard's PNG to the path it is given)")
+att_importers = sorted(rel for rel, t in js.items() if re.search(r'from "\./attach\.js"', t))
+ok(att_importers == ["detail.js"], f"rule 16: only detail.js imports attach.js: {att_importers}")
+pi = body("detail.js", "pasteImage", "16") or ""
+ok(order(pi, "if (this.demo)", "if (this.attachBusy())", "this.attachRoom(", "clipboardImage("),
+   "rule 16: detail.js pasteImage checks the demo, one at a time, the fifth image and the room before the clipboard is read")
+ok("within(cx, ATTACH.clipMs, clipboardImage(slot.path)" in pi, "rule 16: detail.js pasteImage bounds the clipboard's run (within)")
+# Who may start it (the second review, 9.2): pasteImage( appears in detail.js twice (its definition and the box's
+# paste_other handler) and in views.js once (Paste image in attachRow), nowhere else; attachRow( is defined in
+# views.js and called once, from detail.js answerSection; clipboardImage( is called once, inside pasteImage
+# (rule 13). So nothing but the person's ⌘V in the box or their click on Paste image runs the clipboard's reader.
+counts = {rel: t.count("pasteImage(") for rel, t in js.items() if "pasteImage(" in t}
+ok(counts == {"detail.js": 2, "views.js": 1}, f"rule 16: pasteImage( only in detail.js (its definition, the paste_other handler) and views.js (Paste image): {counts}")
+ok(re.search(r"^  pasteImage\(id, cx\) \{$", detail or "", flags=re.M) is not None, "rule 16: detail.js defines pasteImage(id, cx)")
+ar = re.search(r"^export function attachRow\([^)]*\) \{$(.*?)^\}$", files.get("views.js", ""), flags=re.S | re.M)
+ok(ar is not None and ar.group(1).count("pasteImage(") == 1 and "(_e, cx) => host.pasteImage(id, cx)" in ar.group(1),
+   "rule 16: views.js calls pasteImage only from attachRow, as the Paste image control's click")
+ar_calls = {rel: t.count("attachRow(") for rel, t in js.items() if "attachRow(" in t}
+asec = body("detail.js", "answerSection", "16") or ""
+ok(ar_calls == {"detail.js": 1, "views.js": 1} and asec.count("attachRow(") == 1, f"rule 16: attachRow is defined in views.js and called once, from detail.js answerSection: {ar_calls}")
+# An image's path that arrives in the box as text (2026-11-23, after the live check: a capture tool's clipboard or a
+# drop on the text puts the file's path there): makeAnswer's change handler makes one call, pathsIn; pathsIn and
+# attachPathLine take the file in only through attach.js copyIn (fs: rule 16 above) and reach no clipboard reader,
+# no process, no pasteImage and no clipboard.
+holds(body("detail.js", "makeAnswer", "16"), lambda b: b.count("this.pathsIn(") == 1 and "this.pathsIn(id, before, v, cx);" in b,
+      "rule 16: makeAnswer's change handler makes one call for a path that arrived in the box, pathsIn")
+for name in ("pathsIn", "attachPathLine"):
+    holds(body("detail.js", name, "16"), lambda b: not EXEC.search(b) and not any(x in b for x in ("clipboardImage(", "pasteImage(", "run(", "hc(", "write_to_clipboard(",
+          "read_from_clipboard(", "writeFile(", "mkdir(", "unlink(")), f"rule 16: detail.js {name} reaches no clipboard reader, process or write of its own")
+holds(body("detail.js", "attachPathLine", "16"), lambda b: b.count("copyIn(") == 1 and "await copyIn(f.src, cx)" in b, "rule 16: detail.js attachPathLine takes the file in through copyIn alone")
+holds(body("detail.js", "makeAnswer", "16"), lambda b: 'inp.on("paste_other", (_e, cx) => this.pasteImage(id, cx));' in b and b.count("pasteImage(") == 1 and "clipboardImage(" not in b,
+      "rule 16: makeAnswer's paste_other only calls pasteImage")
+
 # ── the engine rule (Detail.md 5.2): engine files never import the reading or staging modules ──────
 m = re.search(r"export const ENGINE_FILES = (\[[^\]]*\])", files.get("writer.js", ""))
 engine = json.loads(m.group(1)) if m else None
 ok(isinstance(engine, list) and "store.js" in engine, "engine rule: writer.js ENGINE_FILES found")
-NOT_ENGINE = {"reader.js", "listing.js", "detailing.js", "views.js", "detail.js", "words.js", "nav.js", "settings.js", "links.js", "opener.js"}
+NOT_ENGINE = {"reader.js", "listing.js", "detailing.js", "views.js", "detail.js", "words.js", "nav.js", "settings.js", "links.js", "opener.js", "attach.js"}
+ok("attach.js" not in (engine or []), "engine rule: attach.js is not an engine file")
 for f in engine or []:
     imports = re.findall(r"^import\s[^;]*?from\s+[\"']\./([^\"']+)[\"']", files.get(f, ""), flags=re.M)
     bad = sorted(set(imports) & NOT_ENGINE)

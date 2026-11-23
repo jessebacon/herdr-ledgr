@@ -80,6 +80,11 @@
 // and coldUnproven() / coldLacks() (the files the sweep may delete: by name only a thawed or a forgotten
 // session's; any other only after a read proves store.json holds all of it), mergeCold() (a reading copy's view with the file's items added; what it
 // adds never reaches toText() or snapshot()).
+//
+// The ask's summary (2026-11-23): an agent ask may carry `summary`, what the user must do, precisely (markdown,
+// at most LIMITS.summary; cleanSummary). on_asks keeps it on a new item, replaces it when a later event for the
+// same item brings a usable one, keeps it when the event brings none (as options); an item without one has no
+// key. snapshot() leaves it out; the archive, cold files, thaw, merge and restore carry the item whole.
 import { createHash, randomUUID } from "crypto";
 import { LIMITS, DEFAULTS, agentLabel, turnPath, retentionDays, ARCHIVE_LEGACY, safeName, COLD_NAME } from "./config.js";
 import { DEFAULT_MAX_DEPTH, manifest, preamble, branchName, branchLabel, depthOf } from "./branch.js";
@@ -221,6 +226,20 @@ export function norm(s) {
 }
 
 const squash = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
+
+// An agent ask's summary (2026-11-23): what the user must do, precisely, readable without the reply
+// (`summary` on the asks event's item and on the store's item; bin/lib/ledgr_asks.py applies the same rule
+// first, and the store trusts no producer, so it applies it again). A string, else none; CR and CRLF become
+// LF; a run of blank lines (whitespace-only lines among them) becomes one blank line; the outer whitespace
+// goes; then a cut at LIMITS.summary code points (as Python counts; never a lone surrogate), never a refusal.
+// Line breaks and markdown are kept. Empty is none: null, and the caller leaves the key out (lean records, no
+// null field).
+export function cleanSummary(v) {
+  if (typeof v !== "string") return null;
+  let s = v.replace(/\r\n?/g, "\n").replace(/\n(?:[^\S\n]*\n)+/g, "\n\n").trim();
+  if (s.length > LIMITS.summary) s = Array.from(s).slice(0, LIMITS.summary).join("").trimEnd();
+  return s || null;
+}
 
 // Pin search folding (capture.js unmark, plus `_` and case): lower case, `*`, backtick and `_`
 // dropped, whitespace collapsed. Applied to the query's terms and to every field searched.
@@ -671,6 +690,11 @@ export class Store {
         blocking: level === "blocking",
       };
       if (!hasOpts) { delete fields.options; delete fields.recommended; }
+      // The summary (2026-11-23): in `fields` only when the event brings a usable one, so every Object.assign
+      // below replaces a stored summary with a new one and keeps it when the event has none (as options are
+      // kept); a new item gets it from `fields` or goes without the key.
+      const summary = cleanSummary(a.summary);
+      if (summary) fields.summary = summary;
       // Quote source: the block's, the model's, or the tool's ("tool_unverified" until the Stop hook
       // has checked the quote against the turn's text).
       const quoteSource = tool ? (a.quote_verified === false ? "tool_unverified" : "tool") : ev.source === "block" ? "block" : "model";
@@ -679,6 +703,7 @@ export class Store {
       const mine = this.itemsOf(s.sessionId).filter(isAgentAsk);
       // Same turn and passage: the same item (a replayed or re-run extraction).
       // A tool ask declared again (or settled at Stop) keeps its item whatever its quote became.
+      // Either way `fields` lands on it: a usable summary replaces the stored one, none keeps it.
       const same = mine.find((it) => num(it.anchor?.turn) === turn && norm(it.text) === norm(text)
         && (it.anchor?.hash === hash || (tool && it.origin === "tool")));
       if (same) {
@@ -706,13 +731,15 @@ export class Store {
           prior.lastSeenTurn = turn; prior.anchor = { ...prior.anchor, ...anchor }; Object.assign(prior, fields); prior.updatedAt = at;
           return;
         }
+        // Answered: reopened as it was (its text, options and summary unchanged; the person's answer stands).
         if (prior.status === "answered") {
           prior.lastSeenTurn = turn; prior.note = `asked again at turn ${turn}`; prior.anchor = { ...prior.anchor, ...anchor };
           this.setStatus(prior, "open", at);
           if (this.counts(prior)) created++;
           return;
         }
-        // resolved or dismissed: the agent raised it again — a new item pointing at the old one.
+        // resolved or dismissed: the agent raised it again — a new item pointing at the old one (its own text
+        // and summary, the event's; nothing carried from the old item).
       }
       const again = prior && isAgentAsk(prior) && (prior.status === "resolved" || prior.status === "dismissed") ? prior : null;
       const id = newId("rq");
@@ -1211,8 +1238,9 @@ export class Store {
       kind: Q_KINDS.has(r.kind) ? r.kind : text ? "question" : "bookmark", anchor, status: "open",
       createdTurn: s.turnSource === "herdr-status" ? s.turn : num(r.createdTurn, anchor.turn), createdAt: num(r.createdAt, at), updatedAt: at, seq: 0,
     };
-    // The Request is spread, so the fields only the store sets are never taken from it.
-    delete it.askedVia; delete it.pinsAsked;
+    // The Request is spread, so the fields only the store sets are never taken from it. A parked question has no
+    // summary (2026-11-23: an agent ask's field alone).
+    delete it.askedVia; delete it.pinsAsked; delete it.summary;
     // Its pins (the box in pins mode): the ids that name a pin (open or archived), each once, in the
     // order given, at most LIMITS.pinsPerQuestion; none left drops the field. Each pin records the
     // question in usedIn, with its handle and head, so the pin can say so after the question is gone.
@@ -1504,7 +1532,7 @@ export class Store {
 
   // ledgr-data/snapshot.json, read by the extractor: open, answered and deferred items, plus
   // items dismissed in the last 7 days (so the model can mark a re-raise with repeat_of);
-  // quotes over 200 characters dropped. Pins never reach it (they are not items), nor do a
+  // quotes over 200 characters dropped; no draft, no pin ids, no summary. Pins never reach it (they are not items), nor do a
   // question's pin ids: the extractor and the MCP server see no pin this round.
   // Cold sessions (Phase 2): `cold` names each one's file and the writer's fault (its error, or null), and
   // their items are not here (the readers read the file: bin/lib ledgr_extract.session_items, with this
@@ -1517,6 +1545,7 @@ export class Store {
       if (c.anchor.quote && c.anchor.quote.length > 200) delete c.anchor.quote;
       delete c.draft;
       delete c.pins;
+      delete c.summary;   // an ask's summary (2026-11-23): the extractor and open_asks do not need it (bin/lib snapshot_copy drops it too)
       return c;
     });
     const cold = {};

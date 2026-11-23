@@ -8,7 +8,7 @@ from ._http import http_error, post, result
 
 URL = "https://api.anthropic.com/v1/messages"
 VERSION = "2026-10-21"
-MAX_TOKENS = 4000
+MAX_TOKENS = 8000          # was 4000 until every ask carried a summary (2026-11-23); billed by use, not by cap
 # $ per million tokens: (input, output) for prompts <= 100K tokens, then above.
 PRICES = {"claude-haiku-5-5": ((0.10, 0.50), (0.50, 2.50))}
 
